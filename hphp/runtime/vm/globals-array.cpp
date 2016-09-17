@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,13 +16,44 @@
 #include "hphp/runtime/vm/globals-array.h"
 
 #include "hphp/runtime/base/array-init.h"
-#include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/runtime-error.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
+
+static __thread GlobalsArray* g_variables;
+
+GlobalsArray* get_global_variables() {
+  assertx(g_variables != nullptr);
+  return g_variables;
+}
+
+GlobalsArray::GlobalsArray(NameValueTable* tab)
+  : ArrayData(kGlobalsKind)
+  , m_tab(tab)
+{
+  Variant arr(staticEmptyArray());
+#define X(s,v) tab->set(makeStaticString(#s), v.asTypedValue());
+
+  X(argc,                 init_null_variant);
+  X(argv,                 init_null_variant);
+  X(_SERVER,              arr);
+  X(_GET,                 arr);
+  X(_POST,                arr);
+  X(_COOKIE,              arr);
+  X(_FILES,               arr);
+  X(_ENV,                 arr);
+  X(_REQUEST,             arr);
+  X(_SESSION,             arr);
+  X(HTTP_RAW_POST_DATA,   init_null_variant);
+#undef X
+
+  g_variables = this;
+  assert(hasExactlyOneRef());
+}
 
 inline GlobalsArray* GlobalsArray::asGlobals(ArrayData* ad) {
   assert(ad->kind() == kGlobalsKind);
@@ -39,6 +70,7 @@ size_t GlobalsArray::Vsize(const ArrayData* ad) {
   // We need to iterate to find out the actual size, since kNamedLocalDataType
   // elements in the array may have been set to KindOfUninit.
   auto a = asGlobals(ad);
+  if (a->m_tab->leaked()) return 0;
   size_t count = 0;
   auto iter_limit = IterEnd(a);
   for (auto iter = IterBegin(a);
@@ -166,33 +198,27 @@ GlobalsArray::RemoveStr(ArrayData* ad, const StringData* k,
  * is currently $GLOBALS.
  */
 
-ArrayData*
-GlobalsArray::Append(ArrayData*, const Variant& v, bool copy) {
+ArrayData* GlobalsArray::Append(ArrayData*, Cell v, bool copy) {
   throw_not_implemented("append on $GLOBALS");
 }
 
-ArrayData*
-GlobalsArray::AppendRef(ArrayData*, Variant& v, bool copy) {
+ArrayData* GlobalsArray::AppendRef(ArrayData*, Variant&, bool) {
   throw_not_implemented("appendRef on $GLOBALS");
 }
 
-ArrayData*
-GlobalsArray::AppendWithRef(ArrayData*, const Variant& v, bool copy) {
+ArrayData* GlobalsArray::AppendWithRef(ArrayData*, const Variant&, bool) {
   throw_not_implemented("appendWithRef on $GLOBALS");
 }
 
-ArrayData*
-GlobalsArray::PlusEq(ArrayData*, const ArrayData* elems) {
+ArrayData* GlobalsArray::PlusEq(ArrayData*, const ArrayData*) {
   throw_not_implemented("plus on $GLOBALS");
 }
 
-ArrayData*
-GlobalsArray::Merge(ArrayData*, const ArrayData* elems) {
+ArrayData* GlobalsArray::Merge(ArrayData*, const ArrayData*) {
   throw_not_implemented("merge on $GLOBALS");
 }
 
-ArrayData*
-GlobalsArray::Prepend(ArrayData*, const Variant& v, bool copy) {
+ArrayData* GlobalsArray::Prepend(ArrayData*, Cell, bool) {
   throw_not_implemented("prepend on $GLOBALS");
 }
 
@@ -260,7 +286,7 @@ bool GlobalsArray::AdvanceMArrayIter(ArrayData* ad, MArrayIter& fp) {
   return true;
 }
 
-ArrayData* GlobalsArray::EscalateForSort(ArrayData* ad) {
+ArrayData* GlobalsArray::EscalateForSort(ArrayData* ad, SortFunction sf) {
   raise_warning("Sorting the $GLOBALS array is not supported");
   return ad;
 }
@@ -268,13 +294,13 @@ void GlobalsArray::Ksort(ArrayData*, int sort_flags, bool ascending) {}
 void GlobalsArray::Sort(ArrayData*, int sort_flags, bool ascending) {}
 void GlobalsArray::Asort(ArrayData*, int sort_flags, bool ascending) {}
 bool GlobalsArray::Uksort(ArrayData*, const Variant& cmp_function) {
-  return true;
+  return false;
 }
 bool GlobalsArray::Usort(ArrayData*, const Variant& cmp_function) {
-  return true;
+  return false;
 }
 bool GlobalsArray::Uasort(ArrayData*, const Variant& cmp_function) {
-  return true;
+  return false;
 }
 
 bool GlobalsArray::IsVectorData(const ArrayData*) {
@@ -283,12 +309,12 @@ bool GlobalsArray::IsVectorData(const ArrayData*) {
 
 ArrayData*
 GlobalsArray::CopyWithStrongIterators(const ArrayData* ad) {
-  throw FatalErrorException(
+  raise_fatal_error(
     "Unimplemented ArrayData::copyWithStrongIterators");
 }
 
-ArrayData* GlobalsArray::NonSmartCopy(const ArrayData*) {
-  throw FatalErrorException("GlobalsArray::nonSmartCopy "
+ArrayData* GlobalsArray::CopyStatic(const ArrayData*) {
+  raise_fatal_error("GlobalsArray::copyStatic "
     "not implemented.");
 }
 

@@ -1,7 +1,7 @@
 <?php
 
 function b($s) {
-  if (strlen($s) == 4) {
+  if ($s === 'floo') {
     return 12;
   }
   $GLOBALS['z'] = 234;
@@ -44,6 +44,7 @@ function main() {
   echo "Done enabling\n";
   f();
   $r = fb_disable_code_coverage();
+  unset($r['systemlib.phpfb']);
   var_dump($r);
 }
 main();

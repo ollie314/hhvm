@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,10 @@
 #ifndef incl_HPHP_RUNTIME_VM_RESUMABLE_H_
 #define incl_HPHP_RUNTIME_VM_RESUMABLE_H_
 
+#include "hphp/runtime/vm/act-rec.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/jit/types.h"
 
 namespace HPHP {
@@ -26,22 +28,44 @@ namespace HPHP {
 //////////////////////////////////////////////////////////////////////
 
 /**
- * Header of the resumable frame used by async functions and generators.
+ * Header of the resumable frame used by async functions:
  *
- * The memory is lay out as follows:
+ *     Header*     -> +--------------------------------+ low address
+ *                    | NativeNode kind=AsyncFuncFrame |
+ *                    +--------------------------------+
+ *                    | Function locals and iterators  |
+ *     Resumable*  -> +--------------------------------+
+ *                    | ActRec in Resumable            |
+ *                    +--------------------------------+
+ *                    | Rest of Resumable              |
+ *     ObjectData* -> +--------------------------------+
+ *                    | c_AsyncFuncWaitHandle          |
+ *                    +--------------------------------+ high address
  *
- *                +-------------------------+ high address
- *                |      Parent object      |
- *                +-------------------------+
- *                |    Rest of Resumable    |
- *                +-------------------------+
- *                |   ActRec in Resumable   |
- *                +-------------------------+
- *                |   Function locals and   |
- *                |   iterators             |
- * malloc ptr ->  +-------------------------+ low address
+ * Header of the native frame used by generators:
+ *
+ *     Header*     -> +--------------------------------+ low address
+ *                    | NativeNode NativeData          |
+ *                    +--------------------------------+
+ *                    | Function locals and iterators  |
+ * BaseGenerator*  -> +--------------------------------+
+ * < NativeData >     | ActRec in Resumable            |
+ *                    +--------------------------------+
+ *                    | Rest of Resumable              |
+ *                    +--------------------------------+
+ *                    | Rest of [Async]Generator       |
+ *     ObjectData* -> +--------------------------------+
+ *                    | Parent object                  |
+ *                    +--------------------------------+ high address
  */
-struct Resumable {
+struct alignas(16) Resumable {
+  // This function is used only by AFWH, temporary till AFWH is converted to HNI
+  static Resumable* FromObj(ObjectData* obj) {
+    return reinterpret_cast<Resumable*>(obj) - 1;
+  }
+  static const Resumable* FromObj(const ObjectData* obj) {
+    return reinterpret_cast<const Resumable*>(obj) - 1;
+  }
   static constexpr ptrdiff_t arOff() {
     return offsetof(Resumable, m_actRec);
   }
@@ -51,55 +75,77 @@ struct Resumable {
   static constexpr ptrdiff_t resumeOffsetOff() {
     return offsetof(Resumable, m_resumeOffset);
   }
-  static constexpr ptrdiff_t objectOff() {
+  static constexpr ptrdiff_t dataOff() {
     return sizeof(Resumable);
   }
+  static constexpr size_t getFrameSize(size_t numSlots) {
+    return numSlots * sizeof(TypedValue);
+  }
 
-  template <bool clone>
-  static void* Create(const ActRec* fp, size_t numSlots, jit::TCA resumeAddr,
-                      Offset resumeOffset, size_t objSize) {
+  // This function is temporary till we move AFWH to HNI
+  static Resumable* Create(size_t frameSize, size_t totalSize) {
+    // Allocate memory.
+    auto node = reinterpret_cast<NativeNode*>(MM().objMalloc(totalSize));
+    auto frame = reinterpret_cast<char*>(node + 1);
+    auto resumable = reinterpret_cast<Resumable*>(frame + frameSize);
+    node->obj_offset = sizeof(NativeNode) + frameSize + sizeof(Resumable);
+    node->hdr.kind = HeaderKind::AsyncFuncFrame;
+    return resumable;
+  }
+
+  template<bool clone,
+           bool mayUseVV = true>
+  void initialize(const ActRec* fp, jit::TCA resumeAddr,
+                  Offset resumeOffset, size_t frameSize, size_t totalSize) {
     assert(fp);
     assert(fp->resumed() == clone);
-    DEBUG_ONLY auto const func = fp->func();
+    auto const func = fp->func();
     assert(func);
     assert(func->isResumable());
     assert(func->contains(resumeOffset));
-
-    // Allocate memory.
-    size_t frameSize = numSlots * sizeof(TypedValue);
-    size_t totalSize = frameSize + sizeof(Resumable) + objSize;
-    auto mem = smart_malloc(totalSize);
-    auto resumable = (Resumable*)((char*)mem + frameSize);
-    auto actRec = resumable->actRec();
+    // Check memory alignment
+    assert((((uintptr_t) actRec()) & (sizeof(Cell) - 1)) == 0);
 
     if (!clone) {
       // Copy ActRec, locals and iterators
-      auto src = (void *)((uintptr_t)fp - frameSize);
-      memcpy(mem, src, frameSize + sizeof(ActRec));
+      auto src = reinterpret_cast<const char*>(fp) - frameSize;
+      auto dst = reinterpret_cast<char*>(actRec()) - frameSize;
+      wordcpy(dst, src, frameSize + sizeof(ActRec));
 
       // Set resumed flag.
-      actRec->setResumed();
+      actRec()->setResumed();
 
       // Suspend VarEnv if needed
-      if (UNLIKELY(fp->hasVarEnv())) {
-        fp->getVarEnv()->suspend(fp, actRec);
+      assert(mayUseVV || !(func->attrs() & AttrMayUseVV));
+      if (mayUseVV &&
+          UNLIKELY(func->attrs() & AttrMayUseVV) &&
+          UNLIKELY(fp->hasVarEnv())) {
+        fp->getVarEnv()->suspend(fp, actRec());
       }
     } else {
       // If we are cloning a Resumable, only copy the ActRec. The
       // caller will take care of copying locals, setting the VarEnv, etc.
-      memcpy(actRec, fp, sizeof(ActRec));
+      // When called from AFWH::Create or Generator::Create we know we are
+      // going to overwrite m_sfp and m_savedRip, so don't copy them here.
+      auto src = reinterpret_cast<const char*>(fp);
+      auto dst = reinterpret_cast<char*>(actRec());
+      const size_t offset = offsetof(ActRec, m_func);
+      wordcpy(dst + offset, src + offset, sizeof(ActRec) - offset);
     }
 
     // Populate Resumable.
-    resumable->m_resumeAddr = resumeAddr;
-    resumable->m_resumeOffset = resumeOffset;
-    resumable->m_size = totalSize;
+    m_resumeAddr = resumeAddr;
+    m_offsetAndSize = (totalSize << 32 | resumeOffset);
+  }
 
-    // Return pointer to the parent object.
-    return resumable + 1;
+  template<class T> static void Destroy(size_t size, T* obj) {
+    auto const base = reinterpret_cast<char*>(obj + 1) - size;
+    obj->~T();
+    MM().objFree(base, size);
   }
 
   ActRec* actRec() { return &m_actRec; }
+  const ActRec* actRec() const { return &m_actRec; }
   jit::TCA resumeAddr() const { return m_resumeAddr; }
   Offset resumeOffset() const {
     assert(m_actRec.func()->contains(m_resumeOffset));
@@ -114,25 +160,23 @@ struct Resumable {
   }
 
 private:
-  static ptrdiff_t sizeForFunc(const Func* func) {
-    assert(func->isResumable());
-    return sizeof(Iter) * func->numIterators() +
-           sizeof(TypedValue) * func->numLocals() +
-           sizeof(Resumable);
-  }
-
   // ActRec of the resumed frame.
   ActRec m_actRec;
 
   // Resume address.
   jit::TCA m_resumeAddr;
 
-  // Resume offset.
-  Offset m_resumeOffset;
+  // Resume offset: bytecode offset from start of Unit's bytecode.
+  union {
+    struct {
+      Offset m_resumeOffset;
 
-  // Size of the smart allocated memory that includes this resumable.
-  int32_t m_size;
-} __attribute__((__aligned__(16)));
+      // Size of the memory block that includes this resumable.
+      int32_t m_size;
+    };
+    uint64_t m_offsetAndSize;
+  };
+};
 
 static_assert(Resumable::arOff() == 0,
               "ActRec must be in the beginning of Resumable");

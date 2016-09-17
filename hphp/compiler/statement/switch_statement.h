@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,25 +30,23 @@ namespace HPHP {
 DECLARE_BOOST_TYPES(StatementList);
 DECLARE_BOOST_TYPES(SwitchStatement);
 
-class SwitchStatement : public Statement {
-public:
+struct SwitchStatement : Statement {
   SwitchStatement(STATEMENT_CONSTRUCTOR_PARAMETERS,
                   ExpressionPtr exp, StatementListPtr cases);
 
   DECLARE_STATEMENT_VIRTUAL_FUNCTIONS;
-  virtual bool hasDecl() const;
-  virtual bool hasRetExp() const;
-  virtual int getRecursiveCount() const;
+  bool hasDecl() const override;
+  bool hasRetExp() const override;
+  int getRecursiveCount() const override;
 
   ExpressionPtr getExp() const { return m_exp; }
   StatementListPtr getCases() const { return m_cases; }
 private:
-  typedef std::pair<int, CaseStatementPtr> StatementPtrWithPos;
-  typedef std::vector<StatementPtrWithPos> StatementPtrWithPosVec;
-  typedef std::shared_ptr<StatementPtrWithPosVec> 
-    StatementPtrWithPosVecPtr;
-	typedef std::map<uint64_t, StatementPtrWithPosVecPtr> 
-    MapIntToStatementPtrWithPosVec; 
+  using StatementPtrWithPos = std::pair<int, CaseStatementPtr>;
+  using StatementPtrWithPosVec = std::vector<StatementPtrWithPos>;
+  using StatementPtrWithPosVecPtr = std::shared_ptr<StatementPtrWithPosVec>;
+  using MapIntToStatementPtrWithPosVec =
+    std::map<uint64_t, StatementPtrWithPosVecPtr>;
   ExpressionPtr m_exp;
   StatementListPtr m_cases;
 };

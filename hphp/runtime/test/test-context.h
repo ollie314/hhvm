@@ -16,7 +16,6 @@
 #ifndef incl_HPHP_TEST_CONTEXT_H_
 #define incl_HPHP_TEST_CONTEXT_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/jit/translator.h"
 
 namespace HPHP { namespace jit {
@@ -24,7 +23,9 @@ namespace HPHP { namespace jit {
 //////////////////////////////////////////////////////////////////////
 
 // A TransContext for use in tests.
-const auto test_context = TransContext { kInvalidTransID, 0, 0, false, 0 };
+const auto test_context =
+  TransContext { kInvalidTransID, TransKind::Live, TransFlags{},
+                 SrcKey{}, FPInvOffset{0} };
 
 //////////////////////////////////////////////////////////////////////
 

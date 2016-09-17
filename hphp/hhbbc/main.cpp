@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,7 +22,6 @@
 #include <memory>
 #include <cstdint>
 #include <algorithm>
-#include <unistd.h>
 #include <exception>
 #include <utility>
 #include <vector>
@@ -32,6 +31,7 @@
 
 #include <folly/ScopeGuard.h>
 #include <folly/String.h>
+#include <folly/portability/Unistd.h>
 
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/hhvm/process-init.h"
@@ -39,6 +39,7 @@
 #include "hphp/runtime/vm/repo-global-data.h"
 
 #include "hphp/hhbbc/misc.h"
+#include "hphp/hhbbc/stats.h"
 #include "hphp/hhbbc/parallel.h"
 
 namespace HPHP { namespace HHBBC {
@@ -75,6 +76,9 @@ void parse_options(int argc, char** argv) {
     ("input",
       po::value(&input_repo)->default_value("hhvm.hhbc"),
       "input hhbc repo path")
+    ("stats-file",
+      po::value(&options.stats_file)->default_value(""),
+      "stats file path")
     ("no-optimizations",
       po::bool_switch(&options.NoOptimizations),
       "turn off all optimizations")
@@ -125,8 +129,6 @@ void parse_options(int argc, char** argv) {
     ("func-families",           po::value(&options.FuncFamilies))
 
     ("hard-const-prop",         po::value(&options.HardConstProp))
-    ("hard-type-hints",         po::value(&options.HardTypeHints))
-    ("hard-return-type-hints",  po::value(&options.HardReturnTypeHints))
     ("hard-private-prop",       po::value(&options.HardPrivatePropInference))
     ("disallow-dyn-var-env-funcs",
                                 po::value(&options.DisallowDynamicVarEnvFuncs))
@@ -174,7 +176,7 @@ void parse_options(int argc, char** argv) {
   logging = !no_logging;
 }
 
-void validate_options() {
+UNUSED void validate_options() {
   if (parallel::work_chunk <= 10 || parallel::num_threads < 1) {
     std::cerr << "Invalid parallelism configuration.\n";
     std::exit(1);
@@ -204,11 +206,14 @@ std::vector<std::unique_ptr<UnitEmitter>> load_input() {
   trace_time timer("load units");
 
   open_repo(input_repo);
+  Repo::get().loadGlobalData();
   SCOPE_EXIT { Repo::shutdown(); };
 
   if (Repo::get().global().UsedHHBBC) {
-    throw std::runtime_error("This hhbc repo has already been "
-      "optimized by hhbbc");
+    throw std::runtime_error(
+      "This hhbc repo has already been optimized by hhbbc.\n"
+      "Re-running hhbbc is known to be buggy, and will corrupt your repo."
+    );
   }
 
   return parallel::map(
@@ -233,8 +238,13 @@ void write_output(std::vector<std::unique_ptr<UnitEmitter>> ues,
   gd.HardReturnTypeHints      = options.HardReturnTypeHints;
   gd.HardPrivatePropInference = options.HardPrivatePropInference;
   gd.DisallowDynamicVarEnvFuncs = options.DisallowDynamicVarEnvFuncs;
+  gd.PHP7_IntSemantics        = RuntimeOption::PHP7_IntSemantics;
+  gd.PHP7_ScalarTypes         = RuntimeOption::PHP7_ScalarTypes;
+  gd.PHP7_Substr              = RuntimeOption::PHP7_Substr;
+  gd.AutoprimeGenerators      = RuntimeOption::AutoprimeGenerators;
 
   gd.arrayTypeTable.repopulate(*arrTable);
+  // NOTE: There's no way to tell if saveGlobalData() fails for some reason.
   Repo::get().saveGlobalData(gd);
 }
 
@@ -280,19 +290,18 @@ int main(int argc, char** argv) try {
   RuntimeOption::RepoJournal         = "memory";
   RuntimeOption::RepoCommit          = false;
   RuntimeOption::EvalJit             = false;
-
-  register_process_init();
-  initialize_repo();
-  Repo::shutdown();
-
-  hphp_process_init();
-
   // We only need to set this flag so Repo::global will let us access
   // it.
   RuntimeOption::RepoAuthoritative = true;
 
+  register_process_init();
+  initialize_repo();
+
+  hphp_process_init();
+  Repo::shutdown();
+
   Trace::BumpRelease bumper(Trace::hhbbc_time, -1, logging);
-  compile_repo();
+  compile_repo(); // NOTE: errors ignored
   return 0;
 }
 

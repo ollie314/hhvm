@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,8 +25,7 @@
   HPHPD_CLIENT_SETTING(SmallStep,           bool,  false)         \
   HPHPD_CLIENT_SETTING(ShortPrintCharCount, int,   200)           \
 
-class DebuggerClientSettings {
-public:
+struct DebuggerClientSettings {
 #define HPHPD_CLIENT_SETTING(name, type, defval) type m_s##name;
   HPHPD_CLIENT_SETTINGS
 #undef HPHPD_CLIENT_SETTING
@@ -56,8 +55,8 @@ void setDebuggerClient##name (const type &in##name) {   \
 HPHPD_CLIENT_SETTINGS
 
 
-// leaving HPHPD_CLIENT_SETTING defined so that DECLARE_DBG_SETTING_ACCESSORS is
-// effective
+// Leaving HPHPD_CLIENT_SETTING defined so that DECLARE_DBG_SETTING_ACCESSORS is
+// effective.
 
 ///////////////////////////////////////////////////////////////////////////////
 

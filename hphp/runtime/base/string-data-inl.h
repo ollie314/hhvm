@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,29 +16,17 @@
 #ifndef incl_HPHP_RUNTIME_BASE_STRING_DATA_INL_H_
 #define incl_HPHP_RUNTIME_BASE_STRING_DATA_INL_H_
 
-#include "hphp/runtime/base/cap-code.h"
-
 namespace HPHP {
-
-//////////////////////////////////////////////////////////////////////
-
-inline StringData* StringData::Make() {
-  return Make(SmallStringReserve);
-}
 
 //////////////////////////////////////////////////////////////////////
 // CopyString
 
-inline StringData* StringData::Make(const char* data) {
-  return Make(data, CopyString);
+inline StringData* StringData::Make(folly::StringPiece s) {
+  return Make(s.begin(), s.size(), CopyString);
 }
 
 inline StringData* StringData::Make(const char* data, CopyStringMode) {
   return Make(data, strlen(data), CopyString);
-}
-
-inline StringData* StringData::Make(const StringData* s, CopyStringMode) {
-  return Make(s->slice(), CopyString);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -55,11 +43,7 @@ inline StringData* StringData::Make(char* data, AttachStringMode) {
 // Concat creation
 
 inline StringData* StringData::Make(const StringData* s1,
-                                    const StringData* s2) {
-  return Make(s1->slice(), s2->slice());
-}
-
-inline StringData* StringData::Make(const StringData* s1, StringSlice s2) {
+                                    folly::StringPiece s2) {
   return Make(s1->slice(), s2);
 }
 
@@ -69,22 +53,13 @@ inline StringData* StringData::Make(const StringData* s1, const char* lit2) {
 
 //////////////////////////////////////////////////////////////////////
 
-inline void StringData::setRefCount(RefCount n) { m_count = n; }
-inline bool StringData::isStatic() const {
-  return m_count == StaticValue;
+inline folly::StringPiece StringData::slice() const {
+  return folly::StringPiece{data(), m_len};
 }
 
-inline bool StringData::isUncounted() const {
-  return m_count == UncountedValue;
-}
-
-inline StringSlice StringData::slice() const {
-  return StringSlice(m_data, m_len);
-}
-
-inline MutableSlice StringData::bufferSlice() {
+inline folly::MutableStringPiece StringData::bufferSlice() {
   assert(!isImmutable());
-  return MutableSlice(m_data, capacity());
+  return folly::MutableStringPiece{mutableData(), capacity()};
 }
 
 inline void StringData::invalidateHash() {
@@ -97,9 +72,9 @@ inline void StringData::invalidateHash() {
 inline void StringData::setSize(int len) {
   assert(len >= 0 && len <= capacity() && !isImmutable());
   assert(!hasMultipleRefs());
-  m_data[len] = 0;
-  m_len = len;
-  m_hash = 0;
+  mutableData()[len] = 0;
+  m_lenAndHash = len;
+  assert(m_hash == 0);
   assert(checkSane());
 }
 
@@ -109,21 +84,28 @@ inline void StringData::checkStack() const {
 
 inline const char* StringData::data() const {
   // TODO: t1800106: re-enable this assert
-  //assert(m_data[size()] == 0); // all strings must be null-terminated
+  // assert(data()[size()] == 0); // all strings must be null-terminated
+#ifdef NO_M_DATA
+  return reinterpret_cast<const char*>(this + 1);
+#else
   return m_data;
+#endif
 }
 
-inline char* StringData::mutableData() const { return m_data; }
+inline char* StringData::mutableData() const {
+  assert(!isImmutable());
+  return const_cast<char*>(data());
+}
+
 inline int StringData::size() const { return m_len; }
 inline bool StringData::empty() const { return size() == 0; }
 inline uint32_t StringData::capacity() const {
-  assert(m_kind == HeaderKind::String);
-  return packedCodeToCap(m_capCode - (HeaderKind::String << 24));
+  return m_hdr.aux.decode();
 }
 
 inline size_t StringData::heapSize() const {
-  return isFlat() ? sizeof(StringData) + capacity() :
-         sizeof(StringData) + sizeof(SharedPayload);
+  return isFlat() ? sizeof(StringData) + 1 + capacity() :
+         sizeof(StringData) + sizeof(Proxy);
 }
 
 inline bool StringData::isStrictlyInteger(int64_t& res) const {
@@ -137,7 +119,7 @@ inline bool StringData::isStrictlyInteger(int64_t& res) const {
   }
   if (isStatic() && m_hash < 0) return false;
   auto const s = slice();
-  return is_strictly_integer(s.ptr, s.len, res);
+  return is_strictly_integer(s.data(), s.size(), res);
 }
 
 inline bool StringData::isZero() const  {
@@ -148,8 +130,8 @@ inline StringData* StringData::modifyChar(int offset, char c) {
   assert(offset >= 0 && offset < size());
   assert(!hasMultipleRefs());
 
-  auto const sd = isShared() ? escalate(size()) : this;
-  sd->m_data[offset] = c;
+  auto const sd = isProxy() ? escalate(size()) : this;
+  sd->mutableData()[offset] = c;
   sd->m_hash = 0;
   return sd;
 }
@@ -161,13 +143,12 @@ inline strhash_t StringData::hash() const {
 
 inline bool StringData::same(const StringData* s) const {
   assert(s);
-  size_t len = m_len;
-  if (len != s->m_len) return false;
-  // The underlying buffer and its length are 32-bit aligned, ensured by
-  // StringData layout, smart_malloc, or malloc. So compare words.
-  assert(uintptr_t(data()) % 4 == 0);
-  assert(uintptr_t(s->data()) % 4 == 0);
-  return wordsame(data(), s->data(), len);
+  if (m_len != s->m_len) return false;
+  // The underlying buffer and its length are 8-byte aligned, ensured by
+  // StringData layout, req::malloc, or malloc. So compare words.
+  assert(uintptr_t(data()) % 8 == 0);
+  assert(uintptr_t(s->data()) % 8 == 0);
+  return wordsame(data(), s->data(), m_len);
 }
 
 inline bool StringData::isame(const StringData* s) const {
@@ -178,20 +159,23 @@ inline bool StringData::isame(const StringData* s) const {
 
 //////////////////////////////////////////////////////////////////////
 
-inline const void* StringData::voidPayload() const { return this + 1; }
-inline void* StringData::voidPayload() { return this + 1; }
+inline const void* StringData::payload() const { return this + 1; }
+inline void* StringData::payload() { return this + 1; }
 
-inline const StringData::SharedPayload* StringData::sharedPayload() const {
-  return static_cast<const SharedPayload*>(voidPayload());
+inline const StringData::Proxy* StringData::proxy() const {
+  return static_cast<const Proxy*>(payload());
 }
-inline StringData::SharedPayload* StringData::sharedPayload() {
-  return static_cast<SharedPayload*>(voidPayload());
+inline StringData::Proxy* StringData::proxy() {
+  return static_cast<Proxy*>(payload());
 }
 
-inline bool StringData::isFlat() const { return m_data == voidPayload(); }
-inline bool StringData::isShared() const { return m_data != voidPayload(); }
+#ifndef NO_M_DATA
+inline bool StringData::isFlat() const { return m_data == payload(); }
+inline bool StringData::isProxy() const { return m_data != payload(); }
+#endif
+
 inline bool StringData::isImmutable() const {
-  return isStatic() || isShared() ||  isUncounted();
+  return !isRefCounted() || isProxy();
 }
 
 //////////////////////////////////////////////////////////////////////

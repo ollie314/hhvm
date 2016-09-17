@@ -1,5 +1,4 @@
 <?hh
-// Copyright 2004-present Facebook. All Rights Reserved.
 
 error_reporting(-1);
 function handler($errno, $errmsg) {
@@ -36,8 +35,8 @@ function f7($p): array { return $p; }
 function f7_soft($p): @array { return $p; }
 function f8($p): callable { return $p; }
 function f8_soft($p): @callable { return $p; }
-function f9($p): Shapes { return $p; }
-function f9_soft($p): @Shapes { return $p; }
+function f9($p): Figure { return $p; }
+function f9_soft($p): @Figure { return $p; }
 function f10($p): Square { return $p; }
 function f10_soft($p): @Square { return $p; }
 function f11($p): :div { return $p; }
@@ -60,10 +59,12 @@ function f19($p): (function(int): int) { return $p; }
 function f19_soft($p): @(function(int): int) { return $p; }
 function f20($p): callable { return $p; }
 function f20_soft($p): @callable { return $p; }
+function f21($p): noreturn { return $p; }
+function f21_soft($p): @noreturn { return $p; }
 
-class Shapes {}
-class Square extends Shapes {}
-class Fractal<T> extends Shapes {}
+class Figure {}
+class Square extends Figure {}
+class Fractal<T> extends Figure {}
 class :div {}
 
 class A {}
@@ -91,7 +92,7 @@ function call_wrapper($fn, $arg) {
 }
 
 function main() {
-  for ($i = 1; $i <= 20; $i++) {
+  for ($i = 1; $i <= 21; $i++) {
     foreach (array('', '_soft') as $suffix) {
       if ($suffix !== '' && $i === 1) {
         // f1_soft() does not exist
@@ -107,7 +108,7 @@ function main() {
       call_wrapper($f, imagecreate(10, 10));
       call_wrapper($f, array());
       call_wrapper($f, function($x){return $x*$x;});
-      call_wrapper($f, new Shapes());
+      call_wrapper($f, new Figure());
       call_wrapper($f, new Square());
       call_wrapper($f, new Fractal());
       call_wrapper($f, <div/>);
@@ -147,7 +148,7 @@ function main() {
     call_wrapper($f, imagecreate(10, 10));
     call_wrapper($f, array());
     call_wrapper($f, function($x){return $x*$x;});
-    call_wrapper($f, new Shapes());
+    call_wrapper($f, new Figure());
     call_wrapper($f, new Square());
     call_wrapper($f, new Fractal());
     call_wrapper($f, <div/>);

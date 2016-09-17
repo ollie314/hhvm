@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,92 +22,46 @@
 #include <string>
 
 #define STATEMENT_CONSTRUCTOR_BASE_PARAMETERS                           \
-  BlockScopePtr scope, LabelScopePtr labelScope, LocationPtr loc, \
-  Statement::KindOf kindOf
+  BlockScopePtr scope, LabelScopePtr labelScope,                        \
+  const Location::Range& r, Construct::KindOf kindOf
 #define STATEMENT_CONSTRUCTOR_BASE_PARAMETER_VALUES                     \
-  scope, labelScope, loc, kindOf
+  scope, labelScope, r, kindOf
 #define STATEMENT_CONSTRUCTOR_PARAMETERS                                \
-  BlockScopePtr scope, LabelScopePtr labelScope, LocationPtr loc
+  BlockScopePtr scope, LabelScopePtr labelScope, const Location::Range& r
 #define STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(kindOf)                  \
-  scope, labelScope, loc, Statement::KindOf##kindOf
+  scope, labelScope, r, Statement::KindOf##kindOf
 #define DECLARE_BASE_STATEMENT_VIRTUAL_FUNCTIONS                        \
-  virtual void analyzeProgram(AnalysisResultPtr ar);                    \
-  virtual StatementPtr clone();                                         \
-  virtual void outputCodeModel(CodeGenerator &cg);                      \
-  virtual void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar);
+  void analyzeProgram(AnalysisResultPtr ar) override;                   \
+  StatementPtr clone() override;                                        \
+  void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) override;
 #define DECLARE_STATEMENT_VIRTUAL_FUNCTIONS                             \
   DECLARE_BASE_STATEMENT_VIRTUAL_FUNCTIONS;                             \
-  virtual ConstructPtr getNthKid(int n) const;                          \
-  virtual int getKidCount() const;                                      \
-  virtual void setNthKid(int n, ConstructPtr cp)
-#define NULL_STATEMENT()                                                \
-  BlockStatementPtr(new BlockStatement(getScope(),          \
-                                       getLabelScope(),     \
-                                       getLocation(),       \
-                                       StatementListPtr()))
+  ConstructPtr getNthKid(int n) const override;                         \
+  int getKidCount() const override;                                     \
+  void setNthKid(int n, ConstructPtr cp) override
+
+#define NULL_STATEMENT()                                    \
+  std::make_shared<BlockStatement>(getScope(),              \
+                                   getLabelScope(),         \
+                                   getRange(),              \
+                                   StatementListPtr())
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 DECLARE_BOOST_TYPES(Statement);
 DECLARE_BOOST_TYPES(LabelScope);
 
-#define DECLARE_STATEMENT_TYPES(x)              \
-    x(FunctionStatement),                       \
-    x(ClassStatement),                          \
-    x(InterfaceStatement),                      \
-    x(ClassVariable),                           \
-    x(ClassConstant),                           \
-    x(MethodStatement),                         \
-    x(StatementList),                           \
-    x(BlockStatement),                          \
-    x(IfBranchStatement),                       \
-    x(IfStatement),                             \
-    x(WhileStatement),                          \
-    x(DoStatement),                             \
-    x(ForStatement),                            \
-    x(SwitchStatement),                         \
-    x(CaseStatement),                           \
-    x(BreakStatement),                          \
-    x(ContinueStatement),                       \
-    x(ReturnStatement),                         \
-    x(GlobalStatement),                         \
-    x(StaticStatement),                         \
-    x(EchoStatement),                           \
-    x(UnsetStatement),                          \
-    x(ExpStatement),                            \
-    x(ForEachStatement),                        \
-    x(FinallyStatement),                        \
-    x(CatchStatement),                          \
-    x(TryStatement),                            \
-    x(ThrowStatement),                          \
-    x(GotoStatement),                           \
-    x(LabelStatement),                          \
-    x(UseTraitStatement),                       \
-    x(ClassRequireStatement),                   \
-    x(TraitPrecStatement),                      \
-    x(TraitAliasStatement),                     \
-    x(TypedefStatement)
-
-class Statement : public Construct {
-public:
-#define DEC_STMT_ENUM(x) KindOf##x
-  enum KindOf {
-    DECLARE_STATEMENT_TYPES(DEC_STMT_ENUM)
-    /* KindOfCount = 29 */
-  };
+struct Statement : Construct {
+private:
   static const char *Names[];
+
+public:
+  static const char* nameOfKind(Construct::KindOf);
 
 protected:
   Statement(STATEMENT_CONSTRUCTOR_BASE_PARAMETERS);
 
 public:
-
-  /**
-   * Type checking without RTTI.
-   */
-  bool is(KindOf type) const { return m_kindOf == type;}
-  KindOf getKindOf() const { return m_kindOf;}
-
   /**
    * This is to avoid dynamic casting to StatementList in Parser.
    */
@@ -148,7 +102,6 @@ public:
   void setLabelScope(LabelScopePtr labelScope) { m_labelScope = labelScope; }
 
 protected:
-  KindOf m_kindOf;
   int m_silencerCountMax;
   int m_silencerCountCurrent;
   LabelScopePtr m_labelScope;

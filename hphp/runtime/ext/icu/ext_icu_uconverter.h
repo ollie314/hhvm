@@ -1,7 +1,7 @@
-#ifndef incl_HPHP_ICU_ITERATOR_H
-#define incl_HPHP_ICU_ITERATOR_H
+#ifndef incl_HPHP_ICU_UCONVERTER_H
+#define incl_HPHP_ICU_UCONVERTER_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/ucnv.h>
@@ -11,12 +11,11 @@ namespace HPHP { namespace Intl {
 
 extern const StaticString s_UConverter;
 
-class IntlUConverter : public IntlError {
-public:
+struct IntlUConverter : IntlError {
   IntlUConverter() {}
   IntlUConverter(const IntlUConverter& src) = delete;
   IntlUConverter& operator=(const IntlUConverter& src) {
-    *this = src;
+    IntlError::operator =(src);
     char *buffer[U_CNV_SAFECLONE_BUFFERSIZE];
     int32_t bufferSize = U_CNV_SAFECLONE_BUFFERSIZE;
     UErrorCode error = U_ZERO_ERROR;

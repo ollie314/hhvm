@@ -8,6 +8,7 @@ SRC = \
   hh_json.ml\
   ide.ml\
   pos.ml\
+  file_pos.ml\
   ident.ml\
   errors.ml\
   utils.ml\
@@ -20,6 +21,7 @@ SRC = \
   namespace_env.ml\
   ast.ml\
   namespaces.ml\
+  fixmes.ml\
   parser_heap.ml\
   lexing_modes.ml\
   lexer_hack.ml\
@@ -28,16 +30,17 @@ SRC = \
   typing_reason.ml\
   nast.ml\
   typing_defs.ml\
+  typing_heap.ml\
   typing_env.ml\
+  typing_unify_recursive.ml\
   naming_heap.ml\
-  naming_ast_helpers.ml\
   naming.ml\
   prefix.ml\
   typing_print.ml\
   typing_utils.ml\
   typing_exts.ml\
   typing_instantiate.ml\
-  nastVisitor.ml\
+  nast_visitor.ml\
   typing_alias.ml\
   typing_tdef.ml\
   typing_unify.ml\
@@ -59,14 +62,16 @@ SRC = \
   typing_inherit.ml\
   typing_variance.ml\
   typing_decl.ml\
+  typing_structure.ml\
   pp.ml\
   colorFile.ml\
   fileOutline.ml\
   format_hack.ml\
   hh_ide.ml\
-  typeVisitor.ml\
+  type_visitor.ml\
   coverage_level.ml\
-  typingEqualityCheck.ml\
+  typing_equality_check.ml\
+  typing_taccess.ml\
 
 INCLUDEDIRS=$(shell ocamlfind -query js_of_ocaml)
 
@@ -93,178 +98,187 @@ deploy: hh_ide.js
 
 #TODO: a bid sad to do that, can probably just reuse the lib.cma
 lexer_hack.ml: $(TOP)/parsing/lexer_hack.ml
-	cp $(TOP)/parsing/lexer_hack.ml .
+	cp $< .
 
 format_hack.ml: $(TOP)/parsing/format_hack.ml
-	cp $(TOP)/parsing/format_hack.ml .
+	cp $< .
 
 parser_hack.ml: $(TOP)/parsing/parser_hack.ml
-	cp $(TOP)/parsing/parser_hack.ml .
+	cp $< .
 
 pos.ml: $(TOP)/utils/pos.ml
-	cp $(TOP)/utils/pos.ml .
+	cp $< .
+
+file_pos.ml: $(TOP)/utils/file_pos.ml
+	cp $< .
 
 ide.ml: $(TOP)/globals/ide.ml
-	cp $(TOP)/globals/ide.ml .
+	cp $< .
 
 prefix.ml: $(TOP)/heap/prefix.ml
-	cp $(TOP)/heap/prefix.ml .
+	cp $< .
 
 value.ml: $(TOP)/heap/value.ml
-	cp $(TOP)/heap/value.ml .
+	cp $< .
 
 socket.ml: $(TOP)/socket/socket.ml
-	cp $(TOP)/socket/socket.ml .
+	cp $< .
 
 namespace_env.ml: $(TOP)/parsing/namespace_env.ml
-	cp $(TOP)/parsing/namespace_env.ml .
+	cp $< .
 
 ast.ml: $(TOP)/parsing/ast.ml
-	cp $(TOP)/parsing/ast.ml .
+	cp $< .
 
 namespaces.ml: $(TOP)/parsing/namespaces.ml
-	cp $(TOP)/parsing/namespaces.ml .
+	cp $< .
 
 parser_heap.ml: $(TOP)/parsing/parser_heap.ml
-	cp $(TOP)/parsing/parser_heap.ml .
+	cp $< .
+
+fixmes.ml: $(TOP)/parsing/fixmes.ml
+	cp $< .
 
 parser.ml: $(TOP)/parsing/parser.ml
-	cp $(TOP)/parsing/parser.ml .
+	cp $< .
 
 lexer.ml: $(TOP)/parsing/lexer.ml
-	cp $(TOP)/parsing/lexer.ml .
+	cp $< .
 
 hackedLexer.ml: $(TOP)/parsing/hackedLexer.ml
-	cp $(TOP)/parsing/hackedLexer.ml .
+	cp $< .
 
 tokenType.ml: $(TOP)/parsing/tokenType.ml
-	cp $(TOP)/parsing/tokenType.ml .
+	cp $< .
 
 fileInfo.ml: $(TOP)/deps/fileInfo.ml
-	cp $(TOP)/deps/fileInfo.ml .
+	cp $< .
 
 lexing_modes.ml: $(TOP)/parsing/lexing_modes.ml
-	cp $(TOP)/parsing/lexing_modes.ml .
+	cp $< .
 
 typing_suggest.ml: $(TOP)/typing/typing_suggest.ml
-	cp $(TOP)/typing/typing_suggest.ml .
+	cp $< .
 
 typing_utils.ml: $(TOP)/typing/typing_utils.ml
-	cp $(TOP)/typing/typing_utils.ml .
+	cp $< .
 
-typeVisitor.ml: $(TOP)/typing/typeVisitor.ml
-	cp $(TOP)/typing/typeVisitor.ml .
+type_visitor.ml: $(TOP)/typing/type_visitor.ml
+	cp $< .
 
 coverage_level.ml: $(TOP)/typing/coverage_level.ml
-	cp $(TOP)/typing/coverage_level.ml .
+	cp $< .
 
 typing_dynamic_yield.ml: $(TOP)/typing/typing_dynamic_yield.ml
-	cp $(TOP)/typing/typing_dynamic_yield.ml .
+	cp $< .
 
 typing_enum.ml: $(TOP)/typing/typing_enum.ml
-	cp $(TOP)/typing/typing_enum.ml .
+	cp $< .
 
 typing_print.ml: $(TOP)/typing/typing_print.ml
-	cp $(TOP)/typing/typing_print.ml .
+	cp $< .
 
 typing_exts.ml: $(TOP)/typing/typing_exts.ml
-	cp $(TOP)/typing/typing_exts.ml .
+	cp $< .
 
 typing_expand.ml: $(TOP)/typing/typing_expand.ml
-	cp $(TOP)/typing/typing_expand.ml .
+	cp $< .
 
 typing_async.ml: $(TOP)/typing/typing_async.ml
-	cp $(TOP)/typing/typing_async.ml .
+	cp $< .
 
 typing_hint.ml: $(TOP)/typing/typing_hint.ml
-	cp $(TOP)/typing/typing_hint.ml .
+	cp $< .
 
 typing_extends.ml: $(TOP)/typing/typing_extends.ml
-	cp $(TOP)/typing/typing_extends.ml .
+	cp $< .
 
 typing.ml: $(TOP)/typing/typing.ml
-	cp $(TOP)/typing/typing.ml .
+	cp $< .
 
 typing_variance.ml: $(TOP)/typing/typing_variance.ml
-	cp $(TOP)/typing/typing_variance.ml .
+	cp $< .
 
 typing_decl.ml: $(TOP)/typing/typing_decl.ml
-	cp $(TOP)/typing/typing_decl.ml .
+	cp $< .
 
 typing_inherit.ml: $(TOP)/typing/typing_inherit.ml
-	cp $(TOP)/typing/typing_inherit.ml .
+	cp $< .
 
 nast.ml: $(TOP)/naming/nast.ml
-	cp $(TOP)/naming/nast.ml .
+	cp $< .
 
-nastVisitor.ml: $(TOP)/naming/nastVisitor.ml
-	cp $(TOP)/naming/nastVisitor.ml .
+nast_visitor.ml: $(TOP)/naming/nast_visitor.ml
+	cp $< .
 
 nastCheck.ml: $(TOP)/typing/nastCheck.ml
-	cp $(TOP)/typing/nastCheck.ml .
+	cp $< .
 
 nast_terminality.ml: $(TOP)/typing/nast_terminality.ml
-	cp $^ .
+	cp $< .
 
 nastInitCheck.ml: $(TOP)/typing/nastInitCheck.ml
-	cp $(TOP)/typing/nastInitCheck.ml .
+	cp $< .
 
 autocomplete.ml: $(TOP)/globals/autocomplete.ml
-	cp $(TOP)/globals/autocomplete.ml .
+	cp $< .
 
 find_refs.ml: $(TOP)/globals/find_refs.ml
-	cp $(TOP)/globals/find_refs.ml .
-
-naming_ast_helpers.ml: $(TOP)/naming/naming_ast_helpers.ml
-	cp $^ .
+	cp $< .
 
 naming_heap.ml: $(TOP)/naming/naming_heap.ml
-	cp $(TOP)/naming/naming_heap.ml .
+	cp $< .
 
 naming.ml: $(TOP)/naming/naming.ml
-	cp $(TOP)/naming/naming.ml .
+	cp $< .
 
 typing_reason.ml: $(TOP)/typing/typing_reason.ml
-	cp $(TOP)/typing/typing_reason.ml .
+	cp $< .
 
 typing_defs.ml: $(TOP)/typing/typing_defs.ml
-	cp $(TOP)/typing/typing_defs.ml .
+	cp $< .
+
+typing_heap.ml: $(TOP)/typing/typing_heap.ml
+	cp $< .
 
 typing_env.ml: $(TOP)/typing/typing_env.ml
-	cp $(TOP)/typing/typing_env.ml .
+	cp $< .
 
 typing_ops.ml: $(TOP)/typing/typing_ops.ml
-	cp $(TOP)/typing/typing_ops.ml .
+	cp $< .
 
 fix_file.ml: $(TOP)/parsing/fix_file.ml
-	cp $(TOP)/parsing/fix_file.ml .
+	cp $< .
 
-colorFile.ml: $(TOP)/client/colorFile.ml
-	cp $(TOP)/client/colorFile.ml .
+colorFile.ml: $(TOP)/server/colorFile.ml
+	cp $< .
 
 typing_instantiate.ml: $(TOP)/typing/typing_instantiate.ml
-	cp $(TOP)/typing/typing_instantiate.ml .
+	cp $< .
 
 typing_alias.ml: $(TOP)/typing/typing_alias.ml
-	cp $(TOP)/typing/typing_alias.ml .
+	cp $< .
 
 typing_generic.ml: $(TOP)/typing/typing_generic.ml
-	cp $(TOP)/typing/typing_generic.ml .
+	cp $< .
 
 typing_unify.ml: $(TOP)/typing/typing_unify.ml
-	cp $(TOP)/typing/typing_unify.ml .
+	cp $< .
+
+typing_unify_recursive.ml: $(TOP)/typing/typing_unify_recursive.ml
+	cp $< .
 
 typing_tdef.ml: $(TOP)/typing/typing_tdef.ml
-	cp $(TOP)/typing/typing_tdef.ml .
+	cp $< .
 
 typing_subtype.ml: $(TOP)/typing/typing_subtype.ml
-	cp $(TOP)/typing/typing_subtype.ml .
+	cp $< .
 
 typing_lenv.ml: $(TOP)/typing/typing_lenv.ml
-	cp $(TOP)/typing/typing_lenv.ml .
+	cp $< .
 
 fileOutline.ml: $(TOP)/server/fileOutline.ml
-	cp $(TOP)/server/fileOutline.ml .
+	cp $< .
 
 
 clean::
@@ -273,12 +287,14 @@ clean::
 clean::
 	rm -f ide.ml
 	rm -f pos.ml
+	rm -f file_pos.ml
 	rm -f prefix.ml
 	rm -f value.ml
 	rm -f namespace_env.ml
 	rm -f ast.ml
 	rm -f namespaces.ml
 	rm -f parser_heap.ml
+	rm -f fixmes.ml
 	rm -f parser.ml
 	rm -f lexer.ml
 	rm -f hackedLexer.ml
@@ -290,14 +306,14 @@ clean::
 	rm -f typing_inherit.ml
 	rm -f typing_lenv.ml
 	rm -f nast.ml
-	rm -f nastVisitor.ml
+	rm -f nast_visitor.ml
 	rm -f nastCheck.ml
 	rm -f nastInitCheck.ml
 	rm -f naming_heap.ml
-	rm -f naming_ast_helpers.ml
 	rm -f naming.ml
 	rm -f typing_reason.ml
 	rm -f typing_defs.ml
+	rm -f typing_heap.ml
 	rm -f typing_instantiate.ml
 	rm -f typing_utils.ml
 	rm -f typing_env.ml
@@ -323,6 +339,7 @@ clean::
 	rm -f lexer_hack.ml
 	rm -f parser_hack.ml
 	rm -f typing_unify.ml
+        rm -f typing_unify_recursive.ml
 	rm -f fileOutline.ml
 	rm -f format_hack.ml
 

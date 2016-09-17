@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,18 +15,15 @@
 */
 
 #include "hphp/test/ext/test.h"
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/apc-file-storage.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/compiler/option.h"
+#include <folly/Format.h>
 
 using namespace HPHP;
 
 ///////////////////////////////////////////////////////////////////////////////
-
-#ifndef PHP_PATH
-#define PHP_PATH "php"
-#endif
-
-const char *php_path = PHP_PATH;
 
 int Test::s_total = 0;
 int Test::s_passed = 0;
@@ -84,17 +81,16 @@ bool Test::logTestResults(std::string name, std::string details, int pass,
   long useconds = finish.tv_usec - start.tv_usec;
   long mseconds = ((seconds) * 1000 + useconds / 1000.0) + 0.5; // round up
 
-  char summary[100];
-  sprintf(summary, "PASSED (%d)", pass);
+  auto summary = folly::sformat("PASSED ({})", pass);
   const char* status = "passed";
 
   if (skip > 0) {
-    sprintf(summary, "SKIPPED (%d)", skip);
+    summary += folly::sformat(",SKIPPED ({})", skip);
   }
 
   if (fail > 0) {
     status = "failed";
-    sprintf(summary, "FAILED (%d)", fail);
+    summary += folly::sformat("FAILED ({})", fail);
   }
 
   ArrayInit data(8, ArrayInit::Map{});
@@ -107,7 +103,7 @@ bool Test::logTestResults(std::string name, std::string details, int pass,
   data.set(String("summary"),      std::string(summary));
   data.set(String("details"),      details);
 
-  if (!logger.logTest(Array(data.create()))) {
+  if (!logger.logTest(data.toArray())) {
     printf("WARNING: Logging %s failed\n", name.c_str());
     return false;
   }

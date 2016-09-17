@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -43,7 +43,7 @@ void RefDeps::addDep(int entryArDelta, unsigned argNum, bool isRef) {
   }
   Record& r = m_arMap[entryArDelta];
   if (argNum >= r.m_mask.size()) {
-    assert(argNum >= r.m_vals.size());
+    assertx(argNum >= r.m_vals.size());
     r.m_mask.resize(argNum + 1);
     r.m_vals.resize(argNum + 1);
   }
@@ -53,18 +53,32 @@ void RefDeps::addDep(int entryArDelta, unsigned argNum, bool isRef) {
 
 void
 ActRecState::pushFunc(const NormalizedInstruction& inst) {
-  assert(isFPush(inst.op()));
+  assertx(isFPush(inst.op()));
+
+  const Unit& unit = *inst.unit();
+  const Func* func = nullptr;
+
   if (inst.op() == OpFPushFuncD || inst.op() == OpFPushFuncU) {
-    const Unit& unit = *inst.unit();
     Id funcId = inst.imm[1].u_SA;
     auto const& nep = unit.lookupNamedEntityPairId(funcId);
-    auto const func = Unit::lookupFunc(nep.second);
-    if (func) func->validate();
-    if (func && func->isNameBindingImmutable(&unit)) {
-      pushFuncD(func);
-      return;
+    func = Unit::lookupFunc(nep.second);
+  } else if (inst.op() == OpFPushCtorD) {
+    Id clsId = inst.imm[1].u_SA;
+    auto const ctxFunc = inst.func();
+    if (ctxFunc) {
+      auto const str = unit.lookupLitstrId(clsId);
+      auto const ctx = ctxFunc->cls();
+      auto const cls = Unit::lookupUniqueClassInContext(str, ctx);
+      func = lookupImmutableCtor(cls, ctx);
     }
   }
+
+  if (func) func->validate();
+  if (func && func->isNameBindingImmutable(&unit)) {
+    pushFuncD(func);
+    return;
+  }
+
   pushDynFunc();
 }
 
@@ -127,10 +141,10 @@ ActRecState::checkByRef(int argNum, int entryArDelta, RefDeps* refDeps) {
     throwUnknownInput();
     not_reached();
   }
-  assert(r.m_topFunc);
+  assertx(r.m_topFunc);
   bool retval = r.m_topFunc->byRef(argNum);
   if (r.m_state == State::GUESSABLE) {
-    assert(r.m_entryArDelta != InvalidEntryArDelta);
+    assertx(r.m_entryArDelta != InvalidEntryArDelta);
     TRACE(2, "ActRecState: guessing arg%d -> %d\n", argNum, retval);
     refDeps->addDep(r.m_entryArDelta, argNum, retval);
   }
@@ -140,7 +154,7 @@ ActRecState::checkByRef(int argNum, int entryArDelta, RefDeps* refDeps) {
 const Func*
 ActRecState::knownFunc() {
   if (currentState() != State::KNOWN) return nullptr;
-  assert(!m_arStack.empty());
+  assertx(!m_arStack.empty());
   return m_arStack.back().m_topFunc;
 }
 

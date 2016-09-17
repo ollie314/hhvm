@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,9 +19,10 @@
 #define incl_HPHP_EXT_IMAGE_H_
 
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/zend-php-config.h"
-#include "hphp/runtime/ext/gd/libgd/gd.h"
+
+typedef struct gdImageStruct* gdImagePtr;
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -33,20 +34,19 @@ struct gfxinfo {
   unsigned int channels;
 };
 
-class Image : public SweepableResourceData {
-public:
+struct Image : SweepableResourceData {
   Image() : m_gdImage(nullptr) {}
   explicit Image(gdImagePtr gdImage) : m_gdImage(gdImage) {}
   ~Image();
-  void sweep() override;
   gdImagePtr get() { return m_gdImage;}
-  void reset() { m_gdImage = nullptr;}
+  void reset();
 
   CLASSNAME_IS("gd")
   // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
-  virtual bool isInvalid() const { return m_gdImage == nullptr; }
+  const String& o_getClassNameHook() const override { return classnameof(); }
+  bool isInvalid() const override { return m_gdImage == nullptr; }
 
+  DECLARE_RESOURCE_ALLOCATION(Image)
 private:
   gdImagePtr m_gdImage;
 };
@@ -54,13 +54,17 @@ private:
 Array HHVM_FUNCTION(gd_info);
 Variant HHVM_FUNCTION(getimagesize,
   const String& filename, VRefParam imageinfo = uninit_null());
-String HHVM_FUNCTION(image_type_to_extension,
+Variant HHVM_FUNCTION(image_type_to_extension,
   int64_t imagetype, bool include_dot = true);
 String HHVM_FUNCTION(image_type_to_mime_type, int64_t imagetype);
-#ifdef HAVE_GD_WBMP
 bool HHVM_FUNCTION(image2wbmp, const Resource& image,
   const String& filename = null_string, int64_t threshold = -1);
-#endif
+Variant HHVM_FUNCTION(imageaffine, const Resource& image,
+  const Array& affine = Array(), const Array& clip = Array());
+Variant HHVM_FUNCTION(imageaffinematrixconcat, const Array& m1,
+  const Array& m2);
+Variant HHVM_FUNCTION(imageaffinematrixget, int64_t type,
+  const Variant& options = Array());
 bool HHVM_FUNCTION(imagealphablending, const Resource& image, bool blendmode);
 bool HHVM_FUNCTION(imageantialias, const Resource& image, bool on);
 bool HHVM_FUNCTION(imagearc, const Resource& image,
@@ -136,24 +140,23 @@ Variant HHVM_FUNCTION(imagecreatefrompng, const String& filename);
 #ifdef HAVE_LIBVPX
 Variant HHVM_FUNCTION(imagecreatefromwebp, const String& filename);
 #endif
-#ifdef HAVE_LIBGD15
 Variant HHVM_FUNCTION(imagecreatefromstring, const String& data);
-#endif
-#ifdef HAVE_GD_WBMP
 Variant HHVM_FUNCTION(imagecreatefromwbmp, const String& filename);
-#endif
-#ifdef HAVE_GD_XBM
 Variant HHVM_FUNCTION(imagecreatefromxbm, const String& filename);
-#endif
 #if defined(HAVE_GD_XPM) && defined(HAVE_GD_BUNDLED)
 Variant HHVM_FUNCTION(imagecreatefromxpm, const String& filename);
 #endif
 Variant HHVM_FUNCTION(imagecreatetruecolor, int64_t width, int64_t height);
+Variant HHVM_FUNCTION(imagecrop, const Resource& image, const Array& rect);
+Variant HHVM_FUNCTION(imagecropauto, const Resource& image, int64_t mode = -1,
+  double threshold = 0.5f, int64_t color = -1);
 bool HHVM_FUNCTION(imagedashedline, const Resource& image,
   int64_t x1, int64_t y1, int64_t x2, int64_t y2, int64_t color);
 bool HHVM_FUNCTION(imagedestroy, const Resource& image);
 bool HHVM_FUNCTION(imageellipse,  const Resource& image,
  int64_t cx, int64_t cy, int64_t width, int64_t height, int64_t color);
+bool HHVM_FUNCTION(imageflip,  const Resource& image,
+ int64_t mode = -1);
 bool HHVM_FUNCTION(imagefill, const Resource& image,
  int64_t x, int64_t y, int64_t color);
 bool HHVM_FUNCTION(imagefilledarc, const Resource& image,
@@ -173,8 +176,7 @@ bool HHVM_FUNCTION(imagefilter, const Resource& image,
   const Variant& arg3 = 0, const Variant& arg4 = 0);
 int64_t HHVM_FUNCTION(imagefontheight, int64_t font);
 int64_t HHVM_FUNCTION(imagefontwidth, int64_t font);
-#if defined(ENABLE_GD_TTF) && HAVE_LIBGD20 && \
-    HAVE_LIBFREETYPE && HAVE_GD_STRINGFTEX
+#if defined(ENABLE_GD_TTF) && HAVE_LIBFREETYPE
 Variant HHVM_FUNCTION(imageftbbox,
   double size, double angle, const String& font_file, const String& text,
   const Array& extrainfo = Array());
@@ -188,7 +190,7 @@ bool HHVM_FUNCTION(imagegd, const Resource& image,
                             const String& filename = null_string);
 bool HHVM_FUNCTION(imagegif, const Resource& image,
                              const String& filename = null_string);
-Variant HHVM_FUNCTION(imageinterlace, const Resource& image,
+Variant HHVM_FUNCTION(imageinterlace, int64_t argc, const Resource& image,
   int64_t interlace = 0);
 bool HHVM_FUNCTION(imageistruecolor, const Resource& image);
 #ifdef HAVE_GD_JPG
@@ -215,6 +217,8 @@ bool HHVM_FUNCTION(imagerectangle, const Resource& image,
 Variant HHVM_FUNCTION(imagerotate,
   const Resource& source_image, double angle, int64_t bgd_color,
   int64_t ignore_transparent = 0);
+Variant HHVM_FUNCTION(imagescale,const Resource& image, int64_t newwidth,
+  int64_t newheight = -1, int64_t method = -1);
 bool HHVM_FUNCTION(imagesavealpha, const Resource& image, bool saveflag);
 bool HHVM_FUNCTION(imagesetbrush, const Resource& image,
   const Resource& brush);
@@ -223,9 +227,7 @@ bool HHVM_FUNCTION(imagesetpixel, const Resource& image,
 bool HHVM_FUNCTION(imagesetstyle, const Resource& image, const Array& style);
 bool HHVM_FUNCTION(imagesetthickness, const Resource& image,
   int64_t thickness);
-#if HAVE_GD_IMAGESETTILE
 bool HHVM_FUNCTION(imagesettile, const Resource& image, const Resource& tile);
-#endif
 bool HHVM_FUNCTION(imagestring,  const Resource& image,
   int64_t font, int64_t x, int64_t y,
   const String& str, int64_t color);

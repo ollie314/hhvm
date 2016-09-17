@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,12 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/util/async-func.h"
 
-#include <sys/time.h>
-#include <sys/resource.h>
-#include <sys/mman.h>
-#include <unistd.h>
+#include <folly/portability/SysTime.h>
+#include <folly/portability/SysMman.h>
+#include <folly/portability/SysResource.h>
+#include <folly/portability/Unistd.h>
+
+#include "hphp/util/alloc.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -35,7 +38,7 @@ AsyncFuncImpl::AsyncFuncImpl(void *obj, PFN_THREAD_FUNC *func)
     : m_obj(obj), m_func(func),
       m_threadStack(nullptr), m_threadId(0),
       m_exception(nullptr), m_node(0),
-      m_stopped(false), m_noInit(false) {
+      m_stopped(false), m_noInitFini(false) {
 }
 
 AsyncFuncImpl::~AsyncFuncImpl() {
@@ -124,7 +127,7 @@ bool AsyncFuncImpl::waitForEnd(int seconds /* = 0 */) {
 }
 
 void AsyncFuncImpl::threadFuncImpl() {
-  if (s_initFunc && !m_noInit) {
+  if (s_initFunc && !m_noInitFini) {
     s_initFunc(s_initFuncArg);
   }
   try {
@@ -141,7 +144,7 @@ void AsyncFuncImpl::threadFuncImpl() {
     m_stopped = true;
     m_stopMonitor.notify();
   }
-  if (s_finiFunc) {
+  if (s_finiFunc && !m_noInitFini) {
     s_finiFunc(s_finiFuncArg);
   }
 }

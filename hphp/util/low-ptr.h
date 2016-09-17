@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,70 +18,88 @@
 #define incl_HPHP_LOW_PTR_H_
 
 #include "hphp/util/assertions.h"
+#include "hphp/util/portability.h"
 
 #include <folly/CPortability.h> // FOLLY_SANITIZE_ADDRESS
 
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <algorithm>
+#include <type_traits>
 #include <utility>
-
-#ifdef FOLLY_SANITIZE_ADDRESS
-#undef USE_LOWPTR
-#endif
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+namespace detail {
+
+///////////////////////////////////////////////////////////////////////////////
+
 /**
  * Low memory pointer template.
- *
- * Defaults to a 4-byte pointer, but can be configured.
  */
-template <typename T, typename S = uint32_t>
-class LowPtr {
-public:
-  /**
+template <class T, class S>
+struct LowPtrImpl {
+  using storage_type = typename S::storage_type;
+
+  /*
    * Constructors.
    */
-  LowPtr() {}
+  LowPtrImpl() {}
 
-  /* implicit */ LowPtr(T* px) : m_raw(toLow(px)) {}
+  /* implicit */ LowPtrImpl(T* px) : m_s{to_low(px)} {}
 
-  /* implicit */ LowPtr(std::nullptr_t px) : m_raw(0) {}
+  /* implicit */ LowPtrImpl(std::nullptr_t px) : m_s{0} {}
 
-  LowPtr(const LowPtr<T, S>& r) : m_raw(r.raw()) {}
+  LowPtrImpl(const LowPtrImpl<T, S>& r) : m_s{S::get(r.m_s)} {}
 
-  LowPtr(LowPtr<T>&& r) : m_raw(r.raw()) {
-    r.m_raw = 0;
+  LowPtrImpl(LowPtrImpl<T, S>&& r) : m_s{S::get(r.m_s)} {
+    S::set(r.m_s, 0);
   }
 
-  /**
+  /*
    * Assignments.
    */
-  LowPtr& operator=(T* px) {
-    return operator=(toLow(px));
-  }
-
-  LowPtr& operator=(std::nullptr_t px) {
-    return operator=((S)0);
-  }
-
-  LowPtr& operator=(const LowPtr<T, S>& r) {
-    return operator=(r.raw());
-  }
-
-  LowPtr& operator=(LowPtr<T, S>&& r) {
-    assert(this != &r);
-    m_raw = std::move(r.m_raw);
+  LowPtrImpl& operator=(T* px) {
+    S::set(m_s, to_low(px));
     return *this;
   }
 
-  /**
+  LowPtrImpl& operator=(std::nullptr_t px) {
+    S::set(m_s, 0);
+    return *this;
+  }
+
+  LowPtrImpl& operator=(const LowPtrImpl<T, S>& r) {
+    S::set(m_s, S::get(r.m_s));
+    return *this;
+  }
+
+  template <typename Q = S>
+  typename std::enable_if<
+    std::is_move_assignable<typename Q::storage_type>::value,
+    LowPtrImpl&
+  >::type operator=(LowPtrImpl<T, S>&& r) {
+    m_s = std::move(r.m_s);
+    return *this;
+  }
+
+  template <typename Q = S>
+  typename std::enable_if<
+    !std::is_move_assignable<typename Q::storage_type>::value,
+    LowPtrImpl&
+  >::type operator=(LowPtrImpl<T, S>&& r) {
+    S::set(m_s, S::get(r.m_s));
+    S::set(r.m_s, 0);
+    return *this;
+  }
+
+  /*
    * Observers.
    */
   T* get() const {
-    return reinterpret_cast<T*>(m_raw);
+    return reinterpret_cast<T*>(S::get(m_s));
   }
 
   T& operator*() const {
@@ -100,44 +118,113 @@ public:
     return get();
   }
 
-  /**
+  /*
    * Modifiers.
    */
   void reset() {
     operator=(nullptr);
   }
 
-  void swap(LowPtr& r) {
-    std::swap(m_raw, r.m_raw);
+  template <typename Q = T>
+  typename std::enable_if<
+    std::is_move_assignable<typename Q::storage_type>::value,
+    void
+  >::type swap(LowPtrImpl& r) {
+    std::swap(m_s, r.m_s);
+  }
+
+  template <typename Q = T>
+  typename std::enable_if<
+    !std::is_move_assignable<typename Q::storage_type>::value,
+    void
+  >::type swap(LowPtrImpl& r) {
+    auto const tmp = S::get(m_s);
+    S::set(m_s, S::get(r.m_s));
+    S::set(r.m_s, tmp);
   }
 
 private:
-  /**
-   * Raw value manipulation.
+  /*
+   * Lowness.
    */
-  S raw() const {
-    return m_raw;
-  }
-
-  LowPtr& operator=(S raw) {
-    m_raw = raw;
-    return *this;
-  }
-
-  static bool isLow(T* px) {
-    S ones = ~0;
+  static bool is_low(T* px) {
+    typename S::raw_type ones = ~0;
     auto ptr = reinterpret_cast<uintptr_t>(px);
     return (ptr & ones) == ptr;
   }
 
-  static S toLow(T* px) {
-    always_assert(isLow(px));
-    return (S)((uintptr_t)(px));
+  static typename S::raw_type to_low(T* px) {
+    always_assert(is_low(px));
+    return (typename S::raw_type)(reinterpret_cast<uintptr_t>(px));
   }
 
 protected:
-  S m_raw;
+  typename S::storage_type m_s;
 };
+
+///////////////////////////////////////////////////////////////////////////////
+
+template <class S>
+struct RawStorage {
+  using raw_type = S;
+  using storage_type = S;
+
+  static ALWAYS_INLINE raw_type get(const storage_type& s) {
+    return s;
+  }
+  static ALWAYS_INLINE void set(storage_type& s, raw_type r) {
+    s = r;
+  }
+};
+
+template <class S, std::memory_order read_order, std::memory_order write_order>
+struct AtomicStorage {
+  using raw_type = S;
+  using storage_type = std::atomic<S>;
+
+  static ALWAYS_INLINE raw_type get(const storage_type& s) {
+    return s.load(read_order);
+  }
+  static ALWAYS_INLINE void set(storage_type& s, raw_type r) {
+    s.store(r, write_order);
+  }
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+#ifdef FOLLY_SANITIZE_ADDRESS
+#undef USE_LOWPTR
+#endif
+
+#ifdef USE_LOWPTR
+constexpr bool use_lowptr = true;
+
+namespace detail {
+using low_storage_t = uint32_t;
+}
+#else
+constexpr bool use_lowptr = false;
+
+namespace detail {
+using low_storage_t = uintptr_t;
+}
+#endif
+
+template<class T>
+using LowPtr =
+  detail::LowPtrImpl<T, detail::RawStorage<detail::low_storage_t>>;
+
+template<class T,
+         std::memory_order read_order = std::memory_order_relaxed,
+         std::memory_order write_order = std::memory_order_relaxed>
+using AtomicLowPtr =
+  detail::LowPtrImpl<T, detail::AtomicStorage<detail::low_storage_t,
+                                              read_order,
+                                              write_order>>;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

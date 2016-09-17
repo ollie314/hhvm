@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,9 +15,11 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/vm/native-data.h"
-#include "hphp/runtime/ext/libmemcached_portability.h"
+#include "hphp/runtime/ext/memcached/libmemcached_portability.h"
+#include "hphp/runtime/ext/sockets/ext_sockets.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/request-event-handler.h"
@@ -52,8 +54,7 @@ static __thread MEMCACHEGlobals* s_memcache_globals;
 
 const StaticString s_MemcacheData("MemcacheData");
 
-class MemcacheData {
- public:
+struct MemcacheData {
   memcached_st m_memcache;
   int m_compress_threshold;
   double m_min_compress_savings;
@@ -102,6 +103,23 @@ static bool ini_on_update_hash_function(const std::string& value) {
   return false;
 }
 
+static bool hasAvailableServers(const MemcacheData* data) {
+  if (memcached_server_count(&data->m_memcache) == 0) {
+    raise_warning("Memcache: No servers added to memcache connection");
+    return false;
+  }
+  return true;
+}
+
+static bool isServerReachable(const String& host, int port /*= 0*/) {
+  auto hostInfo = HHVM_FN(getaddrinfo)(host, port);
+  if (hostInfo.isBoolean() && !hostInfo.toBoolean()) {
+    raise_warning("Memcache: Can't connect to %s:%d", host.c_str(), port);
+    return false;
+  }
+  return true;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // methods
 
@@ -116,6 +134,9 @@ static bool HHVM_METHOD(Memcache, connect, const String& host, int port /*= 0*/,
     const char *socket_path = host.substr(sizeof("unix://") - 1).c_str();
     ret = memcached_server_add_unix_socket(&data->m_memcache, socket_path);
   } else {
+    if (!isServerReachable(host, port)) {
+      return false;
+    }
     ret = memcached_server_add(&data->m_memcache, host.c_str(), port);
   }
 
@@ -133,8 +154,15 @@ static uint32_t memcache_get_flag_for_type(const Variant& var) {
 
     case KindOfUninit:
     case KindOfNull:
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
@@ -205,7 +233,8 @@ static std::vector<char> memcache_prepare_for_storage(const MemcacheData* data,
 }
 
 static String memcache_prepare_key(const String& var) {
-  auto data = var.get()->mutableData();
+  String var_mutable(var, CopyString);
+  auto data = var_mutable.get()->mutableData();
   for (int i = 0; i < var.length(); i++) {
     // This is a stupid encoding since it causes collisions but it matches php5
     if (data[i] <= ' ') {
@@ -273,6 +302,11 @@ static bool HHVM_METHOD(Memcache, add, const String& key, const Variant& var,
   }
 
   auto data = Native::data<MemcacheData>(this_);
+
+  if (!hasAvailableServers(data)) {
+    return false;
+  }
+
   std::vector<char> serialized = memcache_prepare_for_storage(data, var, flag);
 
   String serializedKey = memcache_prepare_key(key);
@@ -294,6 +328,11 @@ static bool HHVM_METHOD(Memcache, set, const String& key, const Variant& var,
   }
 
   auto data = Native::data<MemcacheData>(this_);
+
+  if (!hasAvailableServers(data)) {
+    return false;
+  }
+
   String serializedKey = memcache_prepare_key(key);
   std::vector<char> serializedVar =
     memcache_prepare_for_storage(data, var, flag);
@@ -320,6 +359,11 @@ static bool HHVM_METHOD(Memcache, replace, const String& key,
   }
 
   auto data = Native::data<MemcacheData>(this_);
+
+  if (!hasAvailableServers(data)) {
+    return false;
+  }
+
   String serializedKey = memcache_prepare_key(key);
   std::vector<char> serialized = memcache_prepare_for_storage(data, var, flag);
 
@@ -335,7 +379,12 @@ static bool HHVM_METHOD(Memcache, replace, const String& key,
 static Variant HHVM_METHOD(Memcache, get, const Variant& key,
                                           VRefParam flags /*= null*/) {
   auto data = Native::data<MemcacheData>(this_);
-  if (key.is(KindOfArray)) {
+
+  if (!hasAvailableServers(data)) {
+    return false;
+  }
+
+  if (key.isArray()) {
     std::vector<const char *> real_keys;
     std::vector<size_t> key_len;
     Array keyArr = key.toArray();
@@ -353,10 +402,10 @@ static Variant HHVM_METHOD(Memcache, get, const Variant& key,
     }
 
     if (!real_keys.empty()) {
-      const char *payload = NULL;
+      const char *payload = nullptr;
       size_t payload_len = 0;
       uint32_t flags = 0;
-      const char *res_key = NULL;
+      const char *res_key = nullptr;
       size_t res_key_len = 0;
 
       memcached_result_st result;
@@ -364,7 +413,9 @@ static Variant HHVM_METHOD(Memcache, get, const Variant& key,
       memcached_return_t ret = memcached_mget(&data->m_memcache, &real_keys[0],
                                               &key_len[0], real_keys.size());
       memcached_result_create(&data->m_memcache, &result);
-      Array return_val;
+
+      // To mimic PHP5 should return empty array at failure.
+      Array return_val = Array::Create();
 
       while ((memcached_fetch_result(&data->m_memcache, &result, &ret))
              != nullptr) {
@@ -391,7 +442,7 @@ static Variant HHVM_METHOD(Memcache, get, const Variant& key,
       return return_val;
     }
   } else {
-    char *payload = NULL;
+    char *payload = nullptr;
     size_t payload_len = 0;
     uint32_t flags = 0;
 
@@ -414,6 +465,10 @@ static Variant HHVM_METHOD(Memcache, get, const Variant& key,
       return false;
     }
 
+    if (ret != MEMCACHED_SUCCESS) {
+      return false;
+    }
+
     Variant retval = memcache_fetch_from_storage(payload, payload_len, flags);
     free(payload);
 
@@ -430,6 +485,11 @@ static bool HHVM_METHOD(Memcache, delete, const String& key,
   }
 
   auto data = Native::data<MemcacheData>(this_);
+
+  if (!hasAvailableServers(data)) {
+    return false;
+  }
+
   String serializedKey = memcache_prepare_key(key);
   memcached_return_t ret = memcached_delete(&data->m_memcache,
                                             serializedKey.c_str(),
@@ -446,6 +506,11 @@ static Variant HHVM_METHOD(Memcache, increment, const String& key,
   }
 
   auto data = Native::data<MemcacheData>(this_);
+
+  if (!hasAvailableServers(data)) {
+    return false;
+  }
+
   uint64_t value;
   String serializedKey = memcache_prepare_key(key);
   memcached_return_t ret = memcached_increment(&data->m_memcache,
@@ -468,6 +533,11 @@ static Variant HHVM_METHOD(Memcache, decrement, const String& key,
   }
 
   auto data = Native::data<MemcacheData>(this_);
+
+  if (!hasAvailableServers(data)) {
+    return false;
+  }
+
   uint64_t value;
   String serializedKey = memcache_prepare_key(key);
   memcached_return_t ret = memcached_decrement(&data->m_memcache,
@@ -678,9 +748,9 @@ static bool HHVM_METHOD(Memcache, addserver, const String& host,
 
 ///////////////////////////////////////////////////////////////////////////////
 const StaticString s_MEMCACHE_COMPRESSED("MEMCACHE_COMPRESSED");
+const StaticString s_MEMCACHE_HAVE_SESSION("MEMCACHE_HAVE_SESSION");
 
-class MemcacheExtension : public Extension {
-  public:
+struct MemcacheExtension final : Extension {
     MemcacheExtension() : Extension("memcache", "3.0.8") {};
     void threadInit() override {
       // TODO: t5226715 We shouldn't need to check s_defaultLocale here,
@@ -707,9 +777,12 @@ class MemcacheExtension : public Extension {
       s_memcache_globals = nullptr;
     }
 
-    virtual void moduleInit() {
+    void moduleInit() override {
       Native::registerConstant<KindOfInt64>(
         s_MEMCACHE_COMPRESSED.get(), k_MEMCACHE_COMPRESSED
+      );
+      Native::registerConstant<KindOfBoolean>(
+        s_MEMCACHE_HAVE_SESSION.get(), true
       );
       HHVM_ME(Memcache, connect);
       HHVM_ME(Memcache, add);

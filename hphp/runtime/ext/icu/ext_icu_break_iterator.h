@@ -12,8 +12,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlBreakIterator, s_IntlCodePointBreakIterator;
 
-class IntlBreakIterator : public IntlError {
- public:
+struct IntlBreakIterator : IntlError {
   IntlBreakIterator() {}
   IntlBreakIterator(const IntlBreakIterator&) = delete;
   IntlBreakIterator& operator=(const IntlBreakIterator& src) {
@@ -42,7 +41,7 @@ class IntlBreakIterator : public IntlError {
       c_IntlBreakIterator = Unit::lookupClass(s_IntlBreakIterator.get());
       assert(c_IntlBreakIterator);
     }
-    auto obj = ObjectData::newInstance(c_IntlBreakIterator);
+    Object obj{c_IntlBreakIterator};
     if (bi) {
       Native::data<IntlBreakIterator>(obj)->setBreakIterator(bi);
     }
@@ -55,7 +54,7 @@ class IntlBreakIterator : public IntlError {
         Unit::lookupClass(s_IntlCodePointBreakIterator.get());
       assert(c_IntlCodePointBreakIterator);
     }
-    auto obj = ObjectData::newInstance(c_IntlCodePointBreakIterator);
+    Object obj{c_IntlCodePointBreakIterator};
     if (bi) {
       Native::data<IntlBreakIterator>(obj)->setBreakIterator(bi);
     }

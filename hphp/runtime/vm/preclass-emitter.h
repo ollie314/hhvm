@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,7 @@
 #define incl_HPHP_VM_CLASS_EMIT_H_
 
 #include "hphp/runtime/base/repo-auth-type.h"
-#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/array-data.h"
 
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/func.h"
@@ -45,12 +45,10 @@ struct BuiltinObjExtents {
   ptrdiff_t odOffsetBytes;
 };
 
-class PreClassEmitter {
- public:
+struct PreClassEmitter {
   typedef std::vector<FuncEmitter*> MethodVec;
 
-  class Prop {
-   public:
+  struct Prop {
     Prop()
       : m_name(nullptr)
       , m_mangledName(nullptr)
@@ -98,34 +96,48 @@ class PreClassEmitter {
     RepoAuthType m_repoAuthType;
   };
 
-  class Const {
-   public:
+  struct Const {
     Const()
       : m_name(nullptr)
       , m_typeConstraint(nullptr)
+      , m_val(make_tv<KindOfUninit>())
       , m_phpCode(nullptr)
+      , m_typeconst(false)
     {}
     Const(const StringData* n, const StringData* typeConstraint,
-          const TypedValue* val, const StringData* phpCode)
-      : m_name(n), m_typeConstraint(typeConstraint), m_phpCode(phpCode) {
-      memcpy(&m_val, val, sizeof(TypedValue));
+          const TypedValue* val, const StringData* phpCode,
+          const bool typeconst)
+      : m_name(n), m_typeConstraint(typeConstraint), m_phpCode(phpCode),
+        m_typeconst(typeconst) {
+      if (!val) {
+        m_val.clear();
+      } else {
+        m_val = *val;
+      }
     }
     ~Const() {}
 
     const StringData* name() const { return m_name; }
     const StringData* typeConstraint() const { return m_typeConstraint; }
-    const TypedValue& val() const { return m_val; }
+    const TypedValue& val() const { return m_val.value(); }
+    const folly::Optional<TypedValue>& valOption() const { return m_val; }
     const StringData* phpCode() const { return m_phpCode; }
+    bool isAbstract()       const { return !m_val.hasValue(); }
+    bool isTypeconst() const { return m_typeconst; }
 
     template<class SerDe> void serde(SerDe& sd) {
-      sd(m_name)(m_val)(m_phpCode);
+      sd(m_name)
+        (m_val)
+        (m_phpCode)
+        (m_typeconst);
     }
 
    private:
     LowStringPtr m_name;
     LowStringPtr m_typeConstraint;
-    TypedValue m_val;
+    folly::Optional<TypedValue> m_val;
     LowStringPtr m_phpCode;
+    bool m_typeconst;
   };
 
   typedef IndexedStringMap<Prop, true, Slot> PropMap;
@@ -135,6 +147,9 @@ class PreClassEmitter {
                   PreClass::Hoistable hoistable);
   ~PreClassEmitter();
 
+
+
+  void setClosurePreClass();
   void init(int line1, int line2, Offset offset, Attr attrs,
             const StringData* parent, const StringData* docComment);
 
@@ -146,11 +161,13 @@ class PreClassEmitter {
   PreClass::Hoistable hoistability() const { return m_hoistable; }
   void setOffset(Offset off) { m_offset = off; }
   void setEnumBaseTy(TypeConstraint ty) { m_enumBaseTy = ty; }
-  const TypeConstraint &enumBaseTy() const {
-    return m_enumBaseTy;
-  }
+  const TypeConstraint& enumBaseTy() const { return m_enumBaseTy; }
   Id id() const { return m_id; }
+  int32_t numDeclMethods() const { return m_numDeclMethods; }
+  void setNumDeclMethods(uint32_t n) { m_numDeclMethods = n; }
+  void setIfaceVtableSlot(Slot s) { m_ifaceVtableSlot = s; }
   const MethodVec& methods() const { return m_methods; }
+  FuncEmitter* findMethod(const StringData* name) { return m_methodMap[name]; }
   const PropMap::Builder& propMap() const { return m_propMap; }
   const ConstMap::Builder& constMap() const { return m_constMap; }
   const StringData* docComment() const { return m_docComment; }
@@ -170,7 +187,12 @@ class PreClassEmitter {
                    RepoAuthType);
   const Prop& lookupProp(const StringData* propName) const;
   bool addConstant(const StringData* n, const StringData* typeConstraint,
-                   const TypedValue* val, const StringData* phpCode);
+                   const TypedValue* val, const StringData* phpCode,
+                   const bool typeConst = false,
+                   const Array& typeStructure = Array{});
+  bool addAbstractConstant(const StringData* n,
+                           const StringData* typeConstraint,
+                           const bool typeConst = false);
   void addUsedTrait(const StringData* traitName);
   void addClassRequirement(const PreClass::ClassRequirement req) {
     m_requirements.push_back(req);
@@ -196,12 +218,7 @@ class PreClassEmitter {
   }
   UserAttributeMap userAttributes() const { return m_userAttributes; }
 
-  void commit(RepoTxn& txn) const;
-
-  void setBuiltinClassInfo(const ClassInfo* info,
-                           BuiltinCtorFunction ctorFunc,
-                           BuiltinDtorFunction dtorFunc,
-                           BuiltinObjExtents extents);
+  void commit(RepoTxn& txn) const; // throws(RepoExc)
 
   PreClass* create(Unit& unit) const;
 
@@ -235,7 +252,10 @@ class PreClassEmitter {
   BuiltinCtorFunction m_instanceCtor{nullptr};
   BuiltinDtorFunction m_instanceDtor{nullptr};
   uint32_t m_builtinObjSize{0};
-  int32_t  m_builtinODOffset{0};
+  int32_t m_builtinODOffset{0};
+  int32_t m_numDeclMethods{-1};
+  Slot m_ifaceVtableSlot{kInvalidSlot};
+  int m_memoizeInstanceSerial{0};
 
   std::vector<LowStringPtr> m_interfaces;
   std::vector<LowStringPtr> m_usedTraits;
@@ -247,28 +267,26 @@ class PreClassEmitter {
   MethodMap m_methodMap;
   PropMap::Builder m_propMap;
   ConstMap::Builder m_constMap;
-
-  int m_memoizeInstanceSerial = 0;
 };
 
-class PreClassRepoProxy : public RepoProxy {
-  friend class PreClass;
-  friend class PreClassEmitter;
- public:
+struct PreClassRepoProxy : RepoProxy {
+  friend struct PreClass;
+  friend struct PreClassEmitter;
+
   explicit PreClassRepoProxy(Repo& repo);
   ~PreClassRepoProxy();
-  void createSchema(int repoId, RepoTxn& txn);
+  void createSchema(int repoId, RepoTxn& txn); // throws(RepoExc)
 
   struct InsertPreClassStmt : public RepoProxy::Stmt {
     InsertPreClassStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(const PreClassEmitter& pce, RepoTxn& txn, int64_t unitSn,
                 Id preClassId, const StringData* name,
-                PreClass::Hoistable hoistable);
+                PreClass::Hoistable hoistable); // throws(RepoExc)
   };
 
   struct GetPreClassesStmt : public RepoProxy::Stmt {
     GetPreClassesStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void get(UnitEmitter& ue);
+    void get(UnitEmitter& ue); // throws(RepoExc)
   };
 
   InsertPreClassStmt insertPreClass[RepoIdCount];

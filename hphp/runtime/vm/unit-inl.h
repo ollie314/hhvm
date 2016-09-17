@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,14 +20,15 @@
 
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/vm/hhbc-codec.h"
 #include "hphp/runtime/vm/litstr-table.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // SourceLoc.
 
-inline SourceLoc::SourceLoc(const Location& l) {
-  setLoc(&l);
+inline SourceLoc::SourceLoc(const Location::Range& r) {
+  setLoc(&r);
 }
 
 inline void SourceLoc::reset() {
@@ -38,7 +39,7 @@ inline bool SourceLoc::valid() const {
   return line0 != 1 || char0 != 1 || line1 != 1 || char1 != 1;
 }
 
-inline void SourceLoc::setLoc(const Location* l) {
+inline void SourceLoc::setLoc(const Location::Range* l) {
   line0 = l->line0;
   char0 = l->char0;
   line1 = l->line1;
@@ -96,22 +97,22 @@ inline Func** Unit::MergeInfo::funcHoistableBegin() const {
 
 inline
 Unit::MergeInfo::FuncRange Unit::MergeInfo::funcs() const {
-  return FuncRange(funcBegin(), funcEnd());
+  return { funcBegin(), funcEnd() };
 }
 
 inline
 Unit::MergeInfo::MutableFuncRange Unit::MergeInfo::mutableFuncs() const {
-  return MutableFuncRange(funcBegin(), funcEnd());
+  return { funcBegin(), funcEnd() };
 }
 
 inline
 Unit::MergeInfo::MutableFuncRange Unit::MergeInfo::nonMainFuncs() const {
-  return MutableFuncRange(funcBegin() + 1, funcEnd());
+  return { funcBegin() + 1, funcEnd() };
 }
 
 inline
 Unit::MergeInfo::MutableFuncRange Unit::MergeInfo::hoistableFuncs() const {
-  return MutableFuncRange(funcHoistableBegin(), funcEnd());
+  return { funcHoistableBegin(), funcEnd() };
 }
 
 inline void*& Unit::MergeInfo::mergeableObj(int idx) {
@@ -172,9 +173,9 @@ inline bool Unit::contains(PC pc) const {
   return pc >= m_bc && pc <= m_bc + m_bclen;
 }
 
-inline Op Unit::getOpcode(size_t instrOffset) const {
+inline Op Unit::getOp(Offset instrOffset) const {
   assert(instrOffset < m_bclen);
-  return static_cast<Op>(m_bc[instrOffset]);
+  return peek_op(m_bc + instrOffset);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -219,9 +220,9 @@ inline size_t Unit::numArrays() const {
   return m_arrays.size();
 }
 
-inline ArrayData* Unit::lookupArrayId(Id id) const {
+inline const ArrayData* Unit::lookupArrayId(Id id) const {
   assert(id < m_arrays.size());
-  return const_cast<ArrayData*>(m_arrays[id]);
+  return m_arrays[id];
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -241,12 +242,39 @@ inline Unit::FuncRange Unit::funcs() const {
   return m_mergeInfo->funcs();
 }
 
-inline Unit::PreClassRange Unit::preclasses() const {
-  return PreClassRange(m_preClasses);
+inline folly::Range<PreClassPtr*> Unit::preclasses() {
+  return { m_preClasses.data(), m_preClasses.size() };
+}
+
+inline folly::Range<const PreClassPtr*> Unit::preclasses() const {
+  return { m_preClasses.data(), m_preClasses.size() };
 }
 
 inline Func* Unit::firstHoistable() const {
   return *m_mergeInfo->funcHoistableBegin();
+}
+
+template<class Fn> void Unit::forEachFunc(Fn fn) const {
+  for (auto& func : funcs()) {
+    fn(func);
+  }
+  for (auto& c : preclasses()) {
+    auto methods = FuncRange{c->methods(), c->methods() + c->numMethods()};
+    for (auto& method : methods) {
+      fn(method);
+    }
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Type aliases
+
+inline folly::Range<TypeAlias*> Unit::typeAliases() {
+  return { m_typeAliases.begin(), m_typeAliases.end() };
+}
+
+inline folly::Range<const TypeAlias*> Unit::typeAliases() const {
+  return { m_typeAliases.begin(), m_typeAliases.end() };
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -260,19 +288,23 @@ inline Class* Unit::lookupClass(const StringData* name) {
   return lookupClass(NamedEntity::get(name));
 }
 
-inline Class* Unit::lookupUniqueClass(const NamedEntity* ne) {
+inline Class* Unit::lookupUniqueClassInContext(const NamedEntity* ne,
+                                               const Class* ctx) {
   Class* cls = ne->clsList();
   if (LIKELY(cls != nullptr)) {
-    if (cls->attrs() & AttrUnique && RuntimeOption::RepoAuthoritative) {
+    if (cls->attrs() & AttrUnique) {
       return cls;
     }
-    return cls->getCached();
+    if (!ctx) return nullptr;
+    cls = cls->getCached();
+    if (cls && ctx->classof(cls)) return cls;
   }
   return nullptr;
 }
 
-inline Class* Unit::lookupUniqueClass(const StringData* name) {
-  return lookupUniqueClass(NamedEntity::get(name));
+inline Class* Unit::lookupUniqueClassInContext(const StringData* name,
+                                               const Class* ctx) {
+  return lookupUniqueClassInContext(NamedEntity::get(name), ctx);
 }
 
 inline Class* Unit::loadClass(const StringData* name) {
@@ -322,6 +354,10 @@ inline void Unit::setInterpretOnly() {
 
 inline bool Unit::isHHFile() const {
   return m_isHHFile;
+}
+
+inline bool Unit::useStrictTypes() const {
+  return m_useStrictTypes;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

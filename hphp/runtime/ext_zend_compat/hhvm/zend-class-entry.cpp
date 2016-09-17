@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,6 @@
 */
 
 #include "hphp/runtime/ext_zend_compat/hhvm/zend-class-entry.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/ext_zend_compat/hhvm/zend-request-local.h"
 #include "hphp/runtime/ext_zend_compat/php-src/Zend/zend.h"
 
@@ -85,13 +84,12 @@ zend_class_entry* zend_hphp_register_internal_class_entry(StringData* name)
 }
 
 const Class::SProp* zce_find_static_prop(const zend_class_entry* ce,
-                                               const char* name,
-                                               size_t len) {
-  auto const* sprops = ce->hphp_class->staticProperties();
-  for (size_t i = 0; i < ce->hphp_class->numStaticProperties(); ++i) {
-    auto const* sprop = &sprops[i];
-    if (sprop->m_name->isame(StringData::Make(name, len, CopyString))) {
-      return sprop;
+                                         const char* name,
+                                         size_t len) {
+  for (auto const& sprop : ce->hphp_class->staticProperties()) {
+    auto str = String::attach(StringData::Make(name, len, CopyString));
+    if (sprop.name->isame(str.get())) {
+      return &sprop;
     }
   }
   return nullptr;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -68,9 +68,15 @@ inline bool Func::ParamInfo::isVariadic() const {
 ///////////////////////////////////////////////////////////////////////////////
 // Func.
 
+inline const void* Func::mallocEnd() const {
+  return reinterpret_cast<const char*>(this)
+         + Func::prologueTableOff()
+         + numPrologues() * sizeof(m_prologueTable[0]);
+}
+
 inline void Func::validate() const {
 #ifdef DEBUG
-  assert(this && m_magic == kMagic);
+  assert(m_magic == kMagic);
 #endif
   assert(m_name != nullptr);
 }
@@ -95,6 +101,10 @@ inline Unit* Func::unit() const {
   return m_unit;
 }
 
+inline Class* Func::cls() const {
+  return m_cls;
+}
+
 inline PreClass* Func::preClass() const {
   return shared()->m_preClass;
 }
@@ -103,8 +113,8 @@ inline Class* Func::baseCls() const {
   return m_baseCls;
 }
 
-inline Class* Func::cls() const {
-  return m_cls;
+inline Class* Func::implCls() const {
+  return isClosureBody() ? baseCls() : cls();
 }
 
 inline const StringData* Func::name() const {
@@ -129,7 +139,11 @@ inline StrNR Func::fullNameStr() const {
 
 inline const NamedEntity* Func::getNamedEntity() const {
   assert(!shared()->m_preClass);
-  return m_namedEntity;
+  return *reinterpret_cast<const LowPtr<const NamedEntity>*>(&m_namedEntity);
+}
+
+inline void Func::setNamedEntity(const NamedEntity* e) {
+  *reinterpret_cast<LowPtr<const NamedEntity>*>(&m_namedEntity) = e;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -208,6 +222,10 @@ inline bool Func::contains(Offset offset) const {
 
 inline MaybeDataType Func::returnType() const {
   return shared()->m_returnType;
+}
+
+inline bool Func::isReturnByValue() const {
+  return shared()->m_returnByValue;
 }
 
 inline bool Func::isReturnRef() const {
@@ -308,12 +326,11 @@ inline bool Func::isPseudoMain() const {
 }
 
 inline bool Func::isMethod() const {
-  return !isPseudoMain() && (bool)cls();
+  return !isPseudoMain() && (bool)baseCls();
 }
 
-inline bool Func::isTraitMethod() const {
-  const PreClass* pcls = preClass();
-  return pcls && (pcls->attrs() & AttrTrait);
+inline bool Func::isFromTrait() const {
+  return m_attrs & AttrTrait;
 }
 
 inline bool Func::isPublic() const {
@@ -324,12 +341,25 @@ inline bool Func::isStatic() const {
   return m_attrs & AttrStatic;
 }
 
+inline bool Func::isStaticInProlog() const {
+  return
+    (m_attrs & (AttrStatic | AttrRequiresThis)) == AttrStatic;
+}
+
+inline bool Func::requiresThisInBody() const {
+  return (m_attrs & AttrRequiresThis) && !isClosureBody();
+}
+
 inline bool Func::isAbstract() const {
   return m_attrs & AttrAbstract;
 }
 
 inline bool Func::mayHaveThis() const {
-  return isPseudoMain() || (isMethod() && !isStatic());
+  return cls() && !isStatic();
+}
+
+inline bool Func::isPreFunc() const {
+  return m_isPreFunc;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -342,10 +372,6 @@ inline bool Func::isBuiltin() const {
 inline bool Func::isCPPBuiltin() const {
   auto const ex = extShared();
   return UNLIKELY(!!ex) && ex->m_builtinFuncPtr;
-}
-
-inline bool Func::isNative() const {
-  return m_attrs & AttrNative;
 }
 
 inline BuiltinFunction Func::builtinFuncPtr() const {
@@ -362,23 +388,11 @@ inline BuiltinFunction Func::nativeFuncPtr() const {
   return nullptr;
 }
 
-inline const ClassInfo::MethodInfo* Func::methInfo() const {
-  if (auto const ex = extShared()) {
-    return ex->m_info;
-  }
-  return nullptr;
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // Closures.
 
 inline bool Func::isClosureBody() const {
   return shared()->m_isClosureBody;
-}
-
-inline Func*& Func::nextClonedClosure() const {
-  assert(isClosureBody());
-  return ((Func**)this)[-1];
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -416,7 +430,7 @@ inline bool Func::isResumable() const {
 // Methods.
 
 inline Slot Func::methodSlot() const {
-  assert(m_cls);
+  assert(isMethod());
   return m_methodSlot;
 }
 
@@ -474,10 +488,6 @@ inline bool Func::isNoInjection() const {
   return m_attrs & AttrNoInjection;
 }
 
-inline bool Func::isAllowOverride() const {
-  return m_attrs & AttrAllowOverride;
-}
-
 inline bool Func::isSkipFrame() const {
   return m_attrs & AttrSkipFrame;
 }
@@ -504,7 +514,7 @@ inline const Func::FPIEntVec& Func::fpitab() const {
 ///////////////////////////////////////////////////////////////////////////////
 // JIT data.
 
-inline RDS::Handle Func::funcHandle() const {
+inline rds::Handle Func::funcHandle() const {
   return m_cachedFunc.handle();
 }
 
@@ -516,7 +526,7 @@ inline void Func::setFuncBody(unsigned char* fb) {
   m_funcBody = fb;
 }
 
-inline unsigned char* Func::getPrologue(int index) const {
+inline uint8_t* Func::getPrologue(int index) const {
   return m_prologueTable[index];
 }
 
@@ -531,16 +541,10 @@ inline int Func::getMaxNumPrologues(int numParams) {
   return numParams + 2;
 }
 
-inline void Func::resetPrologues() {
-  // Useful when killing code; forget what we've learned about the contents
-  // of the translation cache.
-  initPrologues(numParams());
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // Other methods.
 
-inline char& Func::maybeIntercepted() const {
+inline int8_t& Func::maybeIntercepted() const {
   return m_maybeIntercepted;
 }
 
@@ -555,7 +559,7 @@ inline void Func::setBaseCls(Class* baseCls) {
   m_baseCls = baseCls;
 }
 
-inline void Func::setFuncHandle(RDS::Link<Func*> l) {
+inline void Func::setFuncHandle(rds::Link<LowPtr<Func>> l) {
   // TODO(#2950356): This assertion fails for create_function with an existing
   // declared function named __lambda_func.
   //assert(!m_cachedFunc.valid());
@@ -567,7 +571,7 @@ inline void Func::setHasPrivateAncestor(bool b) {
 }
 
 inline void Func::setMethodSlot(Slot s) {
-  assert(m_cls);
+  assert(isMethod());
   m_methodSlot = s;
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,9 +20,9 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <unistd.h>
 
 #include <folly/Bits.h>
+#include <folly/portability/Unistd.h>
 
 #include "hphp/util/assertions.h"
 
@@ -130,11 +130,19 @@ ringbufferMsg(const char* msg, size_t msgLen, RingBufferType t) {
   RingBufferEntry* rb = initEntry(t);
   rb->m_msg = msg;
   rb->m_len = msgLen;
+  rb->m_truncatedRip = static_cast<uint32_t>(
+    reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
 }
 
 void
 ringbufferEntry(RingBufferType t, uint64_t sk, uint64_t data) {
-  (void) initEntry(t, sk, data);
+  initEntry(t, sk, data);
+}
+
+void
+ringbufferEntryRip(RingBufferType t, uint64_t sk) {
+  auto rip = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+  ringbufferEntry(t, sk, rip);
 }
 
 }

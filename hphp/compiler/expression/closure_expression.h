@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,8 +28,7 @@ DECLARE_BOOST_TYPES(ClosureExpression);
 DECLARE_BOOST_TYPES(FunctionStatement);
 DECLARE_BOOST_TYPES(ExpressionList);
 
-class ClosureExpression : public Expression {
-public:
+struct ClosureExpression : Expression {
   ClosureExpression(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                     ClosureType type,
                     FunctionStatementPtr func,
@@ -45,9 +44,9 @@ public:
   };
   CaptureState captureState() const { return m_captureState; }
 
-  virtual ConstructPtr getNthKid(int n) const;
-  virtual void setNthKid(int n, ConstructPtr cp);
-  virtual int getKidCount() const;
+  ConstructPtr getNthKid(int n) const override;
+  void setNthKid(int n, ConstructPtr cp) override;
+  int getKidCount() const override;
 
   FunctionStatementPtr getClosureFunction() { return m_func; }
   ExpressionListPtr getClosureVariables() { return m_vars; }
@@ -64,9 +63,6 @@ public:
    */
   void setCaptureList(AnalysisResultPtr ar,
                       const std::set<std::string>&);
-
-private:
-  static TypePtr s_ClosureType;
 
 private:
   void initializeFromUseList(ExpressionListPtr vars);

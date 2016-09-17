@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -38,26 +38,37 @@
           require implements I;
         }
     new: trait t {}
+
+  5. Abstract constants
+  Example:
+    old: abstract class C {
+          abstract const X;
+          const Y = 10;
+        }
+    new: abstract class C {
+          const Y = 10;
+        }
 *)
 
 module M = Map_ast
+module List = Core_list
 open Ast
-open Utils
 
 let delete_method_attributes m =
-  {m with m_user_attributes = SMap.empty}
+  {m with m_user_attributes = []}
 
 let delete_function_attributes f =
-  {f with f_user_attributes = SMap.empty}
+  {f with f_user_attributes = []}
 
 let delete_param_attributes p =
-  {p with param_user_attributes = SMap.empty}
+  {p with param_user_attributes = []}
 
 let delete_class_attributes c =
-  {c with c_user_attributes = SMap.empty}
+  {c with c_user_attributes = []}
 
-let delete_requirement = function
+let delete_class_body_declarations = function
   | ClassTraitRequire _  -> None
+  | AbsConst _  -> None
   | elt -> Some elt
 
 let map =
@@ -67,5 +78,5 @@ let map =
     M.k_fun_param = (fun (k, _) p  -> k (delete_param_attributes p));
     M.k_class_ = (fun (k, _) c -> k (delete_class_attributes c));
     M.k_c_body = (fun (k, _) _ body ->
-        k (map_filter delete_requirement body));
+      k (List.filter_map ~f:delete_class_body_declarations body));
   }

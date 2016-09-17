@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,9 @@
 
 #include <boost/filesystem/path.hpp>
 
+#ifndef _MSC_VER
 #include <pwd.h>
+#endif
 
 /* Default permissions for files and directories that are created */
 
@@ -78,21 +80,31 @@ static FILE *new_log_file(const char *fileTemplate, const char *linkname,
     return nullptr;
   }
 
+#ifndef _MSC_VER
   if (linkname) {
-    /* Create a relative symlink to logs under linkname's directory */
-    std::string dir = fs::path(linkname).parent_path().native();
-    if (dir != "/") {
-      dir.append("/");
-    }
-    std::string filename;
-    if (!strncmp(pfilename, dir.c_str(), dir.length())) {
-      filename = pfilename + dir.length();
-    } else {
-      filename = pfilename;
-    }
+    struct stat stat_buf;
+    struct stat stat_buf2;
+    if (fstat(log_fd, &stat_buf) ||
+        stat(linkname, &stat_buf2) ||
+        stat_buf.st_ino != stat_buf2.st_ino ||
+        stat_buf.st_dev != stat_buf2.st_dev) {
 
-    create_link(filename.c_str(), linkname, linktype, prevlinkname);
+      /* Create a relative symlink to logs under linkname's directory */
+      std::string dir = fs::path(linkname).parent_path().native();
+      if (dir != "/") {
+        dir.append("/");
+      }
+      std::string filename;
+      if (!strncmp(pfilename, dir.c_str(), dir.length())) {
+        filename = pfilename + dir.length();
+      } else {
+        filename = pfilename;
+      }
+
+      create_link(filename.c_str(), linkname, linktype, prevlinkname);
+    }
   }
+#endif
   return fdopen(log_fd, "a");
 }
 
@@ -111,7 +123,7 @@ FILE *Cronolog::getOutputFile() {
 
   /* We need to open a new file under a mutex. */
   {
-    Lock lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_mutex);
     if ((time_now >= m_nextPeriod)) {
       /* the current period has finished */
 
@@ -129,7 +141,12 @@ FILE *Cronolog::getOutputFile() {
     /* If there is no log file open then open a new one. */
     if (m_file == nullptr) {
       const char *linkname = m_linkName.empty() ? nullptr : m_linkName.c_str();
-      m_file = new_log_file(m_template.c_str(), linkname, S_IFLNK,
+      m_file = new_log_file(m_template.c_str(),
+#ifdef _MSC_VER
+                            "", 0,
+#else
+                            linkname, S_IFLNK,
+#endif
                             m_prevLinkName, m_periodicity, m_periodMultiple,
                             m_periodDelay, m_fileName, sizeof(m_fileName),
                             time_now, &m_nextPeriod);
@@ -139,6 +156,9 @@ FILE *Cronolog::getOutputFile() {
 }
 
 void Cronolog::changeOwner(const string &username, const string &symlink) {
+#ifdef _MSC_VER
+  return;
+#else
   if (username.empty() || symlink.empty()) {
     return;
   }
@@ -172,6 +192,7 @@ void Cronolog::changeOwner(const string &username, const string &symlink) {
   if (success < 0) {
     fprintf(stderr, "Unable to chmod %s\n", symlink.c_str());
   }
+#endif
 }
 
 ///////////////////////////////////////////////////////////////////////////////

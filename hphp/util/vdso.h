@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,27 +19,21 @@
 
 #include "hphp/util/compatibility.h"
 
-namespace HPHP {
+namespace HPHP { namespace vdso {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Vdso {
-public:
-  Vdso();
-  ~Vdso();
+/*
+ * Tries to call __vdso_clock_gettime().  Will return -1 on error.
+ */
+int clock_gettime(clockid_t, timespec*);
 
-  static int64_t ClockGetTimeNS(int clk_id);
-  static int ClockGetTime(int clk_id, timespec *ts);
+/*
+ * A custom version of vdso::clock_gettime() that returns its result in
+ * nanoseconds.  Not usable outside of internal facebook code.
+ */
+int64_t clock_gettime_ns(clockid_t);
 
-  ALWAYS_INLINE int clockGetTime(int clk_id, timespec *ts);
-  ALWAYS_INLINE int64_t clockGetTimeNS(int clk_id);
+////////////////////////////////////////////////////////////////////////////////
+}}
 
-private:
-  void *m_handle;
-  int (*m_clock_gettime)(clockid_t, timespec *ts);
-  int64_t (*m_clock_gettime_ns)(clockid_t);
-};
-
-///////////////////////////////////////////////////////////////////////////////
-}
-
-#endif // __HPHP_UTIL_HARDWARE_COUNTER_H__
+#endif

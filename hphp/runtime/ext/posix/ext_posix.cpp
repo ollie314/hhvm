@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -32,7 +32,9 @@
 
 #include <folly/String.h>
 
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/file.h"
+#include "hphp/runtime/base/file-util.h"
 
 namespace HPHP {
 
@@ -73,10 +75,9 @@ DEFINE_POSIX_CONSTANT(R_OK);
 #define REGISTER_POSIX_CONSTANT(name)                                          \
   Native::registerConstant<KindOfInt64>(s_POSIX_##name.get(), k_POSIX_##name)  \
 
-static class POSIXExtension : public Extension {
-public:
+static struct POSIXExtension final : Extension {
   POSIXExtension() : Extension("posix", NO_EXTENSION_VERSION_YET) {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     REGISTER_POSIX_CONSTANT(S_IFMT);
     REGISTER_POSIX_CONSTANT(S_IFSOCK);
     REGISTER_POSIX_CONSTANT(S_IFLNK);
@@ -151,6 +152,10 @@ public:
 bool HHVM_FUNCTION(posix_access,
                    const String& file,
                    int mode /* = 0 */) {
+  if (!FileUtil::checkPathAndWarn(file, __FUNCTION__ + 2, 1)) {
+    return false;
+  }
+
   String path = File::TranslatePath(file);
   if (path.empty()) {
     return false;
@@ -160,7 +165,7 @@ bool HHVM_FUNCTION(posix_access,
 
 String HHVM_FUNCTION(posix_ctermid) {
   String s = String(L_ctermid, ReserveString);
-  char *buffer = s.bufferSlice().ptr;
+  char *buffer = s.mutableData();
   ctermid(buffer);
   s.setSize(strlen(buffer));
   return s;
@@ -176,7 +181,7 @@ int64_t HHVM_FUNCTION(posix_errno) {
 
 String HHVM_FUNCTION(posix_getcwd) {
   String s = String(PATH_MAX, ReserveString);
-  char *buffer = s.bufferSlice().ptr;
+  char *buffer = s.mutableData();
   if (getcwd(buffer, PATH_MAX) == NULL) {
     return "/";
   }
@@ -442,7 +447,7 @@ bool HHVM_FUNCTION(posix_initgroups,
 static int php_posix_get_fd(const Variant& fd) {
   int nfd;
   if (fd.isResource()) {
-    File *f = fd.toResource().getTyped<File>();
+    auto f = cast<File>(fd);
     if (!f) {
       return false;
     }
@@ -467,6 +472,10 @@ bool HHVM_FUNCTION(posix_kill,
 bool HHVM_FUNCTION(posix_mkfifo,
                    const String& pathname,
                    int mode) {
+  if (!FileUtil::checkPathAndWarn(pathname, __FUNCTION__ + 2, 1)) {
+    return false;
+  }
+
   return mkfifo(pathname.data(), mode) >= 0;
 }
 
@@ -475,6 +484,10 @@ bool HHVM_FUNCTION(posix_mknod,
                    int mode,
                    int major /* = 0 */,
                    int minor /* = 0 */) {
+  if (!FileUtil::checkPathAndWarn(pathname, __FUNCTION__ + 2, 1)) {
+    return false;
+  }
+
   dev_t php_dev = 0;
   if ((mode & S_IFCHR) || (mode & S_IFBLK)) {
     if (major == 0 && minor == 0) {
@@ -559,7 +572,7 @@ Variant HHVM_FUNCTION(posix_ttyname,
   }
 
   String ttyname(ttyname_maxlen, ReserveString);
-  char *p = ttyname.bufferSlice().ptr;
+  char *p = ttyname.mutableData();
   if (ttyname_r(php_posix_get_fd(fd), p, ttyname_maxlen)) {
     return false;
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,9 +26,8 @@
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/debugger/debugger.h"
-#include "hphp/runtime/ext/process/ext_process.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/ext/ext_collections.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
@@ -47,6 +46,7 @@
 #include "hphp/runtime/base/request-injection-data.h"
 #include "hphp/runtime/base/backtrace.h"
 
+#include <boost/format.hpp>
 #include <limits>
 #include <algorithm>
 
@@ -66,6 +66,23 @@ const StaticString
   s_parent("parent"),
   s_static("static");
 
+const StaticString s_cmpWithCollection(
+  "Cannot use relational comparison operators (<, <=, >, >=, <=>) to compare "
+  "a collection with an integer, double, string, array, or object"
+);
+const StaticString s_cmpWithVec(
+  "Cannot use relational comparison operators (<, <=, >, >=, <=>) to compare "
+  "a vec with a non-vec"
+);
+const StaticString s_cmpWithDict(
+  "Cannot use relational comparison operators (<, <=, >, >=, <=>) to compare "
+  "dicts"
+);
+const StaticString s_cmpWithKeyset(
+  "Cannot use relational comparison operators (<, <=, >, >=, <=>) to compare "
+  "keysets"
+);
+
 ///////////////////////////////////////////////////////////////////////////////
 
 bool array_is_valid_callback(const Array& arr) {
@@ -83,6 +100,84 @@ bool array_is_valid_callback(const Array& arr) {
   return true;
 }
 
+const StaticString
+  s__invoke("__invoke"),
+  s_Closure__invoke("Closure::__invoke"),
+  s_colon2("::");
+
+bool is_callable(const Variant& v) {
+  ObjectData* obj = nullptr;
+  HPHP::Class* cls = nullptr;
+  StringData* invName = nullptr;
+  const HPHP::Func* f = vm_decode_function(v, GetCallerFrame(), false, obj, cls,
+                                           invName, DecodeFlags::LookupOnly);
+  if (invName != nullptr) {
+    decRefStr(invName);
+  }
+  return f != nullptr && !f->isAbstract();
+}
+
+bool is_callable(const Variant& v, bool syntax_only, RefData* name) {
+  bool ret = true;
+  if (LIKELY(!syntax_only)) {
+    ret = is_callable(v);
+    if (LIKELY(!name)) return ret;
+  }
+
+  auto const tv_func = v.asCell();
+  if (isStringType(tv_func->m_type)) {
+    if (name) *name->var() = v;
+    return ret;
+  }
+
+  if (isArrayType(tv_func->m_type)) {
+    const Array& arr = Array(tv_func->m_data.parr);
+    const Variant& clsname = arr.rvalAtRef(int64_t(0));
+    const Variant& mthname = arr.rvalAtRef(int64_t(1));
+    if (arr.size() != 2 ||
+        &clsname == &null_variant ||
+        !mthname.isString()) {
+      if (name) *name->var() = array_string;
+      return false;
+    }
+
+    auto const tv_meth = mthname.asCell();
+    auto const tv_cls = clsname.asCell();
+    StringData* clsString = nullptr;
+    if (tv_cls->m_type == KindOfObject) {
+      clsString = tv_cls->m_data.pobj->getClassName().get();
+    } else if (isStringType(tv_cls->m_type)) {
+      clsString = tv_cls->m_data.pstr;
+    } else {
+      if (name) *name->var() = array_string;
+      return false;
+    }
+
+    if (name) {
+      *name->var() = concat3(String{clsString},
+                             s_colon2,
+                             String{tv_meth->m_data.pstr});
+    }
+    return ret;
+  }
+
+  if (tv_func->m_type == KindOfObject) {
+    ObjectData *d = tv_func->m_data.pobj;
+    const Func* invoke = d->getVMClass()->lookupMethod(s__invoke.get());
+    if (name) {
+      if (d->instanceof(c_Closure::classof())) {
+        // Hack to stop the mangled name from showing up
+        *name->var() = s_Closure__invoke;
+      } else {
+        *name->var() = d->getClassName().asString() + "::__invoke";
+      }
+    }
+    return invoke != nullptr;
+  }
+
+  return false;
+}
+
 const HPHP::Func*
 vm_decode_function(const Variant& function,
                    ActRec* ar,
@@ -90,7 +185,7 @@ vm_decode_function(const Variant& function,
                    ObjectData*& this_,
                    HPHP::Class*& cls,
                    StringData*& invName,
-                   bool warn /* = true */) {
+                   DecodeFlags flags /* = DecodeFlags::Warn */) {
   invName = nullptr;
   if (function.isString() || function.isArray()) {
     HPHP::Class* ctx = nullptr;
@@ -117,7 +212,7 @@ vm_decode_function(const Variant& function,
       assert(function.isArray());
       Array arr = function.toArray();
       if (!array_is_valid_callback(arr)) {
-        if (warn) {
+        if (flags == DecodeFlags::Warn) {
           throw_invalid_argument("function: not a valid callback array");
         }
         return nullptr;
@@ -145,15 +240,15 @@ vm_decode_function(const Variant& function,
             forwarding = true;
           }
         } else if (sclass.get()->isame(s_static.get())) {
-          if (ar) {
+          if (ar && ar->func()->cls()) {
             if (ar->hasThis()) {
               cls = ar->getThis()->getVMClass();
-            } else if (ar->hasClass()) {
+            } else {
               cls = ar->getClass();
             }
           }
         } else {
-          if (warn && nameContainsClass) {
+          if (flags == DecodeFlags::Warn && nameContainsClass) {
             String nameClass = name.substr(0, pos);
             if (nameClass.get()->isame(s_self.get())   ||
                 nameClass.get()->isame(s_static.get())) {
@@ -164,7 +259,7 @@ vm_decode_function(const Variant& function,
           cls = Unit::loadClass(sclass.get());
         }
         if (!cls) {
-          if (warn) {
+          if (flags == DecodeFlags::Warn) {
             throw_invalid_argument("function: class not found");
           }
           return nullptr;
@@ -199,10 +294,10 @@ vm_decode_function(const Variant& function,
           forwarding = true;
         }
       } else if (c.get()->isame(s_static.get())) {
-        if (ar) {
+        if (ar && ar->func()->cls()) {
           if (ar->hasThis()) {
             cc = ar->getThis()->getVMClass();
-          } else if (ar->hasClass()) {
+          } else {
             cc = ar->getClass();
           }
         }
@@ -210,14 +305,14 @@ vm_decode_function(const Variant& function,
         cc = Unit::loadClass(c.get());
       }
       if (!cc) {
-        if (warn) {
+        if (flags == DecodeFlags::Warn) {
           throw_invalid_argument("function: class not found");
         }
         return nullptr;
       }
       if (cls) {
         if (!cls->classof(cc)) {
-          if (warn) {
+          if (flags == DecodeFlags::Warn) {
             raise_warning("call_user_func expects parameter 1 to be a valid "
                           "callback, class '%s' is not a subclass of '%s'",
                           cls->preClass()->name()->data(),
@@ -234,7 +329,7 @@ vm_decode_function(const Variant& function,
     if (!cls) {
       HPHP::Func* f = HPHP::Unit::loadFunc(name.get());
       if (!f) {
-        if (warn) {
+        if (flags == DecodeFlags::Warn) {
           throw_invalid_argument("function: method '%s' not found",
                                  name.data());
         }
@@ -251,11 +346,11 @@ vm_decode_function(const Variant& function,
       // If we found a method and its static, null out this_
       this_ = nullptr;
     } else {
-      if (!this_ && ar) {
+      if (!this_ && ar && ar->func()->cls() && ar->hasThis()) {
         // If we did not find a static method AND this_ is null AND there is a
         // frame ar, check if the current instance from ar is compatible
-        ObjectData* obj = ar->hasThis() ? ar->getThis() : nullptr;
-        if (obj && obj->instanceof(cls)) {
+        auto const obj = ar->getThis();
+        if (obj->instanceof(cls)) {
           this_ = obj;
           cls = obj->getVMClass();
         }
@@ -279,7 +374,7 @@ vm_decode_function(const Variant& function,
           invName->incRefCount();
         } else {
           // Bail out if we couldn't find the method or __call
-          if (warn) {
+          if (flags == DecodeFlags::Warn) {
             throw_invalid_argument("function: method '%s' not found",
                                    name.data());
           }
@@ -288,11 +383,11 @@ vm_decode_function(const Variant& function,
       }
     }
 
-    if (f->isClosureBody() && !this_) {
-      if (warn) {
-        raise_warning("cannot invoke closure body without closure object");
+    if (!this_ && !f->isStaticInProlog()) {
+      if (flags == DecodeFlags::Warn) raise_missing_this(f);
+      if (flags != DecodeFlags::LookupOnly && f->attrs() & AttrRequiresThis) {
+        return nullptr;
       }
-      return nullptr;
     }
 
     assert(f && f->preClass());
@@ -301,17 +396,13 @@ vm_decode_function(const Variant& function,
     assert(!this_ || this_->getVMClass() == cls);
     // If we are doing a forwarding call and this_ is null, set cls
     // appropriately to propagate the current late bound class.
-    if (!this_ && forwarding && ar) {
-      HPHP::Class* fwdCls = nullptr;
-      ObjectData* obj = ar->hasThis() ? ar->getThis() : nullptr;
-      if (obj) {
-        fwdCls = obj->getVMClass();
-      } else if (ar->hasClass()) {
-        fwdCls = ar->getClass();
-      }
+    if (!this_ && forwarding && ar && ar->func()->cls()) {
+      auto const fwdCls = ar->hasThis() ?
+        ar->getThis()->getVMClass() : ar->getClass();
+
       // Only forward the current late bound class if it is the same or
       // a descendent of cls
-      if (fwdCls && fwdCls->classof(cls)) {
+      if (fwdCls->classof(cls)) {
         cls = fwdCls;
       }
     }
@@ -321,20 +412,19 @@ vm_decode_function(const Variant& function,
     this_ = function.asCObjRef().get();
     cls = nullptr;
     const HPHP::Func *f = this_->getVMClass()->lookupMethod(s___invoke.get());
-    if (f != nullptr &&
-        ((f->attrs() & AttrStatic) && !f->isClosureBody())) {
+    if (f != nullptr && f->isStaticInProlog()) {
       // If __invoke is static, invoke it as such
       cls = this_->getVMClass();
       this_ = nullptr;
     }
-    if (warn && f == nullptr) {
+    if (flags == DecodeFlags::Warn && f == nullptr) {
       raise_warning("call_user_func() expects parameter 1 to be a valid "
                     "callback, object of class %s given (no __invoke "
                     "method found)", this_->getVMClass()->name()->data());
     }
     return f;
   }
-  if (warn) {
+  if (flags == DecodeFlags::Warn) {
     throw_invalid_argument("function: not string, closure, or array");
   }
   return nullptr;
@@ -354,6 +444,9 @@ Variant vm_call_user_func(const Variant& function, const Variant& params,
   Variant ret;
   g_context->invokeFunc((TypedValue*)&ret, f, params, obj, cls,
                           nullptr, invName, ExecutionContext::InvokeCuf);
+  if (UNLIKELY(ret.getRawType()) == KindOfRef) {
+    tvUnbox(ret.asTypedValue());
+  }
   return ret;
 }
 
@@ -372,11 +465,16 @@ static Variant invoke_failed(const char *func,
 
 static Variant invoke(const String& function, const Variant& params,
                       strhash_t hash, bool tryInterp,
-                      bool fatal) {
+                      bool fatal, bool useWeakTypes = false) {
   Func* func = Unit::loadFunc(function.get());
   if (func && (isContainer(params) || params.isNull())) {
     Variant ret;
-    g_context->invokeFunc(ret.asTypedValue(), func, params);
+    g_context->invokeFunc(ret.asTypedValue(), func, params, nullptr, nullptr,
+                          nullptr, nullptr, ExecutionContext::InvokeNormal,
+                          useWeakTypes);
+    if (UNLIKELY(ret.getRawType()) == KindOfRef) {
+      tvUnbox(ret.asTypedValue());
+    }
     return ret;
   }
   return invoke_failed(function.c_str(), fatal);
@@ -385,9 +483,10 @@ static Variant invoke(const String& function, const Variant& params,
 // Declared in externals.h.  If you're considering calling this
 // function for some new code, please reconsider.
 Variant invoke(const char *function, const Variant& params, strhash_t hash /* = -1 */,
-               bool tryInterp /* = true */, bool fatal /* = true */) {
+               bool tryInterp /* = true */, bool fatal /* = true */,
+               bool useWeakTypes /* = false */) {
   String funcName(function, CopyString);
-  return invoke(funcName, params, hash, tryInterp, fatal);
+  return invoke(funcName, params, hash, tryInterp, fatal, useWeakTypes);
 }
 
 Variant invoke_static_method(const String& s, const String& method,
@@ -405,6 +504,9 @@ Variant invoke_static_method(const String& s, const String& method,
   }
   Variant ret;
   g_context->invokeFunc((TypedValue*)&ret, f, params, nullptr, class_);
+  if (UNLIKELY(ret.getRawType()) == KindOfRef) {
+    tvUnbox(ret.asTypedValue());
+  }
   return ret;
 }
 
@@ -415,11 +517,53 @@ Variant o_invoke_failed(const char *cls, const char *meth,
     msg += cls;
     msg += "::";
     msg += meth;
-    throw FatalErrorException(msg.c_str());
+    raise_fatal_error(msg.c_str());
   } else {
     raise_warning("call_user_func to non-existent method %s::%s", cls, meth);
     return false;
   }
+}
+
+template<class EF, class NF>
+void missing_this_check_helper(const Func* f, EF ef, NF nf) {
+  if (f->attrs() & AttrRequiresThis) {
+    ef();
+    return;
+  }
+
+  if (RuntimeOption::EvalRaiseMissingThis && !f->isStatic()) {
+    nf();
+    return;
+  }
+}
+
+void raise_missing_this(const Func* f) {
+  missing_this_check_helper(
+    f,
+    [&] {
+      raise_error("Non-static method %s() cannot be called statically",
+                  f->fullName()->data());
+    },
+    [&] {
+      auto constexpr msg =
+        "Non-static method %s() should not be called statically";
+
+      if (RuntimeOption::PHP7_DeprecationWarnings) {
+        raise_deprecated(msg, f->fullName()->data());
+      } else {
+        raise_strict_warning(msg, f->fullName()->data());
+      }
+    });
+}
+
+bool needs_missing_this_check(const Func* f) {
+  bool ret = false;
+  missing_this_check_helper(
+    f,
+    [&] { ret = true; },
+    [&] { ret = true; }
+  );
+  return ret;
 }
 
 void NEVER_INLINE raise_null_object_prop() {
@@ -444,35 +588,56 @@ void throw_instance_method_fatal(const char *name) {
 }
 
 void throw_iterator_not_valid() {
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(
-    "Iterator is not valid"));
-  throw e;
+  SystemLib::throwInvalidOperationExceptionObject(
+    "Iterator is not valid");
 }
 
 void throw_collection_modified() {
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(
-    "Collection was modified during iteration"));
-  throw e;
+  SystemLib::throwInvalidOperationExceptionObject(
+    "Collection was modified during iteration");
 }
 
 void throw_collection_property_exception() {
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(
-    "Cannot access a property on a collection"));
-  throw e;
+  SystemLib::throwInvalidOperationExceptionObject(
+    "Cannot access a property on a collection");
+}
+
+void throw_invalid_collection_parameter() {
+  SystemLib::throwInvalidArgumentExceptionObject(
+    "Parameter must be an array or an instance of Traversable");
+}
+
+void throw_invalid_operation_exception(StringData* str) {
+  SystemLib::throwInvalidOperationExceptionObject(Variant{str});
+}
+
+void throw_arithmetic_error(StringData* str) {
+  SystemLib::throwArithmeticErrorObject(Variant{str});
+}
+
+void throw_division_by_zero_error(StringData *str) {
+  SystemLib::throwDivisionByZeroErrorObject(Variant{str});
 }
 
 void throw_collection_compare_exception() {
-  static const string msg(
-    "Cannot use relational comparison operators (<, <=, >, >=) to compare "
-    "a collection with an integer, double, string, array, or object");
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(msg));
-  throw e;
+  SystemLib::throwInvalidOperationExceptionObject(s_cmpWithCollection);
+}
+
+void throw_vec_compare_exception() {
+  SystemLib::throwInvalidOperationExceptionObject(s_cmpWithVec);
+}
+
+void throw_dict_compare_exception() {
+  SystemLib::throwInvalidOperationExceptionObject(s_cmpWithDict);
+}
+
+void throw_keyset_compare_exception() {
+  SystemLib::throwInvalidOperationExceptionObject(s_cmpWithKeyset);
 }
 
 void throw_param_is_not_container() {
   static const string msg("Parameter must be an array or collection");
-  Object e(SystemLib::AllocInvalidArgumentExceptionObject(msg));
-  throw e;
+  SystemLib::throwInvalidArgumentExceptionObject(msg);
 }
 
 void throw_cannot_modify_immutable_object(const char* className) {
@@ -480,15 +645,14 @@ void throw_cannot_modify_immutable_object(const char* className) {
     "Cannot modify immutable object of type {}",
     className
   ).str();
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(msg));
-  throw e;
+  SystemLib::throwInvalidOperationExceptionObject(msg);
 }
 
-void check_collection_compare(ObjectData* obj) {
+void check_collection_compare(const ObjectData* obj) {
   if (obj && obj->isCollection()) throw_collection_compare_exception();
 }
 
-void check_collection_compare(ObjectData* obj1, ObjectData* obj2) {
+void check_collection_compare(const ObjectData* obj1, const ObjectData* obj2) {
   if (obj1 && obj2 && (obj1->isCollection() || obj2->isCollection())) {
     throw_collection_compare_exception();
   }
@@ -504,12 +668,27 @@ void check_collection_cast_to_array() {
 }
 
 Object create_object_only(const String& s) {
-  return g_context->createObjectOnly(s.get());
+  return Object::attach(g_context->createObjectOnly(s.get()));
 }
 
-Object create_object(const String& s, const Array& params, bool init /* = true */) {
-  return g_context->createObject(s.get(), params, init);
+Object init_object(const String& s, const Array& params, ObjectData* o) {
+  return Object{g_context->initObject(s.get(), params, o)};
 }
+
+Object
+create_object(const String& s, const Array& params, bool init /* = true */) {
+  return Object::attach(g_context->createObject(s.get(), params, init));
+}
+
+void throw_object(const Object& e) {
+  throw req::root<Object>(e);
+}
+
+#if ((__GNUC__ != 4) || (__GNUC_MINOR__ != 8))
+void throw_object(Object&& e) {
+  throw req::root<Object>(std::move(e));
+}
+#endif
 
 /*
  * This function is used when another thread is segfaulting---we just
@@ -520,6 +699,21 @@ void pause_forever() {
   for (;;) sleep(300);
 }
 
+bool is_constructor_name(const char* fn) {
+  auto len = strlen(fn);
+  const char construct[] = "__construct";
+  auto clen = sizeof(construct) - 1;
+
+  if (len >= clen && !strcasecmp(fn + len - clen, construct)) {
+    if (len == clen || (len > clen + 2 &&
+                        fn[len - clen - 1] == ':' &&
+                        fn[len - clen - 2] == ':')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void throw_wrong_argument_count_nr(const char *fn, int expected, int got,
                                    const char *expectDesc,
                                    int level /* = 0 */,
@@ -528,18 +722,22 @@ void throw_wrong_argument_count_nr(const char *fn, int expected, int got,
     rv->m_data.num = 0LL;
     rv->m_type = KindOfNull;
   }
-  if (level == 2) {
-    if (expected == 1) {
-      raise_error(Strings::MISSING_ARGUMENT, fn, expectDesc, got);
-    } else {
-      raise_error(Strings::MISSING_ARGUMENTS, fn, expectDesc, expected, got);
-    }
+  std::string msg;
+  if (expected == 1) {
+    msg = (boost::format(Strings::MISSING_ARGUMENT) %
+           fn % expectDesc % got).str();
   } else {
-    if (expected == 1) {
-      raise_warning(Strings::MISSING_ARGUMENT, fn, expectDesc, got);
-    } else {
-      raise_warning(Strings::MISSING_ARGUMENTS, fn, expectDesc, expected, got);
+    msg = (boost::format(Strings::MISSING_ARGUMENTS) %
+           fn % expectDesc % expected % got).str();
+  }
+
+  if (level == 2) {
+    raise_error(msg);
+  } else {
+    if (is_constructor_name(fn)) {
+      SystemLib::throwExceptionObject(msg);
     }
+    raise_warning(msg);
   }
 }
 
@@ -591,20 +789,24 @@ void throw_bad_type_exception(const char *fmt, ...) {
   raise_warning("Invalid operand type was used: %s", msg.c_str());
 }
 
-void throw_expected_array_exception() {
-  const char* fn = "(unknown)";
-  ActRec *ar = g_context->getStackFrame();
-  if (ar) {
-    fn = ar->m_func->name()->data();
+void throw_expected_array_exception(const char* fn /*=nullptr*/) {
+  if (!fn) {
+    if (auto ar = g_context->getStackFrame()) {
+     fn = ar->m_func->name()->data();
+    } else {
+     fn = "(unknown)";
+    }
   }
   throw_bad_type_exception("%s expects array(s)", fn);
 }
 
-void throw_expected_array_or_collection_exception() {
-  const char* fn = "(unknown)";
-  ActRec *ar = g_context->getStackFrame();
-  if (ar) {
-    fn = ar->m_func->name()->data();
+void throw_expected_array_or_collection_exception(const char* fn /*=nullptr*/) {
+  if (!fn) {
+    if (auto ar = g_context->getStackFrame()) {
+      fn = ar->m_func->name()->data();
+    } else {
+      fn = "(unknown)";
+    }
   }
   throw_bad_type_exception("%s expects array(s) or collection(s)", fn);
 }
@@ -623,60 +825,26 @@ Variant throw_fatal_unset_static_property(const char *s, const char *prop) {
   return uninit_null();
 }
 
-Exception* generate_request_timeout_exception() {
-  Exception* ret = nullptr;
-  ThreadInfo *info = ThreadInfo::s_threadInfo.getNoCheck();
-  RequestInjectionData &data = info->m_reqInjectionData;
-
-  bool cli = RuntimeOption::ClientExecutionMode();
-  std::string exceptionMsg = cli ?
-    "Maximum execution time of " :
-    "entire web request took longer than ";
-  exceptionMsg += folly::to<std::string>(data.getTimeout());
-  exceptionMsg += cli ? " seconds exceeded" : " seconds and timed out";
-  Array exceptionStack = createBacktrace(BacktraceArgs()
-                                         .withSelf()
-                                         .withThis());
-  ret = new RequestTimeoutException(exceptionMsg, exceptionStack);
-  return ret;
-}
-
-Exception* generate_request_cpu_timeout_exception() {
-  ThreadInfo* info = ThreadInfo::s_threadInfo.getNoCheck();
-  RequestInjectionData& data = info->m_reqInjectionData;
-
-  auto exceptionMsg =
-    folly::format("Maximum CPU time of {} seconds exceeded",
-                  data.getCPUTimeout()).str();
-  Array exceptionStack = createBacktrace(BacktraceArgs()
-                                         .withSelf()
-                                         .withThis());
-  return new RequestCPUTimeoutException(exceptionMsg, exceptionStack);
-}
-
-Exception* generate_memory_exceeded_exception() {
-  Array exceptionStack = createBacktrace(BacktraceArgs()
-                                         .withSelf()
-                                         .withThis());
-  return new RequestMemoryExceededException(
-    "request has exceeded memory limit", exceptionStack);
-}
-
 Variant unserialize_ex(const char* str, int len,
                        VariableUnserializer::Type type,
-                       const Array& class_whitelist /* = null_array */) {
+                       const Array& options /* = null_array */) {
   if (str == nullptr || len <= 0) {
     return false;
   }
 
-  VariableUnserializer vu(str, len, type, true, class_whitelist);
+  VariableUnserializer vu(str, len, type, true, options);
   Variant v;
   try {
     v = vu.unserialize();
   } catch (FatalErrorException &e) {
     throw;
+  } catch (InvalidAllowedClassesException &e) {
+    raise_warning(
+      "unserialize(): allowed_classes option should be array or boolean"
+    );
+    return false;
   } catch (Exception &e) {
-    raise_notice("Unable to unserialize: [%s]. %s.", str,
+    raise_notice("Unable to unserialize: [%.1000s]. %s.", str,
                  e.getMessage().c_str());
     return false;
   }
@@ -685,38 +853,38 @@ Variant unserialize_ex(const char* str, int len,
 
 Variant unserialize_ex(const String& str,
                        VariableUnserializer::Type type,
-                       const Array& class_whitelist /* = null_array */) {
-  return unserialize_ex(str.data(), str.size(), type, class_whitelist);
+                       const Array& options /* = null_array */) {
+  return unserialize_ex(str.data(), str.size(), type, options);
 }
 
 String concat3(const String& s1, const String& s2, const String& s3) {
-  StringSlice r1 = s1.slice();
-  StringSlice r2 = s2.slice();
-  StringSlice r3 = s3.slice();
-  int len = r1.len + r2.len + r3.len;
-  StringData* str = StringData::Make(len);
-  auto const r = str->bufferSlice();
-  memcpy(r.ptr,                   r1.ptr, r1.len);
-  memcpy(r.ptr + r1.len,          r2.ptr, r2.len);
-  memcpy(r.ptr + r1.len + r2.len, r3.ptr, r3.len);
-  str->setSize(len);
+  auto r1 = s1.slice();
+  auto r2 = s2.slice();
+  auto r3 = s3.slice();
+  auto len = r1.size() + r2.size() + r3.size();
+  auto str = String::attach(StringData::Make(len));
+  auto const r = str.mutableData();
+  memcpy(r,                         r1.data(), r1.size());
+  memcpy(r + r1.size(),             r2.data(), r2.size());
+  memcpy(r + r1.size() + r2.size(), r3.data(), r3.size());
+  str.setSize(len);
   return str;
 }
 
 String concat4(const String& s1, const String& s2, const String& s3,
                const String& s4) {
-  StringSlice r1 = s1.slice();
-  StringSlice r2 = s2.slice();
-  StringSlice r3 = s3.slice();
-  StringSlice r4 = s4.slice();
-  int len = r1.len + r2.len + r3.len + r4.len;
-  StringData* str = StringData::Make(len);
-  auto const r = str->bufferSlice();
-  memcpy(r.ptr,                            r1.ptr, r1.len);
-  memcpy(r.ptr + r1.len,                   r2.ptr, r2.len);
-  memcpy(r.ptr + r1.len + r2.len,          r3.ptr, r3.len);
-  memcpy(r.ptr + r1.len + r2.len + r3.len, r4.ptr, r4.len);
-  str->setSize(len);
+  auto r1 = s1.slice();
+  auto r2 = s2.slice();
+  auto r3 = s3.slice();
+  auto r4 = s4.slice();
+  auto len = r1.size() + r2.size() + r3.size() + r4.size();
+  auto str = String::attach(StringData::Make(len));
+  auto const r = str.mutableData();
+  memcpy(r,                                     r1.data(), r1.size());
+  memcpy(r + r1.size(),                         r2.data(), r2.size());
+  memcpy(r + r1.size() + r2.size(),             r3.data(), r3.size());
+  memcpy(r + r1.size() + r2.size() + r3.size(), r4.data(), r4.size());
+  str.setSize(len);
   return str;
 }
 
@@ -747,18 +915,22 @@ static Variant invoke_file(const String& s,
 
 Variant include_impl_invoke(const String& file, bool once,
                             const char *currentDir) {
-  if (file[0] == '/') {
+  if (FileUtil::isAbsolutePath(file.toCppString())) {
     if (RuntimeOption::SandboxMode || !RuntimeOption::AlwaysUseRelativePath) {
       try {
         return invoke_file(file, once, currentDir);
       } catch(PhpFileDoesNotExistException &e) {}
     }
 
-    String rel_path(FileUtil::relativePath(RuntimeOption::SourceRoot,
+    try {
+      String rel_path(FileUtil::relativePath(RuntimeOption::SourceRoot,
                                            string(file.data())));
 
-    // Don't try/catch - We want the exception to be passed along
-    return invoke_file(rel_path, once, currentDir);
+      // Don't try/catch - We want the exception to be passed along
+      return invoke_file(rel_path, once, currentDir);
+    } catch(PhpFileDoesNotExistException &e) {
+      throw PhpFileDoesNotExistException(file.c_str());
+    }
   } else {
     // Don't try/catch - We want the exception to be passed along
     return invoke_file(file, once, currentDir);
@@ -806,7 +978,7 @@ String resolve_include(const String& file, const char* currentDir,
       return file;
     }
 
-  } else if (c_file[0] == '/') {
+  } else if (FileUtil::isAbsolutePath(file.toCppString())) {
     String can_path = FileUtil::canonicalize(file);
 
     if (tryFile(can_path, ctx)) {
@@ -824,16 +996,14 @@ String resolve_include(const String& file, const char* currentDir,
     }
 
   } else {
-    auto includePaths = ThreadInfo::s_threadInfo.getNoCheck()->
-      m_reqInjectionData.getIncludePaths();
-    unsigned int path_count = includePaths.size();
+    auto const& includePaths = RID().getIncludePaths();
 
-    for (int i = 0; i < (int)path_count; i++) {
+    for (auto const& includePath : includePaths) {
       String path("");
-      String includePath(includePaths[i]);
-      bool is_stream_wrapper = (includePath.find("://") > 0);
+      auto const is_stream_wrapper =
+        includePath.find("://") != std::string::npos;
 
-      if (!is_stream_wrapper && includePath[0] != '/') {
+      if (!is_stream_wrapper && !FileUtil::isAbsolutePath(includePath)) {
         path += (g_context->getCwd() + "/");
       }
 
@@ -857,7 +1027,7 @@ String resolve_include(const String& file, const char* currentDir,
       }
     }
 
-    if (currentDir[0] == '/') {
+    if (FileUtil::isAbsolutePath(currentDir)) {
       String path(currentDir);
       path += "/";
       path += file;
@@ -894,7 +1064,7 @@ static Variant include_impl(const String& file, bool once,
     if (required) {
       String ms = "Required file that does not exist: ";
       ms += file;
-      throw FatalErrorException(ms.data());
+      raise_fatal_error(ms.data());
     }
     return false;
   }
@@ -919,12 +1089,11 @@ bool function_exists(const String& function_name) {
 // debugger and code coverage instrumentation
 
 void throw_exception(const Object& e) {
-  if (!e.instanceof(SystemLib::s_ExceptionClass)) {
-    raise_error("Exceptions must be valid objects derived from the "
-                "Exception base class");
+  if (!e.instanceof(SystemLib::s_ThrowableClass)) {
+    raise_error("Exceptions must implement the Throwable interface.");
   }
   DEBUGGER_ATTACHED_ONLY(phpDebuggerExceptionThrownHook(e.get()));
-  throw e;
+  throw req::root<Object>(e);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

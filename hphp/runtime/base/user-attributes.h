@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,8 +21,9 @@
 #include <utility>
 
 #include "hphp/util/copy-ptr.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/typed-value.h"
 
@@ -35,7 +36,8 @@ namespace HPHP {
  * Most things won't have attributes, so we've made the map optimize for the
  * case that it's empty (minimizing sizeof(UserAttributeMap)).
  */
-class UserAttributeMap {
+struct UserAttributeMap {
+private:
   using Map = hphp_hash_map<
     LowStringPtr,
     TypedValue,

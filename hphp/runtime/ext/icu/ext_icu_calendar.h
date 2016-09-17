@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_INTL_CALENDAR_H
 #define incl_HPHP_INTL_CALENDAR_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/calendar.h>
@@ -27,8 +27,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlCalendar;
 
-class IntlCalendar : public IntlError {
- public:
+struct IntlCalendar : IntlError {
   IntlCalendar() {}
   IntlCalendar(const IntlCalendar&) = delete;
   IntlCalendar& operator=(const IntlCalendar& src) {
@@ -51,7 +50,7 @@ class IntlCalendar : public IntlError {
       c_IntlCalendar = Unit::lookupClass(s_IntlCalendar.get());
       assert(c_IntlCalendar);
     }
-    auto ret = ObjectData::newInstance(c_IntlCalendar);
+    Object ret{c_IntlCalendar};
     if (cal) {
       Native::data<IntlCalendar>(ret)->setCalendar(cal);
     }

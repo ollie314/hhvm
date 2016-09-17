@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -57,12 +57,18 @@ struct InterceptRequestData final : RequestEventHandler {
 
   void requestInit() override { clear(); }
   void requestShutdown() override { clear(); }
+  void vscan(IMarker& mark) const override {
+    // maybe better to teach heap-trace and IMarker about hphp_hash_set/map
+    for (auto& s : m_allowed_functions) mark(s);
+    for (auto& p : m_renamed_functions) mark(p);
+    mark(m_global_handler);
+    for (auto& p : m_intercept_handlers) mark(p);
+  }
 
 public:
   bool m_use_allowed_functions;
   StringISet m_allowed_functions;
   StringIMap<String> m_renamed_functions;
-
   Variant m_global_handler;
   StringIMap<Variant> m_intercept_handlers;
 };
@@ -76,26 +82,33 @@ static Mutex s_mutex;
  * The vector contains a list of maybeIntercepted flags for functions
  * with this name.
  */
-typedef StringIMap<std::pair<bool,std::vector<char*>>> RegisteredFlagsMap;
+typedef StringIMap<std::pair<bool,std::vector<int8_t*>>> RegisteredFlagsMap;
 
 static RegisteredFlagsMap s_registered_flags;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static void flag_maybe_intercepted(std::vector<char*> &flags) {
+static void flag_maybe_intercepted(std::vector<int8_t*> &flags) {
   for (auto flag : flags) {
     *flag = 1;
   }
 }
 
-bool register_intercept(const String& name, const Variant& callback, const Variant& data) {
+bool register_intercept(const String& name, const Variant& callback,
+                        const Variant& data) {
   StringIMap<Variant> &handlers = s_intercept_data->m_intercept_handlers;
   if (!callback.toBoolean()) {
     if (name.empty()) {
       s_intercept_data->m_global_handler.unset();
-      handlers.clear();
+      StringIMap<Variant> empty;
+      handlers.swap(empty);
     } else {
-      handlers.erase(name);
+      auto tmp = handlers[name];
+      auto it = handlers.find(name);
+      if (it != handlers.end()) {
+        auto tmp = it->second;
+        handlers.erase(it);
+      }
     }
     return true;
   }
@@ -106,7 +119,8 @@ bool register_intercept(const String& name, const Variant& callback, const Varia
 
   if (name.empty()) {
     s_intercept_data->m_global_handler = handler;
-    handlers.clear();
+    StringIMap<Variant> empty;
+    handlers.swap(empty);
   } else {
     handlers[name] = handler;
   }
@@ -144,7 +158,7 @@ static Variant *get_enabled_intercept_handler(const String& name) {
   return handler;
 }
 
-Variant *get_intercept_handler(const String& name, char* flag) {
+Variant *get_intercept_handler(const String& name, int8_t* flag) {
   TRACE(1, "get_intercept_handler %s flag is %d\n",
         name.get()->data(), (int)*flag);
   if (*flag == -1) {
@@ -169,12 +183,12 @@ Variant *get_intercept_handler(const String& name, char* flag) {
   return handler;
 }
 
-void unregister_intercept_flag(const String& name, char *flag) {
+void unregister_intercept_flag(const String& name, int8_t *flag) {
   Lock lock(s_mutex);
   RegisteredFlagsMap::iterator iter =
     s_registered_flags.find(name);
   if (iter != s_registered_flags.end()) {
-    std::vector<char*> &flags = iter->second.second;
+    std::vector<int8_t*> &flags = iter->second.second;
     for (int i = flags.size(); i--; ) {
       if (flag == flags[i]) {
         flags.erase(flags.begin() + i);
@@ -214,15 +228,10 @@ void rename_function(const String& old_name, const String& new_name) {
 
   auto const fnew = Unit::lookupFunc(newNe);
   if (fnew && fnew != func) {
-    // To match hphpc, we silently ignore functions defined in user code that
-    // have the same name as a function defined in a separable extension
-    if (!fnew->isAllowOverride()) {
-      raise_error("Function already defined: %s", n3w->data());
-    }
-    return;
+    raise_error("Function already defined: %s", n3w->data());
   }
 
-  always_assert(!RDS::isPersistentHandle(oldNe->getFuncHandle()));
+  always_assert(!rds::isPersistentHandle(oldNe->getFuncHandle()));
   oldNe->setCachedFunc(nullptr);
   newNe->m_cachedFunc.bind();
   newNe->setCachedFunc(func);

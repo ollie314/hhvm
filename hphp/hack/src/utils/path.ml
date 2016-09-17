@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,36 +8,15 @@
  *
  *)
 
+include Sys
 
-type path = {
-  is_normalized: bool;
-  path: string;
-}
+type t = string
 
-external realpath: string -> string option = "hh_realpath"
+let dummy_path : t = ""
 
-let dummy_path: path = { is_normalized = true; path = ""; }
-
-(**
- * Like Python's os.path.expanduser, though probably doesn't cover some cases.
- * Roughly follow's bash's tilde expansion:
- * http://www.gnu.org/software/bash/manual/html_node/Tilde-Expansion.html
- *
- * ~/foo -> /home/bob/foo if $HOME = "/home/bob"
- * ~joe/foo -> /home/joe/foo if joe's home is /home/joe
- *)
-let expanduser (path : string) : string =
-  Str.substitute_first
-    (Str.regexp "^~\\([^/]*\\)")
-    begin fun s ->
-      match Str.matched_group 1 s with
-        | "" ->
-          begin try Unix.getenv "HOME"
-          with Not_found -> (Unix.getpwuid (Unix.getuid())).Unix.pw_dir end
-        | unixname ->
-          try (Unix.getpwnam unixname).Unix.pw_dir
-          with Not_found -> Str.matched_string s end
-    path
+let cat = Sys_utils.cat
+let compare = Pervasives.compare
+let dirname = Filename.dirname
 
 (**
  * Resolves a path (using realpath)
@@ -50,62 +29,44 @@ let expanduser (path : string) : string =
  * - paths are always absolute. So the empty string "" becomes
  *   the current directory (in absolute)
  *)
-let mk_path (path : string) : path =
-  match realpath (expanduser path) with
-  | Some path ->
-    {
-      is_normalized=true;
-      path=path;
-    }
-  | None ->
-    {
-      is_normalized=false;
-      path=path;
-    }
+let make path =
+  match Sys_utils.realpath path with
+  | Some path -> path
+  | None -> path (* assert false? *)
 
-let string_of_path (path : path) : string =
-  path.path
+(**
+ * Creates a Path without running it through `realpath`. This is unsafe because
+ * it doesn't normalize symlinks, trailing slashes, or relative paths. The path
+ * you pass here must be absolute, and free of symlinks (including ../).
+ *)
+let make_unsafe path = path
 
-let equal (path1 : path) (path2 : path) : bool =
-  path1.is_normalized = path2.is_normalized &&
-  path1.path = path2.path
+let to_string path = path
 
-let file_exists (path : path) : bool =
-  let file = string_of_path path in
-  Sys.file_exists file
+let concat path more =
+  make (Filename.concat path more)
 
-let is_directory (path : path) : bool =
-  let file = string_of_path path in
-  Sys.is_directory file
-
-let concat (path : path) (more : string) : path =
-  let path = string_of_path path in
-  let path = Printf.sprintf "%s/%s" path more in
-  mk_path path
-
-let remove (path : path) : unit =
-  let file = string_of_path path in
-  Sys.remove file
-
-let parent (path : path) : path =
-  let s = string_of_path path in
+let parent path =
   if is_directory path
-  then mk_path (s ^ "/../")
-  else mk_path (Filename.dirname s)
+  then make (concat path Filename.parent_dir_name)
+  else make (Filename.dirname path)
 
-let slash_escaped_string_of_path (path: path) : string =
-  let path_str = string_of_path path in
-  let buf = Buffer.create (String.length path_str) in
+let output = output_string
+
+let slash_escaped_string_of_path path =
+  let buf = Buffer.create (String.length path) in
   String.iter (fun ch ->
     match ch with
+    | '\\' -> Buffer.add_string buf "zB"
+    | ':' -> Buffer.add_string buf "zC"
     | '/' -> Buffer.add_string buf "zS"
     | '\x00' -> Buffer.add_string buf "z0"
     | 'z' -> Buffer.add_string buf "zZ"
     | _ -> Buffer.add_char buf ch
-  ) path_str;
+  ) path;
   Buffer.contents buf
 
-let path_of_slash_escaped_string (str: string) : path =
+let path_of_slash_escaped_string str =
   let length = String.length str in
   let buf = Buffer.create length in
   let rec consume i =
@@ -114,6 +75,8 @@ let path_of_slash_escaped_string (str: string) : path =
       let replacement =
         if i < length - 1 && str.[i] = 'z'
         then match str.[i+1] with
+          | 'B' -> Some '\\'
+          | 'C' -> Some ':'
           | 'S' -> Some '/'
           | '0' -> Some '\x00'
           | 'Z' -> Some 'z'
@@ -125,4 +88,4 @@ let path_of_slash_escaped_string (str: string) : path =
       Buffer.add_char buf c;
       consume next_i
   in consume 0;
-  mk_path (Buffer.contents buf)
+  make (Buffer.contents buf)

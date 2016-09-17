@@ -81,8 +81,9 @@ struct APCDetailedStats {
   void removeAPCValue(APCHandle* handle, bool expired);
 
 private:
-  void addType(APCHandle* handle);
-  void removeType(APCHandle* handle);
+  void addType(const APCHandle* handle);
+  void removeType(const APCHandle* handle);
+  ServiceData::ExportedCounter* counterFor(const APCHandle*);
 
 private:
   /*
@@ -95,15 +96,36 @@ private:
   // Number of APC strings
   ServiceData::ExportedCounter* m_apcString;
   // Number of uncounted strings. Uncounted strings are kind of
-  // static strings whose lifetime is controlled by the cache
+  // static strings whose lifetime is controlled by the treadmill
   ServiceData::ExportedCounter* m_uncString;
   // Number of serialized arrays
   ServiceData::ExportedCounter* m_serArray;
+  // Number of serialized vecs
+  ServiceData::ExportedCounter* m_serVec;
+  // Number of serialized dicts
+  ServiceData::ExportedCounter* m_serDict;
+  // Number of serialized keysets
+  ServiceData::ExportedCounter* m_serKeyset;
   // Number of APC arrays
   ServiceData::ExportedCounter* m_apcArray;
+  // Number of APC vecs
+  ServiceData::ExportedCounter* m_apcVec;
+  // Number of APC dicts
+  ServiceData::ExportedCounter* m_apcDict;
+  // Number of APC keysets
+  ServiceData::ExportedCounter* m_apcKeyset;
   // Number of uncounted arrays. Uncounted arrays are kind of
-  // static arrays whose lifetime is controlled by the cache
+  // static arrays whose lifetime is controlled by the treadmill
   ServiceData::ExportedCounter* m_uncArray;
+  // Number of uncounted vecs. Uncounted vecs are kind of
+  // static vecs whose lifetime is controlled by the treadmill
+  ServiceData::ExportedCounter* m_uncVec;
+  // Number of uncounted dicts. Uncounted dicts are kind of
+  // static dicts whose lifetime is controlled by the treadmill
+  ServiceData::ExportedCounter* m_uncDict;
+  // Number of uncounted keysets. Uncounted keysets are kind of
+  // static keysets whose lifetime is controlled by the treadmill
+  ServiceData::ExportedCounter* m_uncKeyset;
   // Number of serialized objects
   ServiceData::ExportedCounter* m_serObject;
   // Number of APC objects
@@ -225,12 +247,10 @@ struct APCStats {
   }
 
   void addPendingDelete(size_t size) {
-    assert(size > 0);
     m_pendingDeleteSize->addValue(size);
   }
 
   void removePendingDelete(size_t size) {
-    assert(size > 0);
     m_pendingDeleteSize->addValue(-size);
   }
 
@@ -243,17 +263,17 @@ private:
    */
 
   // Keep track of the overall memory usage from all live values
-  ServiceData::ExportedTimeSeries* m_valueSize;
+  ServiceData::ExportedCounter* m_valueSize;
   // Keep track of the overall memory usage of all keys
-  ServiceData::ExportedTimeSeries* m_keySize;
+  ServiceData::ExportedCounter* m_keySize;
   // Size of data stored in the paged out in memory file. This
   // is basically the size of the primed data that goes into the file
-  ServiceData::ExportedTimeSeries* m_inFileSize;
+  ServiceData::ExportedCounter* m_inFileSize;
   // Size of primed data that is brought to life, that is, that goes
   // into memory
-  ServiceData::ExportedTimeSeries* m_livePrimedSize;
+  ServiceData::ExportedCounter* m_livePrimedSize;
   // Size of the APC data pending deletes in the treadmill
-  ServiceData::ExportedTimeSeries* m_pendingDeleteSize;
+  ServiceData::ExportedCounter* m_pendingDeleteSize;
 
   /*
    * Number of entry counters

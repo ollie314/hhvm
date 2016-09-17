@@ -1,5 +1,5 @@
 <?hh
-// Copyright 2004-present Facebook. All Rights Reserved.
+
 
 error_reporting(-1);
 function handler($errno, $errmsg) {
@@ -36,8 +36,8 @@ async function f7($p): Awaitable<array> { return $p; }
 async function f7_soft($p): @Awaitable<array> { return $p; }
 async function f8($p): Awaitable<callable> { return $p; }
 async function f8_soft($p): @Awaitable<callable> { return $p; }
-async function f9($p): Awaitable<Shapes> { return $p; }
-async function f9_soft($p): @Awaitable<Shapes> { return $p; }
+async function f9($p): Awaitable<Figure> { return $p; }
+async function f9_soft($p): @Awaitable<Figure> { return $p; }
 async function f10($p): Awaitable<Square> { return $p; }
 async function f10_soft($p): @Awaitable<Square> { return $p; }
 async function f11($p): Awaitable<:div> { return $p; }
@@ -61,9 +61,9 @@ async function f19_soft($p): @Awaitable<(function(int): int)> { return $p; }
 async function f20($p): Awaitable<callable> { return $p; }
 async function f20_soft($p): @Awaitable<callable> { return $p; }
 
-class Shapes {}
-class Square extends Shapes {}
-class Fractal<T> extends Shapes {}
+class Figure {}
+class Square extends Figure {}
+class Fractal<T> extends Figure {}
 class :div {}
 
 class A {}
@@ -84,7 +84,7 @@ function testfunc() {}
 
 function call_wrapper($fn, $arg) {
   try {
-    $fn($arg)->join();
+    HH\Asio\join($fn($arg));
   } catch (Exception $e) {
     echo "Caught exception: " . $e->getMessage() . "\n";
   }
@@ -107,7 +107,7 @@ function main() {
       call_wrapper($f, imagecreate(10, 10));
       call_wrapper($f, array());
       call_wrapper($f, function($x){return $x*$x;});
-      call_wrapper($f, new Shapes());
+      call_wrapper($f, new Figure());
       call_wrapper($f, new Square());
       call_wrapper($f, new Fractal());
       call_wrapper($f, <div/>);
@@ -119,12 +119,12 @@ function main() {
   $c = new C();
   echo "\ncalling f21\n";
   try {
-    $c->f21()->join();
+    HH\Asio\join($c->f21());
   } catch (Exception $e) {
     echo "Caught exception: " . $e->getMessage() . "\n";
   }
   try {
-    $c->f21_soft()->join();
+    HH\Asio\join($c->f21_soft());
   } catch (Exception $e) {
     echo "Caught exception: " . $e->getMessage() . "\n";
   }
@@ -147,7 +147,7 @@ function main() {
     call_wrapper($f, imagecreate(10, 10));
     call_wrapper($f, array());
     call_wrapper($f, function($x){return $x*$x;});
-    call_wrapper($f, new Shapes());
+    call_wrapper($f, new Figure());
     call_wrapper($f, new Square());
     call_wrapper($f, new Fractal());
     call_wrapper($f, <div/>);

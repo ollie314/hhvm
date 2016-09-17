@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_APC_H_
 #define incl_HPHP_EXT_APC_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include <set>
 #include <vector>
 #include "hphp/runtime/server/upload.h"
@@ -26,8 +26,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class apcExtension : public Extension {
- public:
+struct apcExtension final : Extension {
   apcExtension() : Extension("apc", "4.0.2") {}
 
   static bool Enable;
@@ -49,9 +48,14 @@ class apcExtension : public Extension {
   static int PurgeRate;
   static bool AllowObj;
   static int TTLLimit;
+  static std::vector<std::string> HotPrefix;
+  static int HotSize;
+  static double HotLoadFactor;
+  static bool HotKeyAllocLow;
+  static bool HotMapAllocLow;
+  static std::string PrimeLibraryUpgradeDest;
   static bool UseFileStorage;
   static int64_t FileStorageChunkSize;
-  static int64_t FileStorageMaxSize;
   static std::string FileStoragePrefix;
   static int FileStorageAdviseOutPeriod;
   static std::string FileStorageFlagKey;
@@ -68,6 +72,7 @@ class apcExtension : public Extension {
 };
 
 ///////////////////////////////////////////////////////////////////////////////
+
 Variant HHVM_FUNCTION(apc_add,
                       const Variant& key_or_array,
                       const Variant& var = null_variant,
@@ -79,9 +84,9 @@ Variant HHVM_FUNCTION(apc_store,
 bool HHVM_FUNCTION(apc_store_as_primed_do_not_use,
                    const String& key,
                    const Variant& var);
-Variant HHVM_FUNCTION(apc_fetch,
-                      const Variant& key,
-                      VRefParam success = uninit_null());
+TypedValue HHVM_FUNCTION(apc_fetch,
+                         const Variant& key,
+                         VRefParam success = uninit_null());
 Variant HHVM_FUNCTION(apc_delete,
                       const Variant& key);
 bool HHVM_FUNCTION(apc_clear_cache,
@@ -114,6 +119,9 @@ Array HHVM_FUNCTION(apc_sma_info,
 
 void apc_load(int thread);
 
+// Evict any file-backed APC values from OS page cache.
+void apc_advise_out();
+
 // needed by generated apc archive .cpp files
 void apc_load_impl(struct cache_info *info,
                    const char **int_keys, long long *int_values,
@@ -129,8 +137,7 @@ void apc_load_impl_compressed(
   int *thrift_lens, const char *thrifts,
   int *other_lens, const char *others);
 
-class apc_rfc1867_data {
-public:
+struct apc_rfc1867_data {
   std::string tracking_key;
   int64_t content_length;
   std::string filename;
@@ -175,8 +182,7 @@ String apc_reserialize(const String& str);
 
 ///////////////////////////////////////////////////////////////////////////////
 // debugging support
-bool apc_dump(const char *filename, bool keyOnly, bool metaDump,
-              int waitSeconds);
+bool apc_dump(const char *filename, bool keyOnly, bool metaDump);
 size_t get_const_map_size();
 bool apc_get_random_entries(std::ostream &out, uint32_t count);
 

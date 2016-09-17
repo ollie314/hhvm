@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,12 +31,16 @@ namespace Trace {
   RBTYPE(Msg) \
   RBTYPE(SideExit) \
   RBTYPE(EnterTC) \
+  RBTYPE(ResumeTC) \
   RBTYPE(TraceletBody) \
   RBTYPE(TraceletGuards) \
   RBTYPE(FuncEntry) \
   RBTYPE(FuncExit) \
-  RBTYPE(FuncPrologueTry) \
-  RBTYPE(BytecodeStart)
+  RBTYPE(FuncPrologue) \
+  RBTYPE(BytecodeStart) \
+  RBTYPE(ServiceReq) \
+  RBTYPE(DispatchBB) \
+  RBTYPE(InterpOne)
 
 enum RingBufferType : uint8_t {
 #define RBTYPE(x) RBType ## x,
@@ -59,6 +63,8 @@ struct RingBufferEntry {
     struct {
       const char* m_msg;
       uint32_t m_len;
+      uint32_t m_truncatedRip; // Bottom 32 bits of rip from the caller, which
+                               // is usually enough in practice.
     };
   };
 
@@ -79,10 +85,12 @@ extern RingBufferEntry* g_ring_ptr;
 extern std::atomic<int> g_ringIdx;
 
 const char* ringbufferName(RingBufferType t);
-void vtraceRingbuffer(const char* fmt, va_list ap) ATTRIBUTE_PRINTF(1,0);
+void vtraceRingbuffer(ATTRIBUTE_PRINTF_STRING const char* fmt, va_list ap)
+  ATTRIBUTE_PRINTF(1,0);
 void ringbufferMsg(const char* msg, size_t msgLen,
                    RingBufferType t = RBTypeMsg);
 void ringbufferEntry(RingBufferType t, uint64_t sk, uint64_t data);
+void ringbufferEntryRip(RingBufferType t, uint64_t sk);
 
 }
 }

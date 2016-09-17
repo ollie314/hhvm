@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,39 +23,49 @@
 
 #define JIT_TIMERS                              \
   TIMER_NAME(analyze)                           \
-  TIMER_NAME(codeGen)                           \
   TIMER_NAME(collectPostConditions)             \
+  TIMER_NAME(hhir_lower)                        \
   TIMER_NAME(optimize)                          \
   TIMER_NAME(optimize_dce)                      \
-  TIMER_NAME(optimize_jumpOpts)                 \
+  TIMER_NAME(optimize_cleancfg)                 \
   TIMER_NAME(optimize_predictionOpts)           \
   TIMER_NAME(optimize_realxGuards)              \
   TIMER_NAME(optimize_refcountOpts)             \
-  TIMER_NAME(optimize_relaxGuards)              \
   TIMER_NAME(optimize_reoptimize)               \
+  TIMER_NAME(partial_dce_DefInlineFP)           \
   TIMER_NAME(regalloc)                          \
   TIMER_NAME(regionizeFunc)                     \
   TIMER_NAME(selectTracelet)                    \
-  TIMER_NAME(selectTracelet_relaxGuards)        \
-  TIMER_NAME(translate)                         \
-  TIMER_NAME(translateRegion)                   \
-  TIMER_NAME(translateRegion_irGeneration)      \
+  TIMER_NAME(mcg_translate)                     \
+  TIMER_NAME(mcg_finishTranslation)             \
+  TIMER_NAME(mcg_finishTranslation_metadata)    \
+  TIMER_NAME(irGenRegion)                       \
+  TIMER_NAME(irGenRegionAttempt)                \
   TIMER_NAME(translateTracelet)                 \
   TIMER_NAME(translateTracelet_irGeneration)    \
+  TIMER_NAME(vasm_layout)                       \
   TIMER_NAME(vasm_xls)                          \
+  TIMER_NAME(vasm_xls_spill)                    \
   TIMER_NAME(vasm_jumps)                        \
-  TIMER_NAME(vasm_gen)                          \
-  TIMER_NAME(vasm_lower)
+  TIMER_NAME(vasm_bind_ptrs)                    \
+  TIMER_NAME(vasm_emit)                         \
+  TIMER_NAME(vasm_lower)                        \
+  TIMER_NAME(vasm_copy)                         \
+  TIMER_NAME(vasm_optimize)                     \
+  TIMER_NAME(vasm_dce)                          \
 
-namespace HPHP { namespace jit {
+namespace HPHP {
+struct StructuredLogEntry;
+namespace jit {
 
 /*
  * Timer is used to track how much CPU time we spend in the different stages of
  * the jit. Typical usage starts and stops timing with construction/destruction
- * of the object, respectively. The end() function may be called to stop timing
- * early, in case it's not reasonable to add a new scope just for timing.
+ * of the object, respectively. The stop() function may be called to stop
+ * timing early, in case it's not reasonable to add a new scope just for
+ * timing.
  *
- * The name given to the constructor may be any string, though by convention
+ * There are no rules about the values in the Name enum, though by convention
  * any components are separated with underscores. For example, we use Timers
  * for optimize, optimize_dce, optimize_jumpOpts, and others.
  *
@@ -77,16 +87,20 @@ struct Timer {
   struct Counter {
     int64_t total; // total CPU time, in nanoseconds
     int64_t count; // number of entries for this counter
+    int64_t max;   // longest CPU time, in nanoseconds
 
     int64_t mean() const {
       return total / count;
     }
   };
 
-  explicit Timer(Name name);
+  explicit Timer(Name name, StructuredLogEntry* = nullptr);
   ~Timer();
 
-  void end();
+  /*
+   * Stop the timer, and return the elapsed time in nanoseconds.
+   */
+  int64_t stop();
 
   typedef std::vector<std::pair<const char*, Counter>> CounterVec;
   static CounterVec Counters();
@@ -98,8 +112,9 @@ struct Timer {
 
  private:
   Name m_name;
-  int64_t m_start;
   bool m_finished;
+  int64_t m_start;
+  StructuredLogEntry* m_log_entry;
 };
 
 } }

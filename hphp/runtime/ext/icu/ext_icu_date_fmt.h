@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ICU_DATE_FMT_H
 #define incl_HPHP_ICU_DATE_FMT_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/udat.h>
@@ -27,8 +27,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlDateFormatter;
 
-class IntlDateFormatter : public IntlError {
- public:
+struct IntlDateFormatter : IntlError {
   IntlDateFormatter() {}
   IntlDateFormatter(const IntlDateFormatter&) = delete;
   IntlDateFormatter& operator=(const IntlDateFormatter& src) {
@@ -57,7 +56,7 @@ class IntlDateFormatter : public IntlError {
       c_IntlDateFormatter = Unit::lookupClass(s_IntlDateFormatter.get());
       assert(c_IntlDateFormatter);
     }
-    return ObjectData::newInstance(c_IntlDateFormatter);
+    return Object{c_IntlDateFormatter};
   }
   static IntlDateFormatter* Get(ObjectData* obj) {
     return GetData<IntlDateFormatter>(obj, s_IntlDateFormatter);

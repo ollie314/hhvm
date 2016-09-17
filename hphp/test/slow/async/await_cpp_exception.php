@@ -8,7 +8,7 @@ class ExitOnDestruct {
 }
 
 async function block() {
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
 }
 
 async function crash() {
@@ -22,4 +22,4 @@ async function crash() {
   echo "should have exited!\n";
 }
 
-crash()->join();
+HH\Asio\join(crash());

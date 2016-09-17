@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,25 +8,31 @@
  *
  *)
 
-type result = ServerMsg.patch list
+open Core
+open ServerEnv
+open ServerRefactorTypes
 
-let go action genv env oc =
+let get_fixme_patches codes (env: env) =
+  let fixmelist = Errors.get_applied_fixmes env.errorl in
+  let poslist = Fixmes.get_unused_fixmes codes fixmelist env.files_info in
+  List.map ~f:(fun pos -> Remove (Pos.to_absolute pos)) poslist
+
+let go action genv env =
   let find_refs_action, new_name = match action with
-    | ServerMsg.ClassRename (old_name, new_name) ->
-        ServerMsg.Class old_name, new_name
-    | ServerMsg.MethodRename (class_name, old_name, new_name) ->
-        ServerMsg.Method (class_name, old_name), new_name
-    | ServerMsg.FunctionRename (old_name, new_name) ->
-        ServerMsg.Function old_name, new_name in
-  
+    | ClassRename (old_name, new_name) ->
+        FindRefsService.Class old_name, new_name
+    | MethodRename (class_name, old_name, new_name) ->
+        FindRefsService.Member (class_name, FindRefsService.Method old_name),
+          new_name
+    | FunctionRename (old_name, new_name) ->
+      FindRefsService.Function old_name, new_name in
   let refs = ServerFindRefs.get_refs_with_defs find_refs_action genv env in
-  let changes = List.fold_left begin fun acc x ->
+  let changes = List.fold_left refs ~f:begin fun acc x ->
     let replacement = {
-                        ServerMsg.pos  = Pos.to_absolute (snd x);
-                        ServerMsg.text = new_name;
-                      } in
-    let patch = ServerMsg.Replace replacement in            
+      pos  = Pos.to_absolute (snd x);
+      text = new_name;
+    } in
+    let patch = Replace replacement in
     patch :: acc
-  end [] refs in
-  Marshal.to_channel oc (changes : result) [];
-  flush oc
+  end ~init:[] in
+  changes

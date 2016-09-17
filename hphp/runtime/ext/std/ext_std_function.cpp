@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,10 +19,9 @@
 #include <algorithm>
 #include <vector>
 
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/autoload-handler.h"
 #include "hphp/runtime/ext/json/ext_json.h"
-#include "hphp/runtime/ext/ext_closure.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/libevent-http-client.h"
 #include "hphp/runtime/server/http-protocol.h"
 #include "hphp/runtime/vm/runtime.h"
@@ -53,82 +52,9 @@ bool HHVM_FUNCTION(function_exists, const String& function_name,
      function_exists(function_name));
 }
 
-const StaticString
-  s__invoke("__invoke"),
-  s_Closure__invoke("Closure::__invoke"),
-  s_colon2("::");
-
 bool HHVM_FUNCTION(is_callable, const Variant& v, bool syntax /* = false */,
-                   VRefParam name /* = null */) {
-  bool ret = true;
-  if (LIKELY(!syntax)) {
-    CallerFrame cf;
-    ObjectData* obj = nullptr;
-    HPHP::Class* cls = nullptr;
-    StringData* invName = nullptr;
-    const HPHP::Func* f = vm_decode_function(v, cf(), false, obj, cls,
-                                                 invName, false);
-    if (f == nullptr || f->isAbstract()) {
-      ret = false;
-    }
-    if (invName != nullptr) {
-      decRefStr(invName);
-    }
-    if (!name.isReferenced()) return ret;
-  }
-
-  auto const tv_func = v.asCell();
-  if (IS_STRING_TYPE(tv_func->m_type)) {
-    if (name.isReferenced()) name = tv_func->m_data.pstr;
-    return ret;
-  }
-
-  if (tv_func->m_type == KindOfArray) {
-    const Array& arr = Array(tv_func->m_data.parr);
-    const Variant& clsname = arr.rvalAtRef(int64_t(0));
-    const Variant& mthname = arr.rvalAtRef(int64_t(1));
-    if (arr.size() != 2 ||
-        &clsname == &null_variant ||
-        &mthname == &null_variant) {
-      name = array_string;
-      return false;
-    }
-
-    auto const tv_meth = mthname.asCell();
-    if (!IS_STRING_TYPE(tv_meth->m_type)) {
-      if (name.isReferenced()) name = v.toString();
-      return false;
-    }
-
-    auto const tv_cls = clsname.asCell();
-    if (tv_cls->m_type == KindOfObject) {
-      name = tv_cls->m_data.pobj->o_getClassName();
-    } else if (IS_STRING_TYPE(tv_cls->m_type)) {
-      name = tv_cls->m_data.pstr;
-    } else {
-      name = v.toString();
-      return false;
-    }
-
-    name = concat3(name, s_colon2, tv_meth->m_data.pstr);
-    return ret;
-  }
-
-  if (tv_func->m_type == KindOfObject) {
-    ObjectData *d = tv_func->m_data.pobj;
-    const Func* invoke = d->getVMClass()->lookupMethod(s__invoke.get());
-    if (name.isReferenced()) {
-      if (d->instanceof(c_Closure::classof())) {
-        // Hack to stop the mangled name from showing up
-        name = s_Closure__invoke;
-      } else {
-        name = d->o_getClassName().asString() + "::__invoke";
-      }
-    }
-    return invoke != nullptr;
-  }
-
-  return false;
+                   OutputArg name /* = null */) {
+  return is_callable(v, syntax, name.get());
 }
 
 Variant HHVM_FUNCTION(call_user_func, const Variant& function,
@@ -174,13 +100,12 @@ String HHVM_FUNCTION(create_function, const String& args, const String& code) {
 
 ALWAYS_INLINE
 static Variant func_get_arg_impl(int arg_num) {
-  CallerFrame cf;
-  ActRec* ar = cf.actRecForArgs();
+  auto const ar = GetCallerFrameForArgs();
 
   if (ar == nullptr) {
     return false;
   }
-  if (ar->hasVarEnv() && ar->getVarEnv()->isGlobalScope()) {
+  if (ar->func()->isPseudoMain()) {
     raise_warning(
       "func_get_arg():  Called from the global scope - no function context"
     );
@@ -234,20 +159,31 @@ Array hhvm_get_frame_args(const ActRec* ar, int offset) {
   if (ar == nullptr) {
     return Array();
   }
-  int numParams = ar->m_func->numNonVariadicParams();
+  int numParams = ar->func()->numNonVariadicParams();
   int numArgs = ar->numArgs();
-
-  PackedArrayInit retInit(std::max(numArgs - offset, 0));
+  bool variadic = ar->func()->hasVariadicCaptureParam() &&
+    !(ar->func()->attrs() & AttrMayUseVV);
   auto local = reinterpret_cast<TypedValue*>(
     uintptr_t(ar) - sizeof(TypedValue)
   );
+  if (variadic && numArgs > numParams) {
+    auto arr = local - numParams;
+    if (isArrayType(arr->m_type) && arr->m_data.parr->hasPackedLayout()) {
+      numArgs = numParams + arr->m_data.parr->size();
+    } else {
+      numArgs = numParams;
+    }
+  }
   local -= offset;
+  PackedArrayInit retInit(std::max(numArgs - offset, 0));
   for (int i = offset; i < numArgs; ++i) {
     if (i < numParams) {
       // This corresponds to one of the function's formal parameters, so it's
       // on the stack.
       retInit.append(tvAsCVarRef(local));
       --local;
+    } else if (variadic) {
+      retInit.append(tvAsCVarRef(local).asCArrRef()[i - numParams]);
     } else {
       // This is not a formal parameter, so it's in the ExtraArgs.
       retInit.append(tvAsCVarRef(ar->getExtraArg(i - numParams)));
@@ -260,7 +196,7 @@ Array hhvm_get_frame_args(const ActRec* ar, int offset) {
 #define FUNC_GET_ARGS_IMPL(offset) do {                                        \
   EagerCallerFrame cf;                                                         \
   ActRec* ar = cf.actRecForArgs();                                             \
-  if (ar && ar->hasVarEnv() && ar->getVarEnv()->isGlobalScope()) {             \
+  if (!ar || ar->func()->isPseudoMain()) {                                     \
     raise_warning(                                                             \
       "func_get_args():  Called from the global scope - no function context"   \
     );                                                                         \
@@ -294,7 +230,7 @@ static int64_t func_num_args_impl() {
   if (ar == nullptr) {
     return -1;
   }
-  if (ar->hasVarEnv() && ar->getVarEnv()->isGlobalScope()) {
+  if (ar->func()->isPseudoMain()) {
     raise_warning(
       "func_num_args():  Called from the global scope - no function context"
     );

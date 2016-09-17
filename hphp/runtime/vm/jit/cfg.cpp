@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,9 +13,11 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-
 #include "hphp/runtime/vm/jit/cfg.h"
+
 #include <algorithm>
+#include <limits>
+
 #include "hphp/runtime/vm/jit/id-set.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/block.h"
@@ -24,6 +26,55 @@
 namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(hhir);
+
+namespace {
+
+//////////////////////////////////////////////////////////////////////
+
+// If edge is critical, split it by inserting an intermediate block.
+// A critical edge is an edge from a block with multiple successors to
+// a block with multiple predecessors. Returns the new intermediate block if
+// one was inserted, and nullptr otherwise.
+Block* splitCriticalEdge(IRUnit& unit, Edge* edge) {
+  if (!edge) return nullptr;
+
+  auto* to = edge->to();
+  auto* branch = edge->inst();
+  auto* from = branch->block();
+
+  // While not necessarily critical, if we had to split any of the edges into
+  // the catch we need to split all of them as we will be hoisting the
+  // BeginCatch instructions and we cannot hoist them into the preds
+  if (to->numPreds() <= 1 || (!to->isCatch() && from->numSuccs() <= 1)) {
+    return nullptr;
+  }
+
+  return splitEdge(unit, from, to);
+}
+
+/*
+ * Visit edges that have an unprocessed from() block if we walk the blocks in a
+ * RPO.  These are the edges that create loops.
+ */
+template<class F>
+void visit_retreating_edges(const IRUnit& unit, F f) {
+  auto const rpo = rpoSortCfg(unit);
+  auto seen = boost::dynamic_bitset<>(unit.numBlocks());
+
+  for (auto& b : rpo) {
+    for (auto& pred : b->preds()) {
+      auto const fr = pred.from()->id();
+      if (!seen[fr]) {
+        if (!f(&pred)) return;
+      }
+    }
+    seen[b->id()] = true;
+  }
+}
+
+//////////////////////////////////////////////////////////////////////
+
+}
 
 BlockList poSortCfg(const IRUnit& unit) {
   auto blocks = BlockList{};
@@ -39,57 +90,47 @@ BlockList poSortCfg(const IRUnit& unit) {
 BlockList rpoSortCfg(const IRUnit& unit) {
   auto blocks = poSortCfg(unit);
   std::reverse(blocks.begin(), blocks.end());
-  assert(blocks.size() <= unit.numBlocks());
+  assertx(blocks.size() <= unit.numBlocks());
   return blocks;
 }
 
-BlocksWithIds rpoSortCfgWithIds(const IRUnit& unit) {
-  auto ret = BlocksWithIds{rpoSortCfg(unit), {unit, 0xffffffff}};
-
-  uint32_t id = 0;
-  for (auto block : ret.blocks) {
-    ret.ids[block] = id++;
-  }
-  assert(id == ret.blocks.size());
-
+BlockIDs numberBlocks(const IRUnit& unit, const BlockList& input) {
+  auto ret = BlockIDs { unit, std::numeric_limits<uint32_t>::max() };
+  auto id = uint32_t{0};
+  for (auto block : input) ret[block] = id++;
   return ret;
 }
 
 Block* splitEdge(IRUnit& unit, Block* from, Block* to) {
   auto& branch = from->back();
-  Block* middle = unit.defBlock();
+  // Guesstimate the weight of the new block.
+  auto profCount = std::min(from->profCount(), to->profCount()) / 2;
+  Block* middle = unit.defBlock(profCount);
   FTRACE(3, "splitting edge from B{} -> B{} using B{}\n",
          from->id(), to->id(), middle->id());
   if (branch.taken() == to) {
     branch.setTaken(middle);
   } else {
-    assert(branch.next() == to);
+    assertx(branch.next() == to);
     branch.setNext(middle);
   }
 
-  middle->prepend(unit.gen(Jmp, branch.marker(), to));
+  middle->prepend(unit.gen(Jmp, branch.bcctx(), to));
   auto const unlikely = Block::Hint::Unlikely;
   if (from->hint() == unlikely || to->hint() == unlikely) {
     middle->setHint(unlikely);
   }
+
+  // The branch may not be a Jmp, in which case there won't be a label
+  if (branch.numSrcs() > 0 && to->front().is(DefLabel)) {
+    auto& jmp = middle->back();
+    for (auto src : branch.srcs()) {
+      unit.expandJmp(&jmp, src);
+    }
+    branch.setSrcs(0, nullptr);
+  }
+
   return middle;
-}
-
-namespace {
-
-// If edge is critical, split it by inserting an intermediate block.
-// A critical edge is an edge from a block with multiple successors to
-// a block with multiple predecessors.
-void splitCriticalEdge(IRUnit& unit, Edge* edge) {
-  if (!edge) return;
-
-  auto* to = edge->to();
-  auto* branch = edge->inst();
-  auto* from = branch->block();
-  if (to->numPreds() <= 1 || from->numSuccs() <= 1) return;
-
-  splitEdge(unit, from, to);
-}
 }
 
 bool splitCriticalEdges(IRUnit& unit) {
@@ -98,12 +139,33 @@ bool splitCriticalEdges(IRUnit& unit) {
   if (modified) reflowTypes(unit);
   auto const startBlocks = unit.numBlocks();
 
+  std::unordered_set<Block*> newCatches;
+  std::unordered_set<Block*> oldCatches;
+
   // Try to split outgoing edges of each reachable block.  This is safe in
   // a postorder walk since we visit blocks after visiting successors.
   postorderWalk(unit, [&](Block* b) {
-    splitCriticalEdge(unit, b->takenEdge());
+    auto bnew = splitCriticalEdge(unit, b->takenEdge());
     splitCriticalEdge(unit, b->nextEdge());
+
+    assertx(!b->next() || !b->next()->isCatch());
+    if (bnew && b->taken()->isCatch()) {
+      newCatches.emplace(bnew);
+      oldCatches.emplace(b->taken());
+    }
   });
+
+  for (auto b : newCatches) {
+    auto bc = b->next()->begin();
+    assertx(bc->is(BeginCatch));
+    b->prepend(unit.gen(BeginCatch, bc->bcctx()));
+  }
+
+  for (auto b : oldCatches) {
+    auto bc = b->begin();
+    assertx(bc->is(BeginCatch));
+    b->erase(bc);
+  }
 
   return modified || unit.numBlocks() != startBlocks;
 }
@@ -142,8 +204,11 @@ bool removeUnreachable(IRUnit& unit) {
     for (auto it = preds.begin(); it != preds.end(); ) {
       auto* inst = it->inst();
       ++it;
-
       if (!visited.test(inst->block()->id())) {
+        if (it != preds.end() && it->inst() == inst) {
+          ++it;
+        }
+
         ITRACE(3, "removing unreachable B{}\n", inst->block()->id());
         inst->setNext(nullptr);
         inst->setTaken(nullptr);
@@ -162,10 +227,9 @@ bool removeUnreachable(IRUnit& unit) {
  * dominator.  This is the case for the entry block and any blocks not
  * reachable from the entry block.
  */
-IdomVector findDominators(const IRUnit& unit, const BlocksWithIds& blockIds) {
-  auto& blocks = blockIds.blocks;
-  auto& rpoIds = blockIds.ids;
-
+IdomVector findDominators(const IRUnit& unit,
+                          const BlockList& blocks,
+                          const BlockIDs& rpoIDs) {
   // Calculate immediate dominators with the iterative two-finger algorithm.
   // When it terminates, idom[post-id] will contain the post-id of the
   // immediate dominator of each block.  idom[start] will be -1.  This is
@@ -192,8 +256,8 @@ IdomVector findDominators(const IRUnit& unit, const BlocksWithIds& blockIds) {
         // find earliest common predecessor of p1 and p2
         // (lower RPO ids are earlier in flow and in dom-tree).
         do {
-          while (rpoIds[p1] < rpoIds[p2]) p2 = idom[p2];
-          while (rpoIds[p2] < rpoIds[p1]) p1 = idom[p1];
+          while (rpoIDs[p1] < rpoIDs[p2]) p2 = idom[p2];
+          while (rpoIDs[p2] < rpoIDs[p1]) p1 = idom[p1];
         } while (p1 != p2);
       }
       if (idom[block] != p1) {
@@ -207,134 +271,31 @@ IdomVector findDominators(const IRUnit& unit, const BlocksWithIds& blockIds) {
 }
 
 bool dominates(const Block* b1, const Block* b2, const IdomVector& idoms) {
-  assert(b1 != nullptr && b2 != nullptr);
+  assertx(b1 != nullptr && b2 != nullptr);
   for (auto b = b2; b != nullptr; b = idoms[b]) {
     if (b == b1) return true;
   }
   return false;
 }
 
-namespace {
-
-// Visits all back-edges in a CFG.
-template <class Visitor>
-struct BackEdgeVisitor {
-  BackEdgeVisitor(const IRUnit& unit, Visitor& visitor)
-    : m_path(unit.numBlocks())
-    , m_visited(unit.numBlocks())
-    , m_visitor(visitor)
-  {}
-
-  using BitSet = boost::dynamic_bitset<>;
-
-  void walk(Edge* e) {
-    if (e == nullptr) return;
-
-    auto const block = e->to();
-    auto const id = block->id();
-
-    // If we're revisiting a block in our current search, then we've
-    // found a backedge.
-    if (m_path.test(id)) {
-      // The entry block can't be a loop header.
-      assert(!block->isEntry());
-
-      m_visitor(e);
-    }
-
-    // Otherwise if we're getting back to a block that's already been
-    // visited, but it hasn't been visited in this path, then we can
-    // prune this search.
-    if (m_visited.test(id)) return;
-
-    m_visited.set(id);
-    m_path.set(id);
-
-    walk(block->takenEdge());
-    walk(block->nextEdge());
-
-    m_path.set(id, false);
-  }
-
-private:
-  BitSet m_path;
-  BitSet m_visited;
-  Visitor& m_visitor;
-};
-
-template <class Visitor>
-void backEdgeWalk(const IRUnit& unit, Visitor visitor) {
-  BackEdgeVisitor<Visitor> bev(unit, visitor);
-
-  auto const entry = unit.entry();
-  bev.walk(entry->takenEdge());
-  bev.walk(entry->nextEdge());
-}
-
-}
-
-bool insertLoopPreHeaders(IRUnit& unit) {
-  ITRACE(2, "making preheaders\n");
-  Trace::Indent _i;
-
-  bool changed = false;
-
-  auto const backEdges = findBackEdges(unit);
-
-  for (auto header : findLoopHeaders(unit)) {
-    // Compute the set of forward predecessors for the loop header.
-    EdgeSet fwdPreds;
-    for (auto& pred : header->preds()) {
-      if (backEdges.find(&pred) == backEdges.end()) fwdPreds.insert(&pred);
-    }
-
-    // Header can't be the entry block.
-    assert(fwdPreds.size() != 0);
-
-    // Already have a pre-header, so do nothing.
-    if (fwdPreds.size() == 1) continue;
-
-    auto const preheader = unit.defBlock();
-    preheader->push_back(unit.gen(Jmp, header->front().marker(), header));
-
-    ITRACE(4, "making pre-header B{} for header B{}\n",
-           preheader->id(), header->id());
-
-    auto constexpr unlikely = Block::Hint::Unlikely;
-    if (header->hint() == unlikely) preheader->setHint(unlikely);
-
-    // Point all forward preds at pre-header.
-    for (auto const pred : fwdPreds) {
-      auto& branch = pred->from()->back();
-
-      assert(branch.taken() == header || branch.next() == header);
-
-      if (branch.taken() == header) branch.setTaken(preheader);
-      if (branch.next() == header) branch.setNext(preheader);
-
-      changed = true;
-    }
-  }
-
-  return changed;
-}
-
-EdgeSet findBackEdges(const IRUnit& unit) {
-  EdgeSet edges;
-  backEdgeWalk(unit, [&] (Edge* e) { edges.insert(e); });
-  return edges;
-}
-
-BlockSet findLoopHeaders(const IRUnit& unit) {
-  BlockSet headers;
-  backEdgeWalk(unit, [&] (Edge* e) { headers.insert(e->to()); });
-  return headers;
+EdgeSet findRetreatingEdges(const IRUnit& unit) {
+  auto v = jit::vector<Edge*>{};
+  visit_retreating_edges(unit, [&] (Edge* edge) {
+    v.push_back(edge);
+    return true;
+  });
+  return EdgeSet(begin(v), end(v));
 }
 
 bool cfgHasLoop(const IRUnit& unit) {
-  bool hasLoop = false;
-  backEdgeWalk(unit, [&] (Edge*) { hasLoop = true; });
-  return hasLoop;
+  auto ret = false;
+  visit_retreating_edges(unit, [&] (Edge* edge) {
+    ret = true;
+    return false;
+  });
+  return ret;
 }
+
+//////////////////////////////////////////////////////////////////////
 
 }}

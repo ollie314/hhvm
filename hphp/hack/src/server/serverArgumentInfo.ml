@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -10,16 +10,14 @@
 
 type result = int * (string option * string) list
 
-let go genv env oc content line char =
+let go content line char =
   ArgumentInfoService.attach_hooks (line, char);
-  let funs, classes = ServerIdeUtils.declare content in
-  ServerIdeUtils.fix_file_and_def content;
   let pos, expected =
-    match ArgumentInfoService.get_result() with
-    | Some (pos, expected) -> pos, expected
-    | _ ->(-1), []
+    ServerIdeUtils.declare_and_check content ~f:begin fun _ _ ->
+      match ArgumentInfoService.get_result() with
+      | Some (pos, expected) -> pos, expected
+      | _ ->(-1), []
+    end
   in
   ArgumentInfoService.detach_hooks();
-  ServerIdeUtils.revive funs classes;
-  Marshal.to_channel oc ((pos, expected) : result) [];
-  flush oc
+  pos, expected

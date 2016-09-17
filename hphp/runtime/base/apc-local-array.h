@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -40,7 +40,8 @@ struct MArrayIter;
  * via APC. It has a pointer to the APCArray that it represents and it may
  * cache values locally depending on the type accessed and/or the operation.
  */
-struct APCLocalArray : private ArrayData {
+struct APCLocalArray final : private ArrayData,
+                             type_scan::MarkCountable<APCLocalArray> {
   template<class... Args> static APCLocalArray* Make(Args&&...);
 
   static size_t Vsize(const ArrayData*);
@@ -49,9 +50,12 @@ struct APCLocalArray : private ArrayData {
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
   static ArrayData* LvalInt(ArrayData*, int64_t k, Variant *&ret,
                             bool copy);
+  static constexpr auto LvalIntRef = &LvalInt;
   static ArrayData* LvalStr(ArrayData*, StringData* k, Variant *&ret,
                             bool copy);
+  static constexpr auto LvalStrRef = &LvalStr;
   static ArrayData* LvalNew(ArrayData*, Variant *&ret, bool copy);
+  static constexpr auto LvalNewRef = &LvalNew;
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
   static ArrayData* SetRefInt(ArrayData*, int64_t k, Variant& v, bool copy);
@@ -63,14 +67,16 @@ struct APCLocalArray : private ArrayData {
   static ArrayData *RemoveStr(ArrayData* ad, const StringData* k, bool copy);
   static ArrayData* Copy(const ArrayData*);
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
-  static ArrayData* Append(ArrayData* a, const Variant& v, bool copy);
+  static ArrayData* Append(ArrayData* a, Cell v, bool copy);
   static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
   static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
   static ArrayData* PlusEq(ArrayData*, const ArrayData *elems);
   static ArrayData* Merge(ArrayData*, const ArrayData *elems);
-  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Prepend(ArrayData*, Cell v, bool copy);
   static const TypedValue* NvGetInt(const ArrayData*, int64_t k);
+  static constexpr auto NvTryGetInt = &NvGetInt;
   static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
+  static constexpr auto NvTryGetStr = &NvGetStr;
   static void NvGetKey(const ArrayData*, TypedValue* out, ssize_t pos);
   static bool IsVectorData(const ArrayData* ad);
   static ssize_t IterBegin(const ArrayData*);
@@ -80,25 +86,32 @@ struct APCLocalArray : private ArrayData {
   static ssize_t IterRewind(const ArrayData*, ssize_t prev);
   static bool ValidMArrayIter(const ArrayData*, const MArrayIter& fp);
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
-  static ArrayData* NonSmartCopy(const ArrayData*);
+  static ArrayData* CopyStatic(const ArrayData*);
   static constexpr auto Pop = &ArrayCommon::Pop;
   static constexpr auto Dequeue = &ArrayCommon::Dequeue;
   static void Renumber(ArrayData*);
   static void OnSetEvalScalar(ArrayData*);
   static void Release(ArrayData*);
   static ArrayData* Escalate(const ArrayData*);
-  static ArrayData* EscalateForSort(ArrayData*);
+  static ArrayData* EscalateForSort(ArrayData*, SortFunction);
   static void Ksort(ArrayData*, int, bool);
   static void Sort(ArrayData*, int, bool);
   static void Asort(ArrayData*, int, bool);
   static bool Uksort(ArrayData*, const Variant&);
   static bool Usort(ArrayData*, const Variant&);
   static bool Uasort(ArrayData*, const Variant&);
+  static ArrayData* ToPHPArray(ArrayData* ad, bool) {
+    return ad;
+  }
+  static constexpr auto ToVec = &ArrayCommon::ToVec;
+  static constexpr auto ToDict = &ArrayCommon::ToDict;
+  static constexpr auto ToKeyset = &ArrayCommon::ToKeyset;
 
 public:
   using ArrayData::decRefCount;
   using ArrayData::hasMultipleRefs;
   using ArrayData::hasExactlyOneRef;
+  using ArrayData::decWillRelease;
   using ArrayData::incRefCount;
 
   ssize_t iterAdvanceImpl(ssize_t prev) const {
@@ -111,9 +124,9 @@ public:
   ArrayData* asArrayData() { return this; }
   const ArrayData* asArrayData() const { return this; }
 
-  // Pre: ad->isSharedArray()
-  static APCLocalArray* asSharedArray(ArrayData*);
-  static const APCLocalArray* asSharedArray(const ArrayData*);
+  // Pre: ad->isApcArray()
+  static APCLocalArray* asApcArray(ArrayData*);
+  static const APCLocalArray* asApcArray(const ArrayData*);
 
 private:
   explicit APCLocalArray(const APCArray* source);
@@ -125,6 +138,17 @@ private:
   ArrayData* loadElems() const;
   Variant getKey(ssize_t pos) const;
   void sweep();
+
+public:
+  void reap();
+  template<class F> void scan(F& mark) const {
+    //mark(m_arr);
+    if (m_localCache) {
+      for (unsigned i = 0, n = m_arr->capacity(); i < n; ++i) {
+        mark(m_localCache[i]);
+      }
+    }
+  }
 
 private:
   const APCArray* m_arr;

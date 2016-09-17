@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,13 +19,12 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/base/mem-file.h"
 #include "hphp/runtime/base/stream-wrapper.h"
 #include <folly/String.h>
+#include <folly/portability/Unistd.h>
 
 #define ERROR_RAISE_WARNING(exp)        \
   int ret = (exp);                      \
@@ -40,42 +39,31 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Directory;
+struct Directory;
 
-class FileStreamWrapper : public Stream::Wrapper {
- public:
-  static MemFile* openFromCache(const String& filename, const String& mode);
-  virtual File* open(const String& filename, const String& mode,
-                     int options, const Variant& context);
-  virtual int access(const String& path, int mode) {
+struct FileStreamWrapper final : Stream::Wrapper {
+  static req::ptr<MemFile> openFromCache(const String& filename,
+                                         const String& mode);
+  req::ptr<File> open(const String& filename, const String& mode, int options,
+                      const req::ptr<StreamContext>& context) override;
+  int access(const String& path, int mode) override {
     return ::access(File::TranslatePath(path).data(), mode);
   }
-  virtual int stat(const String& path, struct stat* buf) {
+  int stat(const String& path, struct stat* buf) override {
     return ::stat(File::TranslatePath(path).data(), buf);
   }
-  virtual int lstat(const String& path, struct stat* buf) {
+  int lstat(const String& path, struct stat* buf) override {
     return ::lstat(File::TranslatePath(path).data(), buf);
   }
-  virtual int unlink(const String& path) {
-    int ret = ::unlink(File::TranslatePath(path).data());
-    if (ret != 0) {
-      raise_warning(
-        "%s(%s): %s",
-        __FUNCTION__,
-        path.c_str(),
-        folly::errnoStr(errno).c_str()
-      );
-    }
-    return ret;
-  }
-  virtual int rename(const String& oldname, const String& newname);
-  virtual int mkdir(const String& path, int mode, int options);
-  virtual int rmdir(const String& path, int options) {
+  int unlink(const String& path) override;
+  int rename(const String& oldname, const String& newname) override;
+  int mkdir(const String& path, int mode, int options) override;
+  int rmdir(const String& path, int options) override {
     ERROR_RAISE_WARNING(::rmdir(File::TranslatePath(path).data()));
     return ret;
   }
 
-  virtual Directory* opendir(const String& path);
+  req::ptr<Directory> opendir(const String& path) override;
 
  private:
   int mkdir_recursive(const String& path, int mode);

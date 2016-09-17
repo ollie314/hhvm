@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,15 +22,16 @@
 #include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/base/type-string.h"
 
-#include <dirent.h>
+#include <vector>
+
+#include <folly/portability/Dirent.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Variant;
+struct Variant;
 
-class Directory : public SweepableResourceData {
-public:
+struct Directory : SweepableResourceData {
   virtual void close() = 0;
   virtual Variant read() = 0;
   virtual void rewind() = 0;
@@ -42,39 +43,37 @@ public:
 
   CLASSNAME_IS("Directory")
   // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   String getLastError() {
     return String(folly::errnoStr(errno).toStdString());
   }
 };
 
-class PlainDirectory : public Directory {
-public:
+struct PlainDirectory : Directory {
   DECLARE_RESOURCE_ALLOCATION(PlainDirectory);
 
   explicit PlainDirectory(const String& path);
   ~PlainDirectory();
 
-  virtual void close();
-  virtual Variant read();
-  virtual void rewind();
+  void close() override;
+  Variant read() override;
+  void rewind() override;
   bool isValid() const;
 
 private:
   DIR* m_dir;
 };
 
-class ArrayDirectory : public Directory {
-public:
+struct ArrayDirectory : Directory {
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(ArrayDirectory);
 
   explicit ArrayDirectory(const Array& a) : m_it(a) {}
 
-  virtual void close() {}
-  virtual Variant read();
-  virtual void rewind();
-  virtual bool isEof() const;
+  void close() override {}
+  Variant read() override;
+  void rewind() override;
+  bool isEof() const override;
 
   void sweep() override {
     // Leave m_it alone
@@ -86,6 +85,24 @@ public:
 
 private:
   ArrayIter m_it;
+};
+
+struct CachedDirectory : Directory {
+  DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(CachedDirectory);
+
+  explicit CachedDirectory(const String& path);
+
+  void close() override {}
+  Variant read() override {
+    if (m_pos >= m_files.size()) return false;
+    return String(m_files[m_pos++]);
+  }
+  void rewind() override { m_pos = 0; }
+  bool isEof() const override { return m_pos >= m_files.size(); }
+
+private:
+  int m_pos {0};
+  std::vector<std::string> m_files;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

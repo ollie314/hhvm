@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,21 +14,35 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/ext/array/ext_array.h"
 
-#include "hphp/runtime/base/container-functions.h"
-#include "hphp/runtime/base/sort-flags.h"
-#include "hphp/runtime/ext/ext_generator.h"
-#include "hphp/runtime/ext/ext_collections.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/base/request-local.h"
-#include "hphp/runtime/base/zend-collator.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/actrec-args.h"
+#include "hphp/runtime/base/array-data-defs.h"
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/base/collections.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/container-functions.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/req-containers.h"
+#include "hphp/runtime/base/sort-flags.h"
+#include "hphp/runtime/base/zend-collator.h"
+#include "hphp/runtime/base/zend-sort.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
+#include "hphp/runtime/ext/collections/ext_collections-map.h"
+#include "hphp/runtime/ext/collections/ext_collections-pair.h"
+#include "hphp/runtime/ext/collections/ext_collections-set.h"
+#include "hphp/runtime/ext/collections/ext_collections-vector.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
+#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/util/logger.h"
+
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -36,69 +50,35 @@ namespace HPHP {
 #define SORT_DESC               3
 #define SORT_ASC                4
 
-#define DEFINE_CONSTANT(name)                                                  \
-  const int64_t k_##name = name;                                               \
-  const StaticString s_##name(#name)                                           \
-
 const StaticString s_count("count");
 
-DEFINE_CONSTANT(UCOL_DEFAULT);
+enum class CaseMode {
+  LOWER = 0,
+  UPPER = 1,
+};
 
-DEFINE_CONSTANT(UCOL_PRIMARY);
-DEFINE_CONSTANT(UCOL_SECONDARY);
-DEFINE_CONSTANT(UCOL_TERTIARY);
-DEFINE_CONSTANT(UCOL_DEFAULT_STRENGTH);
-DEFINE_CONSTANT(UCOL_QUATERNARY);
-DEFINE_CONSTANT(UCOL_IDENTICAL);
-
-DEFINE_CONSTANT(UCOL_OFF);
-DEFINE_CONSTANT(UCOL_ON);
-
-DEFINE_CONSTANT(UCOL_SHIFTED);
-DEFINE_CONSTANT(UCOL_NON_IGNORABLE);
-
-DEFINE_CONSTANT(UCOL_LOWER_FIRST);
-DEFINE_CONSTANT(UCOL_UPPER_FIRST);
-
-DEFINE_CONSTANT(UCOL_FRENCH_COLLATION);
-DEFINE_CONSTANT(UCOL_ALTERNATE_HANDLING);
-DEFINE_CONSTANT(UCOL_CASE_FIRST);
-DEFINE_CONSTANT(UCOL_CASE_LEVEL);
-DEFINE_CONSTANT(UCOL_NORMALIZATION_MODE);
-DEFINE_CONSTANT(UCOL_STRENGTH);
-DEFINE_CONSTANT(UCOL_HIRAGANA_QUATERNARY_MODE);
-DEFINE_CONSTANT(UCOL_NUMERIC_COLLATION);
-
-#undef DEFINE_CONSTANT
-
-int countArguments() {
-  ActRec *ar = g_context->getStackFrame();
-  assert(ar);
-  return ar->numArgs();
+TypedValue HHVM_FUNCTION(array_change_key_case,
+                         const Variant& input,
+                         int64_t case_ /* = 0 */) {
+  getCheckedContainer(input);
+  return tvReturn(ArrayUtil::ChangeKeyCase(arr_input,
+                                           (CaseMode)case_ == CaseMode::LOWER));
 }
 
-Variant HHVM_FUNCTION(array_change_key_case,
-                      const Variant& input,
-                      int64_t case_ /* = 0 */) {
-  getCheckedArrayRet(input, false);
-  return ArrayUtil::ChangeKeyCase(arr_input, !case_);
-}
-
-Variant HHVM_FUNCTION(array_chunk,
-                      const Variant& input,
-                      int chunkSize,
-                      bool preserve_keys /* = false */) {
-
+TypedValue HHVM_FUNCTION(array_chunk,
+                         const Variant& input,
+                         int chunkSize,
+                         bool preserve_keys /* = false */) {
   const auto& cellInput = *input.asCell();
   if (UNLIKELY(!isContainer(cellInput))) {
     raise_warning("Invalid operand type was used: %s expects "
                   "an array or collection as argument 1", __FUNCTION__+2);
-    return init_null();
+    return make_tv<KindOfNull>();
   }
 
   if (chunkSize < 1) {
     throw_invalid_argument("size: %d", chunkSize);
-    return init_null();
+    return make_tv<KindOfNull>();
   }
 
   auto const retSize = (getContainerSize(cellInput) / chunkSize) + 1;
@@ -120,7 +100,7 @@ Variant HHVM_FUNCTION(array_chunk,
     ret.append(chunk);
   }
 
-  return ret.toVariant();
+  return tvReturn(ret.toVariant());
 }
 
 static inline bool array_column_coerce_key(Variant &key, const char *name) {
@@ -143,19 +123,19 @@ static inline bool array_column_coerce_key(Variant &key, const char *name) {
   }
 }
 
-Variant HHVM_FUNCTION(array_column,
-                      const Variant& input,
-                      const Variant& val_key,
-                      const Variant& idx_key /* = null_variant */) {
-  /* Be strict about array type */
-  getCheckedArrayColumnRet(input, uninit_null());
+TypedValue HHVM_FUNCTION(array_column,
+                         const Variant& input,
+                         const Variant& val_key,
+                         const Variant& idx_key /* = null_variant */) {
+
+  getCheckedContainer(input);
   Variant val = val_key, idx = idx_key;
   if (!array_column_coerce_key(val, "column") ||
       !array_column_coerce_key(idx, "index")) {
-    return false;
+    return make_tv<KindOfBoolean>(false);
   }
   ArrayInit ret(arr_input.size(), ArrayInit::Map{});
-  for(auto it = arr_input.begin(); !it.end(); it.next()) {
+  for (ArrayIter it(arr_input); it; ++it) {
     if (!it.second().isArray()) {
       continue;
     }
@@ -174,29 +154,29 @@ Variant HHVM_FUNCTION(array_column,
     if (idx.isNull() || !sub.exists(idx)) {
       ret.append(elem);
     } else if (sub[idx].isObject()) {
-      ret.setKeyUnconverted(sub[idx].toString(), elem);
+      ret.setUnknownKey(sub[idx].toString(), elem);
     } else {
-      ret.setKeyUnconverted(sub[idx], elem);
+      ret.setUnknownKey(sub[idx], elem);
     }
   }
-  return ret.toVariant();
+  return tvReturn(ret.toVariant());
 }
 
-Variant HHVM_FUNCTION(array_combine,
-                      const Variant& keys,
-                      const Variant& values) {
+TypedValue HHVM_FUNCTION(array_combine,
+                         const Variant& keys,
+                         const Variant& values) {
   const auto& cell_keys = *keys.asCell();
   const auto& cell_values = *values.asCell();
   if (UNLIKELY(!isContainer(cell_keys) || !isContainer(cell_values))) {
     raise_warning("Invalid operand type was used: array_combine expects "
                   "arrays or collections");
-    return init_null();
+    return make_tv<KindOfNull>();
   }
   auto keys_size = getContainerSize(cell_keys);
   if (UNLIKELY(keys_size != getContainerSize(cell_values))) {
     raise_warning("array_combine(): Both parameters should have an equal "
                   "number of elements");
-    return false;
+    return make_tv<KindOfBoolean>(false);
   }
   Array ret = Array::attach(MixedArray::MakeReserveMixed(keys_size));
   for (ArrayIter iter1(cell_keys), iter2(cell_values);
@@ -208,52 +188,55 @@ Variant HHVM_FUNCTION(array_combine,
       ret.setWithRef(key.toString(), iter2.secondRefPlus());
     }
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
-Variant HHVM_FUNCTION(array_count_values,
-                      const Variant& input) {
-  getCheckedArray(input);
-  return ArrayUtil::CountValues(arr_input);
+TypedValue HHVM_FUNCTION(array_count_values,
+                         ArrayArg input) {
+  return tvReturn(ArrayUtil::CountValues(ArrNR(input.get())));
 }
 
-Variant HHVM_FUNCTION(array_fill_keys,
-                      const Variant& keys,
-                      const Variant& value) {
-  const auto& cell_keys = *keys.asCell();
-  if (UNLIKELY(!isContainer(cell_keys))) {
+TypedValue HHVM_FUNCTION(array_fill_keys,
+                         const Variant& keys,
+                         const Variant& value) {
+  folly::Optional<ArrayInit> ai;
+  auto ok = IterateV(*keys.asCell(),
+                     [&](ArrayData* adata) {
+                       ai.emplace(adata->size(), ArrayInit::Mixed{});
+                     },
+                     [&](const TypedValue* tv) {
+                       auto& key = tvAsCVarRef(tv);
+                       if (key.isInteger() || key.isString()) {
+                         ai->setUnknownKey(key, value);
+                       } else {
+                         raise_hack_strict(RuntimeOption::StrictArrayFillKeys,
+                                           "strict_array_fill_keys",
+                                           "keys must be ints or strings");
+                         ai->setUnknownKey(key.toString(), value);
+                       }
+                     },
+                     [&](ObjectData* coll) {
+                       if (coll->collectionType() == CollectionType::Pair) {
+                         ai.emplace(2, ArrayInit::Mixed{});
+                       }
+                     });
+
+  if (!ok) {
     raise_warning("Invalid operand type was used: array_fill_keys expects "
                   "an array or collection");
-    return init_null();
+    return make_tv<KindOfNull>();
   }
-
-  auto size = getContainerSize(cell_keys);
-  if (!size) return empty_array();
-
-  ArrayInit ai(size, ArrayInit::Mixed{});
-  for (ArrayIter iter(cell_keys); iter; ++iter) {
-    auto& key = iter.secondRefPlus();
-    // This is intentionally different to the $foo[$invalid_key] coercion.
-    // See tests/slow/ext_array/array_fill_keys_tostring.php for examples.
-    if (LIKELY(key.isInteger() || key.isString())) {
-      ai.setKeyUnconverted(key, value);
-    } else {
-      raise_hack_strict(RuntimeOption::StrictArrayFillKeys,
-                        "strict_array_fill_keys",
-                        "keys must be ints or strings");
-      ai.setKeyUnconverted(key.toString(), value);
-    }
-  }
-  return ai.toVariant();
+  assert(ai.hasValue());
+  return tvReturn(ai->toVariant());
 }
 
-Variant HHVM_FUNCTION(array_fill,
-                      int start_index,
-                      int num,
-                      const Variant& value) {
+TypedValue HHVM_FUNCTION(array_fill,
+                         int start_index,
+                         int num,
+                         const Variant& value) {
   if (num < 0) {
     throw_invalid_argument("Number of elements can't be negative");
-    return false;
+    return make_tv<KindOfBoolean>(false);
   }
 
   if (start_index == 0) {
@@ -261,36 +244,36 @@ Variant HHVM_FUNCTION(array_fill,
     for (size_t k = 0; k < num; k++) {
       pai.append(value);
     }
-    return pai.toVariant();
+    return tvReturn(pai.toVariant());
   } else {
     ArrayInit ret(num, ArrayInit::Mixed{}, CheckAllocation{});
     ret.set(start_index, value);
     for (int i = num - 1; i > 0; i--) {
       ret.append(value);
     }
-    return ret.toVariant();
+    return tvReturn(ret.toVariant());
   }
 }
 
-Variant HHVM_FUNCTION(array_flip,
-                      const Variant& trans) {
+TypedValue HHVM_FUNCTION(array_flip,
+                         const Variant& trans) {
   auto const& transCell = *trans.asCell();
   if (UNLIKELY(!isContainer(transCell))) {
     raise_warning("Invalid operand type was used: %s expects "
                   "an array or collection", __FUNCTION__+2);
-    return init_null();
+    return make_tv<KindOfNull>();
   }
 
   ArrayInit ret(getContainerSize(transCell), ArrayInit::Mixed{});
   for (ArrayIter iter(transCell); iter; ++iter) {
     const Variant& value(iter.secondRefPlus());
     if (value.isString() || value.isInteger()) {
-      ret.setKeyUnconverted(value, iter.first());
+      ret.setUnknownKey(value, iter.first());
     } else {
       raise_warning("Can only flip STRING and INTEGER values!");
     }
   }
-  return ret.toVariant();
+  return tvReturn(ret.toVariant());
 }
 
 bool HHVM_FUNCTION(array_key_exists,
@@ -299,12 +282,12 @@ bool HHVM_FUNCTION(array_key_exists,
   const ArrayData *ad;
 
   auto const searchCell = search.asCell();
-  if (LIKELY(searchCell->m_type == KindOfArray)) {
+  if (LIKELY(isArrayLikeType(searchCell->m_type))) {
     ad = searchCell->m_data.parr;
   } else if (searchCell->m_type == KindOfObject) {
     ObjectData* obj = searchCell->m_data.pobj;
     if (obj->isCollection()) {
-      return collectionContains(obj, key);
+      return collections::contains(obj, key);
     }
     return HHVM_FN(array_key_exists)(key, toArray(search));
   } else {
@@ -314,32 +297,38 @@ bool HHVM_FUNCTION(array_key_exists,
   }
 
   auto const cell = key.asCell();
+
   switch (cell->m_type) {
     case KindOfUninit:
     case KindOfNull:
-      return ad->exists(staticEmptyString());
-
-    case KindOfInt64:
-      return ad->exists(cell->m_data.num);
-
-    case KindOfStaticString:
-    case KindOfString: {
-      int64_t n = 0;
-      StringData *sd = cell->m_data.pstr;
-      if (sd->isStrictlyInteger(n)) {
-        return ad->exists(n);
-      }
-      return ad->exists(StrNR(sd));
-    }
+      return ad->useWeakKeys() && ad->exists(staticEmptyString());
 
     case KindOfBoolean:
     case KindOfDouble:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
+      if (!ad->useWeakKeys()) throwInvalidArrayKeyException(cell, ad);
       raise_warning("Array key should be either a string or an integer");
       return false;
 
+    case KindOfPersistentString:
+    case KindOfString: {
+      int64_t n = 0;
+      if (ad->convertKey(cell->m_data.pstr, n)) {
+        return ad->exists(n);
+      }
+      return ad->exists(StrNR(cell->m_data.pstr));
+    }
+    case KindOfInt64:
+      return ad->exists(cell->m_data.num);
     case KindOfRef:
     case KindOfClass:
       break;
@@ -370,7 +359,7 @@ Variant array_keys_helper(const Variant& input,
     }
     return ai.toVariant();
   } else {
-    Array ai = Array::attach(MixedArray::MakeReserve(0));
+    Array ai = Array::attach(PackedArray::MakeReserve(0));
     for (ArrayIter iter(cell_input); iter; ++iter) {
       if ((strict && HPHP::same(iter.secondRefPlus(), search_value)) ||
           (!strict && HPHP::equal(iter.secondRefPlus(), search_value))) {
@@ -381,31 +370,33 @@ Variant array_keys_helper(const Variant& input,
   }
 }
 
-TypedValue* HHVM_FN(array_keys)(ActRec* ar) {
-  int32_t argc = ar->numArgs();
-  if (argc < 1 || argc > 3) {
-    throw_wrong_arguments_nr(ar->m_func->name()->data(), argc, 1, 3);
-    return arReturn(ar, init_null());
-  }
-
-  Variant key = getArgVariant(ar, 0);
-  Variant search_value = argc > 1 ? getArgVariant(ar, 1) : uninit_null();
-  bool strict = argc > 2 ? getArg<KindOfBoolean>(ar, 2) : false;
-  return arReturn(ar, array_keys_helper(key, search_value, strict));
+static
+Variant HHVM_FUNCTION(array_keys, int64_t argc,
+                                  const Variant& input,
+                                  const Variant& search_value /*=null*/,
+                                  bool strict /*=false*/) {
+  return array_keys_helper(
+    input,
+    argc < 2 ? null_variant : search_value,
+    strict
+  );
 }
 
-static void php_array_merge(Array &arr1, const Array& arr2) {
-  arr1.merge(arr2);
+static bool couldRecur(const Variant& v, const ArrayData* arr) {
+  return v.isReferenced() ||
+    arr->kind() == ArrayData::kGlobalsKind ||
+    arr->kind() == ArrayData::kProxyKind;
 }
 
 static void php_array_merge_recursive(PointerSet &seen, bool check,
                                       Array &arr1, const Array& arr2) {
+  auto const arr1_ptr = (void*)arr1.get();
   if (check) {
-    if (seen.find((void*)arr1.get()) != seen.end()) {
+    if (seen.find(arr1_ptr) != seen.end()) {
       raise_warning("array_merge_recursive(): recursion detected");
       return;
     }
-    seen.insert((void*)arr1.get());
+    seen.insert(arr1_ptr);
   }
 
   for (ArrayIter iter(arr2); iter; ++iter) {
@@ -417,8 +408,8 @@ static void php_array_merge_recursive(PointerSet &seen, bool check,
       // There is no need to do toKey() conversion, for a key that is already
       // in the array.
       Variant &v = arr1.lvalAt(key, AccessFlags::Key);
-      Array subarr1(v.toArray()->copy());
-      php_array_merge_recursive(seen, v.isReferenced(), subarr1,
+      auto subarr1 = v.toArray().toPHPArray();
+      php_array_merge_recursive(seen, couldRecur(v, subarr1.get()), subarr1,
                                 value.toArray());
       v.unset(); // avoid contamination of the value that was strongly bound
       v = subarr1;
@@ -428,46 +419,136 @@ static void php_array_merge_recursive(PointerSet &seen, bool check,
   }
 
   if (check) {
-    seen.erase((void*)arr1.get());
+    seen.erase(arr1_ptr);
   }
 }
 
-Variant HHVM_FUNCTION(array_merge,
-                      const Variant& array1,
-                      const Variant& array2 /* = null_variant */,
-                      const Array& args /* = null array */) {
-  getCheckedArray(array1);
-  Array ret = Array::Create();
-  php_array_merge(ret, arr_array1);
+TypedValue HHVM_FUNCTION(array_map,
+                         const Variant& callback,
+                         const Variant& arr1,
+                         const Array& _argv) {
+  VMRegGuard _;
+  CallCtx ctx;
+  ctx.func = nullptr;
+  if (!callback.isNull()) {
+    CallerFrame cf;
+    vm_decode_function(callback, cf(), false, ctx);
+  }
+  const auto& cell_arr1 = *arr1.asCell();
+  if (UNLIKELY(!isContainer(cell_arr1))) {
+    raise_warning("array_map(): Argument #2 should be an array or collection");
+    return make_tv<KindOfNull>();
+  }
+  if (LIKELY(_argv.empty())) {
+    // Handle the common case where the caller passed two
+    // params (a callback and a container)
+    if (!ctx.func) {
+      if (isArrayLikeType(cell_arr1.m_type)) {
+        return tvReturn(arr1);
+      } else {
+        return tvReturn(arr1.toArray());
+      }
+    }
+    ArrayInit ret(getContainerSize(cell_arr1), ArrayInit::Map{});
+    bool keyConverted = isArrayLikeType(cell_arr1.m_type);
+    if (!keyConverted) {
+      auto col_type = cell_arr1.m_data.pobj->collectionType();
+      keyConverted = !collectionAllowsIntStringKeys(col_type);
+    }
+    for (ArrayIter iter(arr1); iter; ++iter) {
+      Variant result;
+      g_context->invokeFuncFew((TypedValue*)&result, ctx, 1,
+                               iter.secondRefPlus().asCell());
+      // if keyConverted is false, it's possible that ret will have fewer
+      // elements than cell_arr1; keys int(1) and string('1') may both be
+      // present
+      ret.add(iter.first(), result, keyConverted);
+    }
+    return tvReturn(ret.toVariant());
+  }
 
-  if (UNLIKELY(countArguments() < 2)) return ret;
+  // Handle the uncommon case where the caller passed a callback
+  // and two or more containers
+  req::vector<ArrayIter> iters;
+  iters.reserve(_argv.size() + 1);
+  size_t maxLen = getContainerSize(cell_arr1);
+  iters.emplace_back(cell_arr1);
+  for (ArrayIter it(_argv); it; ++it) {
+    const auto& c = *it.secondRefPlus().asCell();
+    if (UNLIKELY(!isContainer(c))) {
+      raise_warning("array_map(): Argument #%d should be an array or "
+                    "collection", (int)(iters.size() + 2));
+      iters.emplace_back(it.secondRefPlus().toArray());
+    } else {
+      iters.emplace_back(c);
+      size_t len = getContainerSize(c);
+      if (len > maxLen) maxLen = len;
+    }
+  }
+  PackedArrayInit ret_ai(maxLen);
+  for (size_t k = 0; k < maxLen; k++) {
+    PackedArrayInit params_ai(iters.size());
+    for (auto& iter : iters) {
+      if (iter) {
+        params_ai.append(iter.secondRefPlus());
+        ++iter;
+      } else {
+        params_ai.append(init_null_variant);
+      }
+    }
+    Array params = params_ai.toArray();
+    if (ctx.func) {
+      Variant result;
+      g_context->invokeFunc((TypedValue*)&result,
+                              ctx.func, params, ctx.this_,
+                              ctx.cls, nullptr, ctx.invName);
+      ret_ai.append(result);
+    } else {
+      ret_ai.append(params);
+    }
+  }
+  return tvReturn(ret_ai.toVariant());
+}
+
+TypedValue HHVM_FUNCTION(array_merge,
+                         int64_t numArgs,
+                         const Variant& array1,
+                         const Variant& array2 /* = null_variant */,
+                         const Array& args /* = null array */) {
+  getCheckedContainer(array1);
+  Array ret = Array::Create();
+  ret.merge(arr_array1);
+
+  if (UNLIKELY(numArgs < 2)) return tvReturn(std::move(ret));
 
   getCheckedArray(array2);
-  php_array_merge(ret, arr_array2);
+  ret.merge(arr_array2);
 
   for (ArrayIter iter(args); iter; ++iter) {
     Variant v = iter.second();
     if (!v.isArray()) {
-      throw_expected_array_exception();
-      return init_null();
+      throw_expected_array_exception("array_merge");
+      return make_tv<KindOfNull>();
     }
     const Array& arr_v = v.asCArrRef();
-    php_array_merge(ret, arr_v);
+    ret.merge(arr_v);
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
-Variant HHVM_FUNCTION(array_merge_recursive,
-                      const Variant& array1,
-                      const Variant& array2 /* = null_variant */,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_merge_recursive,
+                         int64_t numArgs,
+                         const Variant& array1,
+                         const Variant& array2 /* = null_variant */,
+                         const Array& args /* = null array */) {
   getCheckedArray(array1);
+  auto in1 = array1.asCArrRef();
   Array ret = Array::Create();
   PointerSet seen;
   php_array_merge_recursive(seen, false, ret, arr_array1);
   assert(seen.empty());
 
-  if (UNLIKELY(countArguments() < 2)) return ret;
+  if (UNLIKELY(numArgs < 2)) return tvReturn(std::move(ret));
 
   getCheckedArray(array2);
   php_array_merge_recursive(seen, false, ret, arr_array2);
@@ -476,14 +557,14 @@ Variant HHVM_FUNCTION(array_merge_recursive,
   for (ArrayIter iter(args); iter; ++iter) {
     Variant v = iter.second();
     if (!v.isArray()) {
-      throw_expected_array_exception();
-      return init_null();
+      throw_expected_array_exception("array_merge_recursive");
+      return make_tv<KindOfNull>();
     }
     const Array& arr_v = v.asCArrRef();
     php_array_merge_recursive(seen, false, ret, arr_v);
     assert(seen.empty());
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
 static void php_array_replace(Array &arr1, const Array& arr2) {
@@ -496,12 +577,22 @@ static void php_array_replace(Array &arr1, const Array& arr2) {
 
 static void php_array_replace_recursive(PointerSet &seen, bool check,
                                         Array &arr1, const Array& arr2) {
+  if (arr1.get() == arr2.get()) {
+    // This is an optimization, but it also avoids an assert in
+    // setWithRef (Variant::setWithRef asserts that its source
+    // and destination are not the same).
+    // If the arrays are self recursive, this does change the behavior
+    // slightly - it skips the "recursion detected" warning.
+    return;
+  }
+
+  auto const arr1_ptr = (void*)arr1.get();
   if (check) {
-    if (seen.find((void*)arr1.get()) != seen.end()) {
+    if (seen.find(arr1_ptr) != seen.end()) {
       raise_warning("array_replace_recursive(): recursion detected");
       return;
     }
-    seen.insert((void*)arr1.get());
+    seen.insert(arr1_ptr);
   }
 
   for (ArrayIter iter(arr2); iter; ++iter) {
@@ -510,10 +601,10 @@ static void php_array_replace_recursive(PointerSet &seen, bool check,
     if (arr1.exists(key, true) && value.isArray()) {
       Variant &v = arr1.lvalAt(key, AccessFlags::Key);
       if (v.isArray()) {
-        Array subarr1 = v.toArray();
+        Array subarr1 = v.toArray().toPHPArray();
         const ArrNR& arr_value = value.toArrNR();
-        php_array_replace_recursive(seen, v.isReferenced(), subarr1,
-                                    arr_value);
+        php_array_replace_recursive(seen, couldRecur(v, subarr1.get()),
+                                    subarr1, arr_value);
         v = subarr1;
       } else {
         arr1.set(key, value, true);
@@ -524,19 +615,21 @@ static void php_array_replace_recursive(PointerSet &seen, bool check,
   }
 
   if (check) {
-    seen.erase((void*)arr1.get());
+    seen.erase(arr1_ptr);
   }
 }
 
-Variant HHVM_FUNCTION(array_replace,
-                      const Variant& array1,
-                      const Variant& array2 /* = null_variant */,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_replace,
+                         const Variant& array1,
+                         const Variant& array2 /* = null_variant */,
+                         const Array& args /* = null array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
   php_array_replace(ret, arr_array1);
 
-  if (UNLIKELY(array2.isNull() && args.empty())) return ret;
+  if (UNLIKELY(array2.isNull() && args.empty())) {
+    return tvReturn(std::move(ret));
+  }
 
   getCheckedArray(array2);
   php_array_replace(ret, arr_array2);
@@ -546,20 +639,22 @@ Variant HHVM_FUNCTION(array_replace,
     getCheckedArray(v);
     php_array_replace(ret, arr_v);
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
-Variant HHVM_FUNCTION(array_replace_recursive,
-                      const Variant& array1,
-                      const Variant& array2 /* = null_variant */,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_replace_recursive,
+                         const Variant& array1,
+                         const Variant& array2 /* = null_variant */,
+                         const Array& args /* = null array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
   PointerSet seen;
   php_array_replace_recursive(seen, false, ret, arr_array1);
   assert(seen.empty());
 
-  if (UNLIKELY(array2.isNull() && args.empty())) return ret;
+  if (UNLIKELY(array2.isNull() && args.empty())) {
+    return tvReturn(std::move(ret));
+  }
 
   getCheckedArray(array2);
   php_array_replace_recursive(seen, false, ret, arr_array2);
@@ -571,55 +666,56 @@ Variant HHVM_FUNCTION(array_replace_recursive,
     php_array_replace_recursive(seen, false, ret, arr_v);
     assert(seen.empty());
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
-Variant HHVM_FUNCTION(array_pad,
-                      const Variant& input,
-                      int pad_size,
-                      const Variant& pad_value) {
+TypedValue HHVM_FUNCTION(array_pad,
+                         const Variant& input,
+                         int pad_size,
+                         const Variant& pad_value) {
   getCheckedArray(input);
+  auto arr =
+    UNLIKELY(input.isHackArray()) ? arr_input.toPHPArray() : arr_input;
   if (pad_size > 0) {
-    return ArrayUtil::Pad(arr_input, pad_value, pad_size, true);
+    return tvReturn(ArrayUtil::PadRight(arr, pad_value, pad_size));
+  } else {
+    return tvReturn(ArrayUtil::PadLeft(arr, pad_value, -pad_size));
   }
-  return ArrayUtil::Pad(arr_input, pad_value, -pad_size, false);
 }
 
-Variant HHVM_FUNCTION(array_pop,
-                      VRefParam containerRef) {
+TypedValue HHVM_FUNCTION(array_pop,
+                         VRefParam containerRef) {
   const auto* container = containerRef->asCell();
   if (UNLIKELY(!isMutableContainer(*container))) {
-    raise_warning(
-      "%s() expects parameter 1 to be an array or mutable collection",
-      __FUNCTION__+2 /* remove the "f_" prefix */);
-    return init_null();
+    raise_warning("array_pop() expects parameter 1 to be an "
+                  "array or mutable collection");
+    return make_tv<KindOfNull>();
   }
   if (!getContainerSize(containerRef)) {
-    return init_null();
+    return make_tv<KindOfNull>();
   }
-  if (container->m_type == KindOfArray) {
-    return containerRef.wrapped().toArrRef().pop();
+  if (isArrayLikeType(container->m_type)) {
+    if (auto ref = containerRef.getVariantOrNull()) {
+      return tvReturn(ref->asArrRef().pop());
+    }
+    auto ad = container->m_data.parr;
+    if (ad->size()) {
+      auto last = ad->iter_last();
+      return tvReturn(ad->getValue(last));
+    }
+    return make_tv<KindOfNull>();
   }
   assert(container->m_type == KindOfObject);
-  auto* obj = container->m_data.pobj;
-  assert(obj->isCollection());
-  switch (obj->getCollectionType()) {
-    case Collection::VectorType: return static_cast<c_Vector*>(obj)->t_pop();
-    case Collection::MapType:    return static_cast<c_Map*>(obj)->pop();
-    case Collection::SetType:    return static_cast<c_Set*>(obj)->pop();
-    default:                     break;
-  }
-  assert(false);
-  return init_null();
+  return tvReturn(collections::pop(container->m_data.pobj));
 }
 
-Variant HHVM_FUNCTION(array_product,
-                      const Variant& input) {
+TypedValue HHVM_FUNCTION(array_product,
+                         const Variant& input) {
   if (UNLIKELY(!isContainer(input))) {
     raise_warning("Invalid operand type was used: %s expects "
                   "an array or collection as argument 1",
                   __FUNCTION__+2);
-    return init_null();
+    return make_tv<KindOfNull>();
   }
 
   int64_t i = 1;
@@ -639,7 +735,7 @@ Variant HHVM_FUNCTION(array_product,
       case KindOfDouble:
         goto DOUBLE;
 
-      case KindOfStaticString:
+      case KindOfPersistentString:
       case KindOfString: {
         int64_t ti;
         double td;
@@ -652,6 +748,13 @@ Variant HHVM_FUNCTION(array_product,
         }
       }
 
+      case KindOfPersistentVec:
+      case KindOfVec:
+      case KindOfPersistentDict:
+      case KindOfDict:
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
+      case KindOfPersistentArray:
       case KindOfArray:
       case KindOfObject:
       case KindOfResource:
@@ -662,7 +765,7 @@ Variant HHVM_FUNCTION(array_product,
     }
     not_reached();
   }
-  return i;
+  return make_tv<KindOfInt64>(i);
 
 DOUBLE:
   double d = i;
@@ -674,6 +777,9 @@ DOUBLE:
       case KindOfRef:
         d *= entry.toDouble();
 
+      case KindOfVec:
+      case KindOfDict:
+      case KindOfKeyset:
       case KindOfArray:
       case KindOfObject:
       case KindOfResource:
@@ -684,191 +790,171 @@ DOUBLE:
     }
     not_reached();
   }
-  return d;
+  return make_tv<KindOfDouble>(d);
 }
 
-Variant HHVM_FUNCTION(array_push,
-                      VRefParam container,
-                      const Variant& var,
-                      const Array& args /* = null array */) {
-
+TypedValue HHVM_FUNCTION(array_push,
+                         VRefParam container,
+                         const Variant& var,
+                         const Array& args /* = null array */) {
   if (LIKELY(container->isArray())) {
-    auto const array_cell = container.wrapped().asCell();
-    assert(array_cell->m_type == KindOfArray);
+    auto ref = container.getVariantOrNull();
+    if (!ref) {
+      return make_tv<KindOfInt64>(
+        1 + args.size() + container->asCArrRef().size()
+      );
+    }
 
     /*
      * Important note: this *must* cast the parr in the inner cell to
      * the Array&---we can't copy it to the stack or anything because we
      * might escalate.
      */
-    Array& arr_array = *reinterpret_cast<Array*>(&array_cell->m_data.parr);
+    Array& arr_array = ref->asArrRef();
     arr_array.append(var);
     for (ArrayIter iter(args); iter; ++iter) {
       arr_array.append(iter.second());
     }
-    return arr_array.size();
+    return make_tv<KindOfInt64>(arr_array.size());
   }
 
   if (container.isObject()) {
     ObjectData* obj = container.getObjectData();
-    auto collection_type = obj->getCollectionType();
-    if (collection_type == Collection::VectorType) {
-      c_Vector* vec = static_cast<c_Vector*>(obj);
-      vec->reserve(vec->size() + args.size() + 1);
-      vec->t_add(var);
-      for (ArrayIter iter(args); iter; ++iter) {
-        vec->t_add(iter.second());
+    if (obj->isCollection()) {
+      switch (obj->collectionType()) {
+        case CollectionType::Vector: {
+          c_Vector* vec = static_cast<c_Vector*>(obj);
+          vec->reserve(vec->size() + args.size() + 1);
+          vec->add(var);
+          for (ArrayIter iter(args); iter; ++iter) {
+            vec->add(iter.second());
+          }
+          return make_tv<KindOfInt64>(vec->size());
+        }
+        case CollectionType::Set: {
+          c_Set* set = static_cast<c_Set*>(obj);
+          set->reserve(set->size() + args.size() + 1);
+          set->add(var);
+          for (ArrayIter iter(args); iter; ++iter) {
+            set->add(iter.second());
+          }
+          return make_tv<KindOfInt64>(set->size());
+        }
+        case CollectionType::Map:
+        case CollectionType::Pair:
+        case CollectionType::ImmVector:
+        case CollectionType::ImmMap:
+        case CollectionType::ImmSet:
+          // other collection types are unsupported:
+          //  - mapping collections require a key
+          //  - immutable collections don't allow insertion
+          break;
       }
-      return vec->size();
-    } else if (collection_type == Collection::SetType) {
-      c_Set* set = static_cast<c_Set*>(obj);
-      set->reserve(set->size() + args.size() + 1);
-      set->t_add(var);
-      for (ArrayIter iter(args); iter; ++iter) {
-        set->t_add(iter.second());
-      }
-      return set->size();
     }
-    // other collection types are unsupported:
-    //  - mapping collections require a key
-    //  - frozen collections don't allow insertion
   }
-
-  throw_expected_array_or_collection_exception();
-  return init_null();
+  throw_expected_array_or_collection_exception("array_push");
+  return make_tv<KindOfNull>();
 }
 
-Variant HHVM_FUNCTION(array_rand,
-                      const Variant& input,
-                      int num_req /* = 1 */) {
+TypedValue HHVM_FUNCTION(array_rand,
+                         const Variant& input,
+                         int num_req /* = 1 */) {
   getCheckedArray(input);
-  return ArrayUtil::RandomKeys(arr_input, num_req);
+  return tvReturn(ArrayUtil::RandomKeys(arr_input, num_req));
 }
 
-static Variant reduce_func(const Variant& result, const Variant& operand, const void *data) {
-  CallCtx* ctx = (CallCtx*)data;
-  Variant ret;
-  TypedValue args[2] = { *result.asCell(), *operand.asCell() };
-  g_context->invokeFuncFew(ret.asTypedValue(), *ctx, 2, args);
-  return ret;
-}
-Variant HHVM_FUNCTION(array_reduce,
-                      const Variant& input,
-                      const Variant& callback,
-                      const Variant& initial /* = null_variant */) {
-  getCheckedArray(input);
-  CallCtx ctx;
-  CallerFrame cf;
-  vm_decode_function(callback, cf(), false, ctx);
-  if (ctx.func == NULL) {
-    return init_null();
-  }
-  return ArrayUtil::Reduce(arr_input, reduce_func, &ctx, initial);
+TypedValue HHVM_FUNCTION(array_reverse,
+                         const Variant& input,
+                         bool preserve_keys /* = false */) {
+
+  getCheckedContainer(input);
+  return tvReturn(ArrayUtil::Reverse(arr_input, preserve_keys));
 }
 
-Variant HHVM_FUNCTION(array_reverse,
-                      const Variant& input,
-                      bool preserve_keys /* = false */) {
-
-  const auto& cell_input = *input.asCell();
-  if (UNLIKELY(!isContainer(cell_input))) {
-    raise_warning("Invalid operand type was used: %s expects "
-                  "an array or collection as argument 1",
-                  __FUNCTION__+2);
-    return init_null();
-  }
-
-  if (LIKELY(cell_input.m_type == KindOfArray)) {
-    ArrNR arrNR(cell_input.m_data.parr);
-    const Array& arr = arrNR.asArray();
-    return ArrayUtil::Reverse(arr, preserve_keys);
-  }
-
-  // For collections, we convert to their array representation and then
-  // reverse it, rather than building a reversed version of ArrayIter
-  assert(cell_input.m_type == KindOfObject);
-  ObjectData* obj = cell_input.m_data.pobj;
-  assert(obj && obj->isCollection());
-  return ArrayUtil::Reverse(obj->o_toArray(), preserve_keys);
-}
-
-Variant HHVM_FUNCTION(array_shift,
-                      VRefParam array) {
+TypedValue HHVM_FUNCTION(array_shift,
+                         VRefParam array) {
   const auto* cell_array = array->asCell();
-  if (UNLIKELY(!isContainer(*cell_array))) {
-    raise_warning(
-      "%s() expects parameter 1 to be an array or mutable collection",
-      __FUNCTION__+2 /* remove the "f_" prefix */);
-    return init_null();
+  if (UNLIKELY(!isMutableContainer(*cell_array))) {
+    raise_warning("array_shift() expects parameter 1 to be an "
+                  "array or mutable collection");
+    return make_tv<KindOfNull>();
   }
-  if (cell_array->m_type == KindOfArray) {
-    return array.wrapped().toArrRef().dequeue();
+  if (!getContainerSize(array)) {
+    return make_tv<KindOfNull>();
   }
-  assert(cell_array->m_type == KindOfObject);
-  auto* obj = cell_array->m_data.pobj;
-  assert(obj->isCollection());
-  switch (obj->getCollectionType()) {
-    case Collection::VectorType: {
-      auto* vec = static_cast<c_Vector*>(obj);
-      if (!vec->size()) return init_null();
-      return vec->popFront();
+  if (isArrayLikeType(cell_array->m_type)) {
+    if (auto ref = array.getVariantOrNull()) {
+      return tvReturn(ref->asArrRef().dequeue());
     }
-    case Collection::MapType: {
-      auto* mp = static_cast<BaseMap*>(obj);
-      if (!mp->size()) return init_null();
-      return mp->popFront();
+    auto ad = cell_array->m_data.parr;
+    if (ad->size()) {
+      auto first = ad->iter_begin();
+      return tvReturn(ad->getValue(first));
     }
-    case Collection::SetType: {
-      auto* st = static_cast<c_Set*>(obj);
-      if (!st->size()) return init_null();
-      return st->popFront();
-    }
-    default: {
-      raise_warning(
-        "%s() expects parameter 1 to be an array or mutable collection",
-        __FUNCTION__+2 /* remove the "f_" prefix */);
-      return init_null();
-    }
+    return make_tv<KindOfNull>();
   }
+  assertx(cell_array->m_type == KindOfObject);
+  return tvReturn(collections::shift(cell_array->m_data.pobj));
 }
 
-Variant HHVM_FUNCTION(array_slice,
-                      const Variant& input,
-                      int offset,
-                      const Variant& length /* = null_variant */,
-                      bool preserve_keys /* = false */) {
-  const auto& cell_input = *input.asCell();
+TypedValue HHVM_FUNCTION(array_slice,
+                         TypedValue cell_input,
+                         int64_t offset,
+                         const Variant& length /* = null_variant */,
+                         bool preserve_keys /* = false */) {
   if (UNLIKELY(!isContainer(cell_input))) {
     raise_warning("Invalid operand type was used: %s expects "
                   "an array or collection as argument 1",
                   __FUNCTION__+2);
-    return init_null();
+    return make_tv<KindOfNull>();
   }
   int64_t len = length.isNull() ? 0x7FFFFFFF : length.toInt64();
 
-  int num_in = getContainerSize(cell_input);
+  const int64_t num_in = getContainerSize(cell_input);
   if (offset > num_in) {
     offset = num_in;
   } else if (offset < 0 && (offset = (num_in + offset)) < 0) {
     offset = 0;
   }
 
+  auto const maxLen = num_in - offset;
   if (len < 0) {
-    len = num_in - offset + len;
-  } else if (((unsigned)offset + (unsigned)len) > (unsigned)num_in) {
-    len = num_in - offset;
+    len = maxLen + len;
+  } else if (len > maxLen) {
+    len = maxLen;
   }
 
   if (len <= 0) {
-    return empty_array();
+    return make_tv<KindOfPersistentArray>(staticEmptyArray());
   }
 
-  // PackedArrayInit can't be used because non-numeric keys are preserved
-  // even when preserve_keys is false
-  Array ret = Array::attach(MixedArray::MakeReserve(len));
+  bool input_is_packed = isPackedContainer(cell_input);
+
+  // If the slice covers the entire input container, we can just nop when
+  // preserve_keys is true, or when preserve_keys is false but the container
+  // is packed so we know the keys already map to [0,N].
+  if (offset == 0 && len == num_in && (preserve_keys || input_is_packed)) {
+    if (isArrayLikeType(cell_input.m_type)) {
+      return tvReturn(Variant(cell_input.m_data.parr));
+    }
+    return tvReturn(cell_input.m_data.pobj->toArray());
+  }
+
   int pos = 0;
-  ArrayIter iter(input);
+  ArrayIter iter(cell_input);
   for (; pos < offset && iter; ++pos, ++iter) {}
+
+  if (input_is_packed && (offset == 0 || !preserve_keys)) {
+    PackedArrayInit ret(len);
+    for (; pos < (offset + len) && iter; ++pos, ++iter) {
+      ret.appendWithRef(iter.secondRefPlus());
+    }
+    return tvReturn(ret.toVariant());
+  }
+
+  // Otherwise PackedArrayInit can't be used because non-numeric keys are
+  // preserved even when preserve_keys is false
+  Array ret = Array::attach(PackedArray::MakeReserve(len));
   for (; pos < (offset + len) && iter; ++pos, ++iter) {
     Variant key(iter.first());
     bool doAppend = !preserve_keys && key.isNumeric();
@@ -879,32 +965,37 @@ Variant HHVM_FUNCTION(array_slice,
       ret.setWithRef(key, v, true);
     }
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
-Variant HHVM_FUNCTION(array_splice,
-                      VRefParam input,
-                      int offset,
-                      const Variant& length /* = null_variant */,
-                      const Variant& replacement /* = null_variant */) {
-  getCheckedArray(input);
-  Array ret(Array::Create());
-  int64_t len = length.isNull() ? 0x7FFFFFFF : length.toInt64();
-  if (arr_input->isIntMapArray() || arr_input->isStrMapArray()) {
-    MixedArray::downgradeAndWarn(arr_input.get(),
-                                 MixedArray::Reason::kArraySplice);
+Variant array_splice(VRefParam input, int offset,
+                     const Variant& length, const Variant& replacement) {
+  getCheckedArrayVariant(input);
+  if (arr_input.isHackArray()) {
+    throw_expected_array_exception("array_splice");
+    return init_null();
   }
-  input = ArrayUtil::Splice(arr_input, offset, len, replacement, &ret);
+  Array ret = Array::Create();
+  int64_t len = length.isNull() ? 0x7FFFFFFF : length.toInt64();
+  input.assignIfRef(ArrayUtil::Splice(arr_input, offset, len, replacement, &ret));
   return ret;
 }
 
-Variant HHVM_FUNCTION(array_sum,
-                      const Variant& input) {
+TypedValue HHVM_FUNCTION(array_splice,
+                         VRefParam input,
+                         int offset,
+                         const Variant& length,
+                         const Variant& replacement) {
+  return tvReturn(array_splice(input, offset, length, replacement));
+}
+
+TypedValue HHVM_FUNCTION(array_sum,
+                         const Variant& input) {
   if (UNLIKELY(!isContainer(input))) {
     raise_warning("Invalid operand type was used: %s expects "
                   "an array or collection as argument 1",
                   __FUNCTION__+2);
-    return init_null();
+    return make_tv<KindOfNull>();
   }
 
   int64_t i = 0;
@@ -924,7 +1015,7 @@ Variant HHVM_FUNCTION(array_sum,
       case KindOfDouble:
         goto DOUBLE;
 
-      case KindOfStaticString:
+      case KindOfPersistentString:
       case KindOfString: {
         int64_t ti;
         double td;
@@ -937,6 +1028,13 @@ Variant HHVM_FUNCTION(array_sum,
         }
       }
 
+      case KindOfPersistentVec:
+      case KindOfVec:
+      case KindOfPersistentDict:
+      case KindOfDict:
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
+      case KindOfPersistentArray:
       case KindOfArray:
       case KindOfObject:
       case KindOfResource:
@@ -947,18 +1045,21 @@ Variant HHVM_FUNCTION(array_sum,
     }
     not_reached();
   }
-  return i;
+  return make_tv<KindOfInt64>(i);
 
 DOUBLE:
   double d = i;
   for (; iter; ++iter) {
-    const Variant& entry(iter.secondRef());
+    const Variant& entry(iter.secondRefPlus());
     switch (entry.getType()) {
       DT_UNCOUNTED_CASE:
       case KindOfString:
       case KindOfRef:
         d += entry.toDouble();
 
+      case KindOfVec:
+      case KindOfDict:
+      case KindOfKeyset:
       case KindOfArray:
       case KindOfObject:
       case KindOfResource:
@@ -969,32 +1070,39 @@ DOUBLE:
     }
     not_reached();
   }
-  return d;
+  return make_tv<KindOfDouble>(d);
 }
 
-Variant HHVM_FUNCTION(array_unshift,
-                      VRefParam array,
-                      const Variant& var,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_unshift,
+                         VRefParam array,
+                         const Variant& var,
+                         const Array& args /* = null array */) {
   const auto* cell_array = array->asCell();
   if (UNLIKELY(!isContainer(*cell_array))) {
     raise_warning("%s() expects parameter 1 to be an array, Vector, or Set",
                   __FUNCTION__+2 /* remove the "f_" prefix */);
-    return init_null();
+    return make_tv<KindOfNull>();
   }
-  if (cell_array->m_type == KindOfArray) {
-    if (array.toArray()->isVectorData()) {
+  if (isArrayLikeType(cell_array->m_type)) {
+    auto ref_array = array.getVariantOrNull();
+    if (!ref_array) {
+      return make_tv<KindOfInt64>(
+        cell_array->m_data.parr->size() + args.size() + 1
+      );
+    }
+    if (cell_array->m_data.parr->isVectorData()) {
       if (!args.empty()) {
         auto pos_limit = args->iter_end();
         for (ssize_t pos = args->iter_last(); pos != pos_limit;
              pos = args->iter_rewind(pos)) {
-          array.wrapped().toArrRef().prepend(args->getValueRef(pos));
+          ref_array->asArrRef().prepend(args->getValueRef(pos));
         }
       }
-      array.wrapped().toArrRef().prepend(var);
+      ref_array->asArrRef().prepend(var);
     } else {
       {
-        Array newArray;
+        auto newArray = Array::attach(
+          MixedArray::MakeReserveSame(cell_array->m_data.parr, 0));
         newArray.append(var);
         if (!args.empty()) {
           auto pos_limit = args->iter_end();
@@ -1003,30 +1111,35 @@ Variant HHVM_FUNCTION(array_unshift,
             newArray.append(args->getValueRef(pos));
           }
         }
-        for (ArrayIter iter(array.toArray()); iter; ++iter) {
-          Variant key(iter.first());
-          const Variant& value(iter.secondRef());
-          if (key.isInteger()) {
-            newArray.appendWithRef(value);
-          } else {
-            newArray.setWithRef(key, value, true);
+        if (cell_array->m_data.parr->isKeyset()) {
+          for (ArrayIter iter(array.toArray()); iter; ++iter) {
+            Variant key(iter.first());
+            newArray.append(key);
+          }
+        } else {
+          for (ArrayIter iter(array.toArray()); iter; ++iter) {
+            Variant key(iter.first());
+            const Variant& value(iter.secondRef());
+            if (key.isInteger()) {
+              newArray.appendWithRef(value);
+            } else {
+              newArray.setWithRef(key, value, true);
+            }
           }
         }
-        array = newArray;
+        *ref_array = std::move(newArray);
       }
       // Reset the array's internal pointer
-      if (array.is(KindOfArray)) {
-        HHVM_FN(reset)(array);
-      }
+      ref_array->asArrRef()->reset();
     }
-    return array.toArray().size();
+    return make_tv<KindOfInt64>(ref_array->asArrRef().size());
   }
   // Handle collections
   assert(cell_array->m_type == KindOfObject);
   auto* obj = cell_array->m_data.pobj;
   assert(obj->isCollection());
-  switch (obj->getCollectionType()) {
-    case Collection::VectorType: {
+  switch (obj->collectionType()) {
+    case CollectionType::Vector: {
       auto* vec = static_cast<c_Vector*>(obj);
       if (!args.empty()) {
         auto pos_limit = args->iter_end();
@@ -1036,9 +1149,9 @@ Variant HHVM_FUNCTION(array_unshift,
         }
       }
       vec->addFront(var.asCell());
-      return vec->size();
+      return make_tv<KindOfInt64>(vec->size());
     }
-    case Collection::SetType: {
+    case CollectionType::Set: {
       auto* st = static_cast<c_Set*>(obj);
       if (!args.empty()) {
         auto pos_limit = args->iter_end();
@@ -1048,39 +1161,62 @@ Variant HHVM_FUNCTION(array_unshift,
         }
       }
       st->addFront(var.asCell());
-      return st->size();
+      return make_tv<KindOfInt64>(st->size());
     }
-    default: {
-      raise_warning("%s() expects parameter 1 to be an array, Vector, or Set",
-                    __FUNCTION__+2 /* remove the "f_" prefix */);
-      return init_null();
-    }
+    case CollectionType::Map:
+    case CollectionType::Pair:
+    case CollectionType::ImmVector:
+    case CollectionType::ImmMap:
+    case CollectionType::ImmSet:
+      break;
   }
+  raise_warning("%s() expects parameter 1 to be an array, Vector, or Set",
+                __FUNCTION__+2 /* remove the "f_" prefix */);
+  return make_tv<KindOfNull>();
 }
 
-Variant HHVM_FUNCTION(array_values,
-                      const Variant& input) {
-  const auto& cell_input = *input.asCell();
-  if (!isContainer(cell_input)) {
+Variant array_values(const Variant& input) {
+  if (input.isVecArray()) {
+    return input;
+  }
+
+  folly::Optional<PackedArrayInit> ai;
+  auto ok = IterateV(*input.asCell(),
+                     [&](ArrayData* adata) {
+                       ai.emplace(adata->size());
+                     },
+                     [&](const TypedValue* tv) {
+                       ai->appendWithRef(tvAsCVarRef(tv));
+                     },
+                     [&](ObjectData* coll) {
+                       if (coll->collectionType() == CollectionType::Pair) {
+                         ai.emplace(2);
+                       }
+                     });
+
+  if (!ok) {
     raise_warning("array_values() expects parameter 1 to be an array "
                   "or collection");
     return init_null();
   }
-  PackedArrayInit ai(getContainerSize(cell_input));
-  for (ArrayIter iter(cell_input); iter; ++iter) {
-    ai.appendWithRef(iter.secondRefPlus());
-  }
-  return ai.toVariant();
+
+  assert(ai.hasValue());
+  return ai->toVariant();
 }
 
-static void walk_func(VRefParam value,
+TypedValue HHVM_FUNCTION(array_values,
+                         const Variant& input) {
+  return tvReturn(array_values(input));
+}
+
+static void walk_func(Variant& value,
                       const Variant& key,
                       const Variant& userdata,
                       const void *data) {
   CallCtx* ctx = (CallCtx*)data;
   Variant sink;
   int nargs = userdata.isInitialized() ? 3 : 2;
-  TypedValue args[3] = { *value->asRef(), *key.asCell(), *userdata.asCell() };
+  TypedValue args[3] = { *value.asRef(), *key.asCell(), *userdata.asCell() };
   g_context->invokeFuncFew(sink.asTypedValue(), *ctx, nargs, args);
 }
 
@@ -1088,8 +1224,8 @@ bool HHVM_FUNCTION(array_walk_recursive,
                    VRefParam input,
                    const Variant& funcname,
                    const Variant& userdata /* = null_variant */) {
-  if (!input.isArray()) {
-    throw_expected_array_exception();
+  if (!input.isPHPArray()) {
+    throw_expected_array_exception("array_walk_recursive");
     return false;
   }
   CallCtx ctx;
@@ -1099,7 +1235,8 @@ bool HHVM_FUNCTION(array_walk_recursive,
     return false;
   }
   PointerSet seen;
-  ArrayUtil::Walk(input, walk_func, &ctx, true, &seen, userdata);
+  Variant var(input, Variant::WithRefBind{});
+  ArrayUtil::Walk(var, walk_func, &ctx, true, &seen, userdata);
   return true;
 }
 
@@ -1107,8 +1244,8 @@ bool HHVM_FUNCTION(array_walk,
                    VRefParam input,
                    const Variant& funcname,
                    const Variant& userdata /* = null_variant */) {
-  if (!input.isArray()) {
-    throw_expected_array_exception();
+  if (!input.isPHPArray()) {
+    throw_expected_array_exception("array_walk");
     return false;
   }
   CallCtx ctx;
@@ -1117,15 +1254,27 @@ bool HHVM_FUNCTION(array_walk,
   if (ctx.func == NULL) {
     return false;
   }
-  ArrayUtil::Walk(input, walk_func, &ctx, false, NULL, userdata);
+  Variant var(input, Variant::WithRefBind{});
+  ArrayUtil::Walk(var, walk_func, &ctx, false, NULL, userdata);
   return true;
 }
 
-static void compact(VarEnv* v, Array &ret, const Variant& var) {
+static void compact(PointerSet& seen, VarEnv* v, Array &ret,
+                    const Variant& var) {
   if (var.isArray()) {
-    for (ArrayIter iter(var.getArrayData()); iter; ++iter) {
-      compact(v, ret, iter.second());
+    auto adata = var.getArrayData();
+    auto check = couldRecur(var, adata);
+    if (check) {
+      if (seen.find(adata) != seen.end()) {
+        raise_warning("compact(): recursion detected");
+        return;
+      }
+      seen.insert(adata);
     }
+    for (ArrayIter iter(adata); iter; ++iter) {
+      compact(seen, v, ret, iter.secondRef());
+    }
+    if (check) seen.erase(adata);
   } else {
     String varname = var.toString();
     if (!varname.empty() && v->lookup(varname.get()) != NULL) {
@@ -1138,11 +1287,12 @@ Array HHVM_FUNCTION(compact,
                     const Variant& varname,
                     const Array& args /* = null array */) {
   raise_disallowed_dynamic_call("compact should not be called dynamically");
-  Array ret = Array::attach(MixedArray::MakeReserve(args.size() + 1));
-  VarEnv* v = g_context->getVarEnv();
+  Array ret = Array::attach(PackedArray::MakeReserve(args.size() + 1));
+  VarEnv* v = g_context->getOrCreateVarEnv();
   if (v) {
-    compact(v, ret, varname);
-    compact(v, ret, args);
+    PointerSet seen;
+    compact(seen, v, ret, varname);
+    if (!args.empty()) compact(seen, v, ret, args);
   }
   return ret;
 }
@@ -1151,11 +1301,12 @@ Array HHVM_FUNCTION(compact,
 Array HHVM_FUNCTION(__SystemLib_compact_sl,
                     const Variant& varname,
                     const Array& args /* = null array */) {
-  Array ret = Array::attach(MixedArray::MakeReserve(args.size() + 1));
-  VarEnv* v = g_context->getVarEnv();
+  Array ret = Array::attach(PackedArray::MakeReserve(args.size() + 1));
+  VarEnv* v = g_context->getOrCreateVarEnv();
   if (v) {
-    compact(v, ret, varname);
-    compact(v, ret, args);
+    PointerSet seen;
+    compact(seen, v, ret, varname);
+    if (!args.empty()) compact(seen, v, ret, args);
   }
   return ret;
 }
@@ -1166,6 +1317,7 @@ static int php_count_recursive(const Array& array) {
     Variant value = iter.second();
     if (value.isArray()) {
       const Array& arr_value = value.asCArrRef();
+      check_recursion_throw();
       cnt += php_count_recursive(arr_value);
     }
   }
@@ -1174,20 +1326,18 @@ static int php_count_recursive(const Array& array) {
 
 bool HHVM_FUNCTION(shuffle,
                    VRefParam array) {
-  if (!array.isArray()) {
-    throw_expected_array_exception();
+  if (!array.isPHPArray()) {
+    throw_expected_array_exception("shuffle");
     return false;
   }
-  if (array.toArray()->isIntMapArray()) {
-    // ArrayUtil::Shuffle will overwrite array, so just raise warning
-    MixedArray::warnUsage(MixedArray::Reason::kShuffle, ArrayData::kIntMapKind);
-  } else if (array.toArray()->isStrMapArray()) {
-    MixedArray::warnUsage(MixedArray::Reason::kShuffle, ArrayData::kStrMapKind);
-  }
-
-  array = ArrayUtil::Shuffle(array);
+  array.assignIfRef(ArrayUtil::Shuffle(array));
   return true;
 }
+
+enum class CountMode {
+  NORMAL = 0,
+  RECURSIVE = 1,
+};
 
 int64_t HHVM_FUNCTION(count,
                       const Variant& var,
@@ -1200,13 +1350,20 @@ int64_t HHVM_FUNCTION(count,
     case KindOfBoolean:
     case KindOfInt64:
     case KindOfDouble:
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
     case KindOfResource:
       return 1;
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
-      if (mode) {
+      if ((CountMode)mode == CountMode::RECURSIVE) {
         const Array& arr_var = var.toCArrRef();
         return php_count_recursive(arr_var);
       }
@@ -1216,7 +1373,7 @@ int64_t HHVM_FUNCTION(count,
       {
         Object obj = var.toObject();
         if (obj->isCollection()) {
-          return getCollectionSize(obj.get());
+          return collections::getSize(obj.get());
         }
         if (obj.instanceof(SystemLib::s_CountableClass)) {
           return obj->o_invoke_few_args(s_count, 0).toInt64();
@@ -1241,32 +1398,55 @@ namespace {
 
 enum class NoCow {};
 template<class DoCow = void, class NonArrayRet, class OpPtr>
-static Variant iter_op_impl(VRefParam refParam, OpPtr op, NonArrayRet nonArray,
+static Variant iter_op_impl(VRefParam refParam, OpPtr op, const String& objOp,
+                            NonArrayRet nonArray,
                             bool(ArrayData::*pred)() const =
                               &ArrayData::isInvalid) {
   auto& cell = *refParam.wrapped().asCell();
-  if (cell.m_type != KindOfArray) {
+  if (!isArrayLikeType(cell.m_type)) {
+    if (cell.m_type == KindOfObject) {
+      auto obj = refParam.wrapped().toObject();
+      if (obj->instanceof(SystemLib::s_ArrayObjectClass)) {
+        return obj->o_invoke_few_args(objOp, 0);
+      }
+    }
     throw_bad_type_exception("expecting an array");
     return Variant(nonArray);
   }
 
   auto ad = cell.m_data.parr;
   auto constexpr doCow = !std::is_same<DoCow, NoCow>::value;
-  if (doCow && ad->hasMultipleRefs() && !(ad->*pred)() &&
+  if (doCow && ad->cowCheck() && !(ad->*pred)() &&
       !ad->noCopyOnWrite()) {
     ad = ad->copy();
-    cellSet(make_tv<KindOfArray>(ad), cell);
+    if (LIKELY(refParam.isRefData())) {
+      cellMove(make_array_like_tv(ad), *refParam.getRefData()->tv());
+    } else {
+      req::ptr<ArrayData> tmp(ad, req::ptr<ArrayData>::NoIncRef{});
+      return (ad->*op)();
+    }
   }
   return (ad->*op)();
 }
 
 }
 
+const StaticString
+  s___each("__each"),
+  s___current("__current"),
+  s___key("__key"),
+  s___next("__next"),
+  s___prev("__prev"),
+  s___reset("__reset"),
+  s___end("__end");
+
+
 Variant HHVM_FUNCTION(each,
                       VRefParam refParam) {
   return iter_op_impl(
     refParam,
     &ArrayData::each,
+    s___each,
     Variant::NullInit()
   );
 }
@@ -1276,6 +1456,7 @@ Variant HHVM_FUNCTION(current,
   return iter_op_impl<NoCow>(
     refParam,
     &ArrayData::current,
+    s___current,
     false
   );
 }
@@ -1290,6 +1471,7 @@ Variant HHVM_FUNCTION(key,
   return iter_op_impl<NoCow>(
     refParam,
     &ArrayData::key,
+    s___key,
     false
   );
 }
@@ -1299,6 +1481,7 @@ Variant HHVM_FUNCTION(next,
   return iter_op_impl(
     refParam,
     &ArrayData::next,
+    s___next,
     false
   );
 }
@@ -1308,6 +1491,7 @@ Variant HHVM_FUNCTION(prev,
   return iter_op_impl(
     refParam,
     &ArrayData::prev,
+    s___prev,
     false
   );
 }
@@ -1317,6 +1501,7 @@ Variant HHVM_FUNCTION(reset,
   return iter_op_impl(
     refParam,
     &ArrayData::reset,
+    s___reset,
     false,
     &ArrayData::isHead
   );
@@ -1327,6 +1512,7 @@ Variant HHVM_FUNCTION(end,
   return iter_op_impl(
     refParam,
     &ArrayData::end,
+    s___end,
     false,
     &ArrayData::isTail
   );
@@ -1336,62 +1522,82 @@ bool HHVM_FUNCTION(in_array,
                    const Variant& needle,
                    const Variant& haystack,
                    bool strict /* = false */) {
-  const auto& cell_haystack = *haystack.asCell();
-  if (UNLIKELY(!isContainer(cell_haystack))) {
+  bool ret = false;
+  auto ok = strict ?
+    IterateV(*haystack.asCell(),
+             [](ArrayData*) { return false; },
+             [&](const TypedValue* tv) -> bool {
+               if (HPHP::same(tvAsCVarRef(tv), needle)) {
+                 ret = true;
+                 return true;
+               }
+               return false;
+             },
+             [](ObjectData*) { return false; }) :
+    IterateV(*haystack.asCell(),
+             [](ArrayData*) { return false; },
+             [&](const TypedValue* tv) -> bool {
+               if (HPHP::equal(tvAsCVarRef(tv), needle)) {
+                 ret = true;
+                 return true;
+               }
+               return false;
+             },
+             [](ObjectData*) { return false; });
+
+  if (UNLIKELY(!ok)) {
     raise_warning("in_array() expects parameter 2 to be an array "
                   "or collection");
-    return false;
   }
-
-  ArrayIter iter(cell_haystack);
-  if (strict) {
-    for (; iter; ++iter) {
-      if (HPHP::same(iter.secondRefPlus(), needle)) {
-        return true;
-      }
-    }
-  } else {
-    for (; iter; ++iter) {
-      if (HPHP::equal(iter.secondRefPlus(), needle)) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return ret;
 }
 
-Variant HHVM_FUNCTION(array_search,
-                      const Variant& needle,
-                      const Variant& haystack,
-                      bool strict /* = false */) {
-  const auto& cell_haystack = *haystack.asCell();
-  if (UNLIKELY(!isContainer(cell_haystack))) {
+Variant array_search(const Variant& needle,
+                     const Variant& haystack,
+                     bool strict /* = false */) {
+  Variant ret = false;
+  auto ok = strict ?
+    IterateKV(*haystack.asCell(),
+              [](ArrayData*) { return false; },
+              [&](const TypedValue* key, const TypedValue* tv) -> bool {
+                if (HPHP::same(tvAsCVarRef(tv), needle)) {
+                  ret = tvAsCVarRef(key);
+                  return true;
+                }
+                return false;
+              },
+              [](ObjectData*) { return false; }) :
+    IterateKV(*haystack.asCell(),
+              [](ArrayData*) { return false; },
+              [&](const TypedValue* key, const TypedValue* tv) -> bool {
+                if (HPHP::equal(tvAsCVarRef(tv), needle)) {
+                  ret = tvAsCVarRef(key);
+                  return true;
+                }
+                return false;
+              },
+              [](ObjectData*) { return false; });
+
+  if (UNLIKELY(!ok)) {
     raise_warning("array_search() expects parameter 2 to be an array "
                   "or collection");
     return init_null();
   }
 
-  ArrayIter iter(cell_haystack);
-  if (strict) {
-    for (; iter; ++iter) {
-      if (HPHP::same(iter.secondRefPlus(), needle)) {
-        return iter.first();
-      }
-    }
-  } else {
-    for (; iter; ++iter) {
-      if (HPHP::equal(iter.secondRefPlus(), needle)) {
-        return iter.first();
-      }
-    }
-  }
-  return false;
+  return ret;
 }
 
-Variant HHVM_FUNCTION(range,
-                      const Variant& low,
-                      const Variant& high,
-                      const Variant& step /* = 1 */) {
+TypedValue HHVM_FUNCTION(array_search,
+                         const Variant& needle,
+                         const Variant& haystack,
+                         bool strict /* = false */) {
+  return tvReturn(array_search(needle, haystack, strict));
+}
+
+TypedValue HHVM_FUNCTION(range,
+                         const Variant& low,
+                         const Variant& high,
+                         const Variant& step /* = 1 */) {
   bool is_step_double = false;
   double dstep = 1.0;
   if (step.isDouble()) {
@@ -1425,27 +1631,27 @@ Variant HHVM_FUNCTION(range,
       if (type1 == KindOfDouble || type2 == KindOfDouble || is_step_double) {
         if (type1 != KindOfDouble) d1 = slow.toDouble();
         if (type2 != KindOfDouble) d2 = shigh.toDouble();
-        return ArrayUtil::Range(d1, d2, dstep);
+        return tvReturn(ArrayUtil::Range(d1, d2, dstep));
       }
 
-      int64_t lstep = (int64_t) dstep;
+      int64_t lstep = toInt64(dstep);
       if (type1 == KindOfInt64 || type2 == KindOfInt64) {
         if (type1 != KindOfInt64) n1 = slow.toInt64();
         if (type2 != KindOfInt64) n2 = shigh.toInt64();
-        return ArrayUtil::Range((double)n1, (double)n2, lstep);
+        return tvReturn(ArrayUtil::Range((double)n1, (double)n2, lstep));
       }
 
-      return ArrayUtil::Range((unsigned char)slow.charAt(0),
-                              (unsigned char)shigh.charAt(0), lstep);
+      return tvReturn(ArrayUtil::Range((unsigned char)slow.charAt(0),
+                                       (unsigned char)shigh.charAt(0), lstep));
     }
   }
 
   if (low.is(KindOfDouble) || high.is(KindOfDouble) || is_step_double) {
-    return ArrayUtil::Range(low.toDouble(), high.toDouble(), dstep);
+    return tvReturn(ArrayUtil::Range(low.toDouble(), high.toDouble(), dstep));
   }
 
-  int64_t lstep = (int64_t) dstep;
-  return ArrayUtil::Range(low.toDouble(), high.toDouble(), lstep);
+  int64_t lstep = toInt64(dstep);
+  return tvReturn(ArrayUtil::Range(low.toDouble(), high.toDouble(), lstep));
 }
 ///////////////////////////////////////////////////////////////////////////////
 // diff/intersect helpers
@@ -1460,36 +1666,39 @@ static int cmp_func(const Variant& v1, const Variant& v2, const void *data) {
 // return -1, 0, 1 specification. To do what PHP 5.x in these cases,
 // use the RuntimeOption
 #define COMMA ,
-#define diff_intersect_body(type,intersect_params,user_setup)   \
+#define diff_intersect_body(type, vararg, intersect_params)     \
   getCheckedArray(array1);                                      \
-  if (!arr_array1.size()) return arr_array1;                    \
+  if (!arr_array1.size()) {                                     \
+    return tvReturn(empty_array());                             \
+  }                                                             \
   Array ret = Array::Create();                                  \
   if (RuntimeOption::EnableZendSorting) {                       \
     getCheckedArray(array2);                                    \
     if (arr_array1.same(arr_array2)) {                          \
-      return ret;                                               \
+      return tvReturn(std::move(ret));                          \
     }                                                           \
   }                                                             \
-  user_setup                                                    \
   ret = arr_array1.type(array2, intersect_params);              \
   if (ret.size()) {                                             \
-    for (ArrayIter iter(args); iter; ++iter) {                  \
+    for (ArrayIter iter(vararg); iter; ++iter) {                \
       ret = ret.type(iter.second(), intersect_params);          \
       if (!ret.size()) break;                                   \
     }                                                           \
   }                                                             \
-  return ret;
+  return tvReturn(std::move(ret));
 
 ///////////////////////////////////////////////////////////////////////////////
 // diff functions
 
-static inline void addToSetHelper(c_Set* st, const Cell& c, TypedValue* strTv,
+static inline void addToSetHelper(const req::ptr<c_Set>& st,
+                                  const Cell c,
+                                  TypedValue* strTv,
                                   bool convertIntLikeStrs) {
   if (c.m_type == KindOfInt64) {
     st->add(c.m_data.num);
   } else {
     StringData* s;
-    if (LIKELY(IS_STRING_TYPE(c.m_type))) {
+    if (LIKELY(isStringType(c.m_type))) {
       s = c.m_data.pstr;
     } else {
       s = tvCastToString(&c);
@@ -1505,13 +1714,15 @@ static inline void addToSetHelper(c_Set* st, const Cell& c, TypedValue* strTv,
   }
 }
 
-static inline bool checkSetHelper(c_Set* st, const Cell& c, TypedValue* strTv,
+static inline bool checkSetHelper(const req::ptr<c_Set>& st,
+                                  const Cell c,
+                                  TypedValue* strTv,
                                   bool convertIntLikeStrs) {
   if (c.m_type == KindOfInt64) {
     return st->contains(c.m_data.num);
   }
   StringData* s;
-  if (LIKELY(IS_STRING_TYPE(c.m_type))) {
+  if (LIKELY(isStringType(c.m_type))) {
     s = c.m_data.pstr;
   } else {
     s = tvCastToString(&c);
@@ -1525,7 +1736,8 @@ static inline bool checkSetHelper(c_Set* st, const Cell& c, TypedValue* strTv,
   return st->contains(s);
 }
 
-static void containerValuesToSetHelper(c_Set* st, const Variant& container) {
+static void containerValuesToSetHelper(const req::ptr<c_Set>& st,
+                                       const Variant& container) {
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
   for (ArrayIter iter(container); iter; ++iter) {
@@ -1534,13 +1746,13 @@ static void containerValuesToSetHelper(c_Set* st, const Variant& container) {
   }
 }
 
-static void containerKeysToSetHelper(c_Set* st, const Variant& container) {
+static void containerKeysToSetHelper(const req::ptr<c_Set>& st,
+                                     const Variant& container) {
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = container.asCell()->m_type == KindOfArray;
+  bool isKey = isArrayLikeType(container.asCell()->m_type);
   for (ArrayIter iter(container); iter; ++iter) {
-    auto const& c = *iter.first().asCell();
-    addToSetHelper(st, c, strTv, !isKey);
+    addToSetHelper(st, *iter.first().asCell(), strTv, !isKey);
   }
 }
 
@@ -1552,7 +1764,7 @@ static void containerKeysToSetHelper(c_Set* st, const Variant& container) {
     raise_warning("%s() expects parameter %d to be an array or collection", \
                   __FUNCTION__+2, /* remove the "f_" prefix */ \
                   isContainer(c1) ? 2 : 1); \
-    return init_null(); \
+    return make_tv<KindOfNull>(); \
   } \
   bool moreThanTwo = !args.empty(); \
   size_t largestSize = getContainerSize(c2); \
@@ -1564,7 +1776,7 @@ static void containerKeysToSetHelper(c_Set* st, const Variant& container) {
         raise_warning("%s() expects parameter %d to be an array or collection",\
                       __FUNCTION__+2, /* remove the "f_" prefix */ \
                       pos); \
-        return init_null(); \
+        return make_tv<KindOfNull>(); \
       } \
       size_t sz = getContainerSize(c); \
       if (sz > largestSize) { \
@@ -1573,28 +1785,29 @@ static void containerKeysToSetHelper(c_Set* st, const Variant& container) {
     } \
   } \
   /* If container1 is empty, we can stop here and return the empty array */ \
-  if (!getContainerSize(c1)) return empty_array(); \
+  if (!getContainerSize(c1)) { \
+    return make_tv<KindOfPersistentArray>(staticEmptyArray()); \
+  } \
   /* If all of the containers (except container1) are empty, we can just \
      return container1 (converting it to an array if needed) */ \
   if (!largestSize) { \
-    if (c1.m_type == KindOfArray) { \
-      return container1; \
+    if (isArrayLikeType(c1.m_type)) { \
+      return tvReturn(container1); \
     } else { \
-      return container1.toArray(); \
+      return tvReturn(container1.toArray()); \
     } \
   } \
   Array ret = Array::Create();
 
-Variant HHVM_FUNCTION(array_diff,
-                      const Variant& container1,
-                      const Variant& container2,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_diff,
+                         const Variant& container1,
+                         const Variant& container2,
+                         const Array& args /* = null array */) {
   ARRAY_DIFF_PRELUDE()
   // Put all of the values from all the containers (except container1 into a
   // Set. All types aside from integer and string will be cast to string, and
   // we also convert int-like strings to integers.
-  c_Set* st;
-  Object setObj = st = newobj<c_Set>();
+  auto st = req::make<c_Set>();
   st->reserve(largestSize);
   containerValuesToSetHelper(st, container2);
   if (UNLIKELY(moreThanTwo)) {
@@ -1609,24 +1822,26 @@ Variant HHVM_FUNCTION(array_diff,
   // we convert int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = c1.m_type == KindOfArray;
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     const auto& val = iter.secondRefPlus();
     const auto& c = *val.asCell();
     if (checkSetHelper(st, c, strTv, true)) continue;
     ret.setWithRef(iter.first(), val, isKey);
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
-Variant HHVM_FUNCTION(array_diff_key,
-                      const Variant& container1,
-                      const Variant& container2,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_diff_key,
+                         const Variant& container1,
+                         const Variant& container2,
+                         const Array& args /* = null array */) {
   ARRAY_DIFF_PRELUDE()
   // If we're only dealing with two containers and if they are both arrays,
   // we can avoid creating an intermediate Set
-  if (!moreThanTwo && c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
+  if (!moreThanTwo &&
+      isArrayLikeType(c1.m_type) &&
+      isArrayLikeType(c2.m_type)) {
     auto ad2 = c2.m_data.parr;
     for (ArrayIter iter(container1); iter; ++iter) {
       auto key = iter.first();
@@ -1634,18 +1849,17 @@ Variant HHVM_FUNCTION(array_diff_key,
       if (c.m_type == KindOfInt64) {
         if (ad2->exists(c.m_data.num)) continue;
       } else {
-        assert(IS_STRING_TYPE(c.m_type));
+        assert(isStringType(c.m_type));
         if (ad2->exists(c.m_data.pstr)) continue;
       }
       ret.setWithRef(key, iter.secondRefPlus(), true);
     }
-    return ret;
+    return tvReturn(std::move(ret));
   }
   // Put all of the keys from all the containers (except container1) into a
   // Set. All types aside from integer and string will be cast to string, and
   // we also convert int-like strings to integers.
-  c_Set* st;
-  Object setObj = st = newobj<c_Set>();
+  auto st = req::make<c_Set>();
   st->reserve(largestSize);
   containerKeysToSetHelper(st, container2);
   if (UNLIKELY(moreThanTwo)) {
@@ -1660,100 +1874,101 @@ Variant HHVM_FUNCTION(array_diff_key,
   // int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = c1.m_type == KindOfArray;
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     auto key = iter.first();
     const auto& c = *key.asCell();
     if (checkSetHelper(st, c, strTv, !isKey)) continue;
     ret.setWithRef(key, iter.secondRefPlus(), isKey);
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
 #undef ARRAY_DIFF_PRELUDE
 
-Variant HHVM_FUNCTION(array_udiff,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& data_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(diff, false COMMA true COMMA NULL COMMA NULL
-                      COMMA cmp_func COMMA &func,
-                      Variant func = data_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_udiff,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& data_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = data_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(diff, extra, false COMMA true COMMA NULL COMMA NULL
+                      COMMA cmp_func COMMA &func);
 }
 
-Variant HHVM_FUNCTION(array_diff_assoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(diff, true COMMA true,);
+TypedValue HHVM_FUNCTION(array_diff_assoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Array& args /* = null array */) {
+  diff_intersect_body(diff, args, true COMMA true);
 }
 
-Variant HHVM_FUNCTION(array_diff_uassoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& key_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(diff, true COMMA true COMMA cmp_func COMMA &func,
-                      Variant func = key_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_diff_uassoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& key_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = key_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(diff, extra, true COMMA true COMMA cmp_func COMMA &func);
 }
 
-Variant HHVM_FUNCTION(array_udiff_assoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& data_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(diff, true COMMA true COMMA NULL COMMA NULL
-                      COMMA cmp_func COMMA &func,
-                      Variant func = data_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_udiff_assoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& data_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = data_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(diff, extra, true COMMA true COMMA NULL COMMA NULL
+                      COMMA cmp_func COMMA &func);
 }
 
-Variant HHVM_FUNCTION(array_udiff_uassoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& data_compare_func,
-                      const Variant& key_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(diff, true COMMA true COMMA cmp_func COMMA &key_func
-                      COMMA cmp_func COMMA &data_func,
-                      Variant data_func = data_compare_func;
-                      Variant key_func = key_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(key_func);
-                        extra.prepend(data_func);
-                        key_func = extra.pop();
-                        data_func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_udiff_uassoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& data_compare_func,
+                         const Variant& key_compare_func,
+                         const Array& args /* = null array */) {
+  Variant data_func = data_compare_func;
+  Variant key_func = key_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(key_func);
+    extra.prepend(data_func);
+    key_func = extra.pop();
+    data_func = extra.pop();
+  }
+  diff_intersect_body(diff, extra, true
+                      COMMA true COMMA cmp_func COMMA &key_func
+                      COMMA cmp_func COMMA &data_func);
 }
 
-Variant HHVM_FUNCTION(array_diff_ukey,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& key_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(diff, true COMMA false COMMA cmp_func COMMA &func,
-                      Variant func = key_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_diff_ukey,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& key_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = key_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(diff, extra, true COMMA false COMMA cmp_func COMMA &func);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1767,8 +1982,7 @@ static inline TypedValue* makeContainerListHelper(const Variant& a,
   assert(0 <= smallestPos);
   assert(smallestPos < count);
   // Allocate a TypedValue array and copy 'a' and the contents of 'argv'
-  TypedValue* containers =
-    (TypedValue*)smart_malloc(count * sizeof(TypedValue));
+  TypedValue* containers = req::make_raw_array<TypedValue>(count);
   tvCopy(*a.asCell(), containers[0]);
   int pos = 1;
   for (ArrayIter argvIter(argv); argvIter; ++argvIter, ++pos) {
@@ -1787,8 +2001,8 @@ static inline TypedValue* makeContainerListHelper(const Variant& a,
   return containers;
 }
 
-static inline void addToIntersectMapHelper(c_Map* mp,
-                                           const Cell& c,
+static inline void addToIntersectMapHelper(const req::ptr<c_Map>& mp,
+                                           const Cell c,
                                            TypedValue* intOneTv,
                                            TypedValue* strTv,
                                            bool convertIntLikeStrs) {
@@ -1796,7 +2010,7 @@ static inline void addToIntersectMapHelper(c_Map* mp,
     mp->set(c.m_data.num, intOneTv);
   } else {
     StringData* s;
-    if (LIKELY(IS_STRING_TYPE(c.m_type))) {
+    if (LIKELY(isStringType(c.m_type))) {
       s = c.m_data.pstr;
     } else {
       s = tvCastToString(&c);
@@ -1812,8 +2026,8 @@ static inline void addToIntersectMapHelper(c_Map* mp,
   }
 }
 
-static inline void updateIntersectMapHelper(c_Map* mp,
-                                            const Cell& c,
+static inline void updateIntersectMapHelper(const req::ptr<c_Map>& mp,
+                                            const Cell c,
                                             int pos,
                                             TypedValue* strTv,
                                             bool convertIntLikeStrs) {
@@ -1825,7 +2039,7 @@ static inline void updateIntersectMapHelper(c_Map* mp,
     }
   } else {
     StringData* s;
-    if (LIKELY(IS_STRING_TYPE(c.m_type))) {
+    if (LIKELY(isStringType(c.m_type))) {
       s = c.m_data.pstr;
     } else {
       s = tvCastToString(&c);
@@ -1849,12 +2063,11 @@ static inline void updateIntersectMapHelper(c_Map* mp,
   }
 }
 
-static void containerValuesIntersectHelper(c_Set* st,
+static void containerValuesIntersectHelper(const req::ptr<c_Set>& st,
                                            TypedValue* containers,
                                            int count) {
   assert(count >= 2);
-  c_Map* mp;
-  Object mapObj = mp = newobj<c_Map>();
+  auto mp = req::make<c_Map>();
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
   TypedValue intOneTv = make_tv<KindOfInt64>(1);
@@ -1877,7 +2090,7 @@ static void containerValuesIntersectHelper(c_Set* st,
       updateIntersectMapHelper(mp, c, pos, strTv, true);
     }
   }
-  for (ArrayIter iter(mapObj); iter; ++iter) {
+  for (ArrayIter iter(mp.get()); iter; ++iter) {
     // For each key in the map, we copy the key to the set if the
     // corresponding value is equal to pos exactly (which means it
     // was present in all of the containers).
@@ -1889,16 +2102,15 @@ static void containerValuesIntersectHelper(c_Set* st,
   }
 }
 
-static void containerKeysIntersectHelper(c_Set* st,
+static void containerKeysIntersectHelper(const req::ptr<c_Set>& st,
                                          TypedValue* containers,
                                          int count) {
   assert(count >= 2);
-  c_Map* mp;
-  Object mapObj = mp = newobj<c_Map>();
+  auto mp = req::make<c_Map>();
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
   TypedValue intOneTv = make_tv<KindOfInt64>(1);
-  bool isKey = containers[0].m_type == KindOfArray;
+  bool isKey = isArrayLikeType(containers[0].m_type);
   for (ArrayIter iter(tvAsCVarRef(&containers[0])); iter; ++iter) {
     auto key = iter.first();
     const auto& c = *key.asCell();
@@ -1909,14 +2121,14 @@ static void containerKeysIntersectHelper(c_Set* st,
     addToIntersectMapHelper(mp, c, &intOneTv, strTv, !isKey);
   }
   for (int pos = 1; pos < count; ++pos) {
-    isKey = containers[pos].m_type == KindOfArray;
+    isKey = isArrayLikeType(containers[pos].m_type);
     for (ArrayIter iter(tvAsCVarRef(&containers[pos])); iter; ++iter) {
       auto key = iter.first();
       const auto& c = *key.asCell();
       updateIntersectMapHelper(mp, c, pos, strTv, !isKey);
     }
   }
-  for (ArrayIter iter(mapObj); iter; ++iter) {
+  for (ArrayIter iter(mp.get()); iter; ++iter) {
     // For each key in the map, we copy the key to the set if the
     // corresponding value is equal to pos exactly (which means it
     // was present in all of the containers).
@@ -1936,7 +2148,7 @@ static void containerKeysIntersectHelper(c_Set* st,
     raise_warning("%s() expects parameter %d to be an array or collection", \
                   __FUNCTION__+2, /* remove the "f_" prefix */ \
                   isContainer(c1) ? 2 : 1); \
-    return init_null(); \
+    return make_tv<KindOfNull>(); \
   } \
   bool moreThanTwo = !args.empty(); \
   /* Keep track of which input container was the smallest (excluding \
@@ -1951,7 +2163,7 @@ static void containerKeysIntersectHelper(c_Set* st,
         raise_warning("%s() expects parameter %d to be an array or collection",\
                       __FUNCTION__+2, /* remove the "f_" prefix */ \
                       pos+2); \
-        return init_null(); \
+        return make_tv<KindOfNull>(); \
       } \
       size_t sz = getContainerSize(c); \
       if (sz < smallestSize) { \
@@ -1962,18 +2174,19 @@ static void containerKeysIntersectHelper(c_Set* st,
   } \
   /* If any of the containers were empty, we can stop here and return the \
      empty array */ \
-  if (!getContainerSize(c1) || !smallestSize) return empty_array(); \
+  if (!getContainerSize(c1) || !smallestSize) { \
+    return make_tv<KindOfPersistentArray>(staticEmptyArray()); \
+  } \
   Array ret = Array::Create();
 
-Variant HHVM_FUNCTION(array_intersect,
-                      const Variant& container1,
-                      const Variant& container2,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_intersect,
+                         const Variant& container1,
+                         const Variant& container2,
+                         const Array& args /* = null array */) {
   ARRAY_INTERSECT_PRELUDE()
   // Build up a Set containing the values that are present in all the
   // containers (except container1)
-  c_Set* st;
-  Object setObj = st = newobj<c_Set>();
+  auto st = req::make<c_Set>();
   if (LIKELY(!moreThanTwo)) {
     // There is only one container (not counting container1) so we can
     // just call containerValuesToSetHelper() to build the Set.
@@ -1984,7 +2197,7 @@ Variant HHVM_FUNCTION(array_intersect,
     int count = args.size() + 1;
     TypedValue* containers =
       makeContainerListHelper(container2, args, count, smallestPos);
-    SCOPE_EXIT { smart_free(containers); };
+    SCOPE_EXIT { req::free(containers); };
     // Build a Set of the values that were present in all of the containers
     containerValuesIntersectHelper(st, containers, count);
   }
@@ -1994,24 +2207,26 @@ Variant HHVM_FUNCTION(array_intersect,
   // convert int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = c1.m_type == KindOfArray;
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     const auto& val = iter.secondRefPlus();
     const auto& c = *val.asCell();
     if (!checkSetHelper(st, c, strTv, true)) continue;
     ret.setWithRef(iter.first(), val, isKey);
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
-Variant HHVM_FUNCTION(array_intersect_key,
-                      const Variant& container1,
-                      const Variant& container2,
-                      const Array& args /* = null array */) {
+TypedValue HHVM_FUNCTION(array_intersect_key,
+                         const Variant& container1,
+                         const Variant& container2,
+                         const Array& args /* = null array */) {
   ARRAY_INTERSECT_PRELUDE()
   // If we're only dealing with two containers and if they are both arrays,
   // we can avoid creating an intermediate Set
-  if (!moreThanTwo && c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
+  if (!moreThanTwo &&
+      isArrayLikeType(c1.m_type) &&
+      isArrayLikeType(c2.m_type)) {
     auto ad2 = c2.m_data.parr;
     for (ArrayIter iter(container1); iter; ++iter) {
       auto key = iter.first();
@@ -2019,17 +2234,16 @@ Variant HHVM_FUNCTION(array_intersect_key,
       if (c.m_type == KindOfInt64) {
         if (!ad2->exists(c.m_data.num)) continue;
       } else {
-        assert(IS_STRING_TYPE(c.m_type));
+        assert(isStringType(c.m_type));
         if (!ad2->exists(c.m_data.pstr)) continue;
       }
       ret.setWithRef(key, iter.secondRefPlus(), true);
     }
-    return ret;
+    return tvReturn(std::move(ret));
   }
   // Build up a Set containing the keys that are present in all the containers
   // (except container1)
-  c_Set* st;
-  Object setObj = st = newobj<c_Set>();
+  auto st = req::make<c_Set>();
   if (LIKELY(!moreThanTwo)) {
     // There is only one container (not counting container1) so we can just
     // call containerKeysToSetHelper() to build the Set.
@@ -2040,7 +2254,7 @@ Variant HHVM_FUNCTION(array_intersect_key,
     int count = args.size() + 1;
     TypedValue* containers =
       makeContainerListHelper(container2, args, count, smallestPos);
-    SCOPE_EXIT { smart_free(containers); };
+    SCOPE_EXIT { req::free(containers); };
     // Build a Set of the keys that were present in all of the containers
     containerKeysIntersectHelper(st, containers, count);
   }
@@ -2050,100 +2264,102 @@ Variant HHVM_FUNCTION(array_intersect_key,
   // convert int-like strings to integers.
   Variant strHolder(empty_string_variant());
   TypedValue* strTv = strHolder.asTypedValue();
-  bool isKey = c1.m_type == KindOfArray;
+  bool isKey = isArrayLikeType(c1.m_type);
   for (ArrayIter iter(container1); iter; ++iter) {
     auto key = iter.first();
     const auto& c = *key.asCell();
     if (!checkSetHelper(st, c, strTv, !isKey)) continue;
     ret.setWithRef(key, iter.secondRefPlus(), isKey);
   }
-  return ret;
+  return tvReturn(std::move(ret));
 }
 
 #undef ARRAY_INTERSECT_PRELUDE
 
-Variant HHVM_FUNCTION(array_uintersect,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& data_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(intersect, false COMMA true COMMA NULL COMMA NULL
-                      COMMA cmp_func COMMA &func,
-                      Variant func = data_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_uintersect,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& data_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = data_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(intersect, extra, false COMMA true COMMA NULL COMMA NULL
+                      COMMA cmp_func COMMA &func);
 }
 
-Variant HHVM_FUNCTION(array_intersect_assoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(intersect, true COMMA true,);
+TypedValue HHVM_FUNCTION(array_intersect_assoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Array& args /* = null array */) {
+  diff_intersect_body(intersect, args, true COMMA true);
 }
 
-Variant HHVM_FUNCTION(array_intersect_uassoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& key_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(intersect, true COMMA true COMMA cmp_func COMMA &func,
-                      Variant func = key_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_intersect_uassoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& key_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = key_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(intersect, extra, true COMMA true
+                      COMMA cmp_func COMMA &func);
 }
 
-Variant HHVM_FUNCTION(array_uintersect_assoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& data_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(intersect, true COMMA true COMMA NULL COMMA NULL
-                      COMMA cmp_func COMMA &func,
-                      Variant func = data_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_uintersect_assoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& data_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = data_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(intersect, extra, true COMMA true COMMA NULL COMMA NULL
+                      COMMA cmp_func COMMA &func);
 }
 
-Variant HHVM_FUNCTION(array_uintersect_uassoc,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& data_compare_func,
-                      const Variant& key_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(intersect, true COMMA true COMMA cmp_func COMMA &key_func
-                      COMMA cmp_func COMMA &data_func,
-                      Variant data_func = data_compare_func;
-                      Variant key_func = key_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(key_func);
-                        extra.prepend(data_func);
-                        key_func = extra.pop();
-                        data_func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_uintersect_uassoc,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& data_compare_func,
+                         const Variant& key_compare_func,
+                         const Array& args /* = null array */) {
+  Variant data_func = data_compare_func;
+  Variant key_func = key_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(key_func);
+    extra.prepend(data_func);
+    key_func = extra.pop();
+    data_func = extra.pop();
+  }
+  diff_intersect_body(intersect, extra, true COMMA true COMMA cmp_func
+                      COMMA &key_func COMMA cmp_func COMMA &data_func);
 }
 
-Variant HHVM_FUNCTION(array_intersect_ukey,
-                      const Variant& array1,
-                      const Variant& array2,
-                      const Variant& key_compare_func,
-                      const Array& args /* = null array */) {
-  diff_intersect_body(intersect, true COMMA false COMMA cmp_func COMMA &func,
-                      Variant func = key_compare_func;
-                      Array extra = args;
-                      if (!extra.empty()) {
-                        extra.prepend(func);
-                        func = extra.pop();
-                      });
+TypedValue HHVM_FUNCTION(array_intersect_ukey,
+                         const Variant& array1,
+                         const Variant& array2,
+                         const Variant& key_compare_func,
+                         const Array& args /* = null array */) {
+  Variant func = key_compare_func;
+  Array extra = args;
+  if (!extra.empty()) {
+    extra.prepend(func);
+    func = extra.pop();
+  }
+  diff_intersect_body(intersect, extra, true COMMA false
+                      COMMA cmp_func COMMA &func);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -2229,6 +2445,7 @@ struct Collator final : RequestEventHandler {
     }
     assert(m_ucoll);
   }
+
   void requestShutdown() override {
     m_locale.reset();
     m_errcode.clearError(false);
@@ -2236,6 +2453,10 @@ struct Collator final : RequestEventHandler {
       ucol_close(m_ucoll);
       m_ucoll = NULL;
     }
+  }
+
+  void vscan(IMarker& mark) const override {
+    mark(m_locale);
   }
 
 private:
@@ -2246,16 +2467,14 @@ private:
 IMPLEMENT_STATIC_REQUEST_LOCAL(Collator, s_collator);
 
 namespace {
-class ArraySortTmp {
- public:
-  explicit ArraySortTmp(Array& arr) : m_arr(arr) {
-    m_ad = arr.get()->escalateForSort();
-    m_ad->incRefCount();
+struct ArraySortTmp {
+  explicit ArraySortTmp(Array& arr, SortFunction sf) : m_arr(arr) {
+    m_ad = arr.get()->escalateForSort(sf);
+    assert(m_ad == arr.get() || m_ad->hasExactlyOneRef());
   }
   ~ArraySortTmp() {
     if (m_ad != m_arr.get()) {
-      m_arr = m_ad;
-      m_ad->decRefCount();
+      m_arr = Array::attach(m_ad);
     }
   }
   ArrayData* operator->() { return m_ad; }
@@ -2267,24 +2486,23 @@ class ArraySortTmp {
 
 static bool
 php_sort(VRefParam container, int sort_flags,
-         bool ascending, bool use_collator) {
+         bool ascending, bool use_zend_sort) {
   if (container.isArray()) {
-    Array& arr_array = container.wrapped().toArrRef();
-    if (use_collator && sort_flags != SORT_LOCALE_STRING) {
-      UCollator *coll = s_collator->getCollator();
-      if (coll) {
-        Intl::IntlError &errcode = s_collator->getErrorRef();
-        return collator_sort(container, sort_flags, ascending,
-                             coll, &errcode);
-      }
+    auto ref = container.getVariantOrNull();
+    if (!ref) return true;
+    Array& arr_array = ref->asArrRef();
+    if (use_zend_sort) {
+      return zend_sort(*ref, sort_flags, ascending);
     }
-    ArraySortTmp ast(arr_array);
+    SortFunction sf = getSortFunction(SORTFUNC_SORT, ascending);
+    ArraySortTmp ast(arr_array, sf);
     ast->sort(sort_flags, ascending);
     return true;
   }
   if (container.isObject()) {
     ObjectData* obj = container.getObjectData();
-    if (obj->getCollectionType() == Collection::VectorType) {
+    if (obj->isCollection() &&
+        obj->collectionType() == CollectionType::Vector) {
       c_Vector* vec = static_cast<c_Vector*>(obj);
       vec->sort(sort_flags, ascending);
       return true;
@@ -2293,123 +2511,147 @@ php_sort(VRefParam container, int sort_flags,
     //  - Maps and Sets require associative sort
     //  - Immutable collections are not to be modified
   }
-  throw_expected_array_or_collection_exception();
+  throw_expected_array_or_collection_exception(ascending ? "sort" : "rsort");
   return false;
 }
 
 static bool
 php_asort(VRefParam container, int sort_flags,
-          bool ascending, bool use_collator) {
+          bool ascending, bool use_zend_sort) {
   if (container.isArray()) {
-    Array& arr_array = container.wrapped().toArrRef();
-    if (use_collator && sort_flags != SORT_LOCALE_STRING) {
-      UCollator *coll = s_collator->getCollator();
-      if (coll) {
-        Intl::IntlError &errcode = s_collator->getErrorRef();
-        return collator_asort(container, sort_flags, ascending,
-                              coll, &errcode);
+    auto ref = container.getVariantOrNull();
+    if (!ref) return true;
+    if (ref->isVecArray()) {
+      // Asort on a vec will make it become a dict. So, in order to avoid having
+      // a Variant with an incorrect datatype, sort a copy, then assign it to
+      // the Variant (which will update the datatype to the proper value).
+      Array arr_array = ref->asArrRef();
+      SortFunction sf = getSortFunction(SORTFUNC_ASORT, ascending);
+      {
+        ArraySortTmp ast(arr_array, sf);
+        ast->asort(sort_flags, ascending);
       }
+      *ref = std::move(arr_array);
+    } else {
+      Array& arr_array = ref->asArrRef();
+      if (use_zend_sort) {
+        return zend_asort(*ref, sort_flags, ascending);
+      }
+      SortFunction sf = getSortFunction(SORTFUNC_ASORT, ascending);
+      ArraySortTmp ast(arr_array, sf);
+      ast->asort(sort_flags, ascending);
     }
-    ArraySortTmp ast(arr_array);
-    ast->asort(sort_flags, ascending);
     return true;
   }
   if (container.isObject()) {
     ObjectData* obj = container.getObjectData();
-    if (obj->getCollectionType() == Collection::MapType ||
-        obj->getCollectionType() == Collection::SetType) {
-      HashCollection* hc = static_cast<HashCollection*>(obj);
-      hc->asort(sort_flags, ascending);
-      return true;
+    if (obj->isCollection()) {
+      auto type = obj->collectionType();
+      if (type == CollectionType::Map || type == CollectionType::Set) {
+        HashCollection* hc = static_cast<HashCollection*>(obj);
+        hc->asort(sort_flags, ascending);
+        return true;
+      }
     }
   }
-  throw_expected_array_or_collection_exception();
+  throw_expected_array_or_collection_exception(ascending ? "asort" : "arsort");
   return false;
 }
 
 static bool
 php_ksort(VRefParam container, int sort_flags, bool ascending,
-          bool use_collator) {
+          bool use_zend_sort) {
   if (container.isArray()) {
-    Array& arr_array = container.wrapped().toArrRef();
-    if (use_collator && sort_flags != SORT_LOCALE_STRING) {
-      UCollator *coll = s_collator->getCollator();
-      if (coll) {
-        Intl::IntlError &errcode = s_collator->getErrorRef();
-        return collator_ksort(container, sort_flags, ascending,
-                              coll, &errcode);
+    auto ref = container.getVariantOrNull();
+    if (!ref) return true;
+    if (ref->isVecArray()) {
+      // Krsort on a vec will make it become a dict. So, in order to avoid
+      // having a Variant with an incorrect datatype, sort a copy, then assign
+      // it to the Variant (which will update the datatype to the proper value).
+      Array arr_array = ref->asArrRef();
+      SortFunction sf = getSortFunction(SORTFUNC_KRSORT, ascending);
+      {
+        ArraySortTmp ast(arr_array, sf);
+        ast->ksort(sort_flags, ascending);
       }
+      *ref = std::move(arr_array);
+    } else {
+      Array& arr_array = ref->asArrRef();
+      if (use_zend_sort) {
+        return zend_ksort(*ref, sort_flags, ascending);
+      }
+      SortFunction sf = getSortFunction(SORTFUNC_KRSORT, ascending);
+      ArraySortTmp ast(arr_array, sf);
+      ast->ksort(sort_flags, ascending);
     }
-    ArraySortTmp ast(arr_array);
-    ast->ksort(sort_flags, ascending);
     return true;
   }
   if (container.isObject()) {
     ObjectData* obj = container.getObjectData();
-    if (obj->getCollectionType() == Collection::MapType ||
-        obj->getCollectionType() == Collection::SetType) {
-      HashCollection* hc = static_cast<HashCollection*>(obj);
-      hc->ksort(sort_flags, ascending);
-      return true;
+    if (obj->isCollection()) {
+      auto type = obj->collectionType();
+      if (type == CollectionType::Map || type == CollectionType::Set) {
+        HashCollection* hc = static_cast<HashCollection*>(obj);
+        hc->ksort(sort_flags, ascending);
+        return true;
+      }
     }
   }
-  throw_expected_array_or_collection_exception();
+  throw_expected_array_or_collection_exception(ascending ? "ksort" : "krsort");
   return false;
 }
 
 bool HHVM_FUNCTION(sort,
                   VRefParam array,
                   int sort_flags /* = 0 */) {
-  bool use_collator = RuntimeOption::EnableZendSorting;
-  return php_sort(array, sort_flags, true, use_collator);
+  bool use_zend_sort = RuntimeOption::EnableZendSorting;
+  return php_sort(array, sort_flags, true, use_zend_sort);
 }
 
 bool HHVM_FUNCTION(rsort,
                    VRefParam array,
                    int sort_flags /* = 0 */) {
-  bool use_collator = RuntimeOption::EnableZendSorting;
-  return php_sort(array, sort_flags, false, use_collator);
+  bool use_zend_sort = RuntimeOption::EnableZendSorting;
+  return php_sort(array, sort_flags, false, use_zend_sort);
 }
 
 bool HHVM_FUNCTION(asort,
                    VRefParam array,
                    int sort_flags /* = 0 */) {
-  bool use_collator = RuntimeOption::EnableZendSorting;
-  return php_asort(array, sort_flags, true, use_collator);
+  bool use_zend_sort = RuntimeOption::EnableZendSorting;
+  return php_asort(array, sort_flags, true, use_zend_sort);
 }
 
 bool HHVM_FUNCTION(arsort,
                    VRefParam array,
                    int sort_flags /* = 0 */) {
-  bool use_collator = RuntimeOption::EnableZendSorting;
-  return php_asort(array, sort_flags, false, use_collator);
+  bool use_zend_sort = RuntimeOption::EnableZendSorting;
+  return php_asort(array, sort_flags, false, use_zend_sort);
 }
 
 bool HHVM_FUNCTION(ksort,
                    VRefParam array,
                    int sort_flags /* = 0 */) {
-  bool use_collator = RuntimeOption::EnableZendSorting;
-  return php_ksort(array, sort_flags, true, use_collator);
+  bool use_zend_sort = RuntimeOption::EnableZendSorting;
+  return php_ksort(array, sort_flags, true, use_zend_sort);
 }
 
 bool HHVM_FUNCTION(krsort,
                    VRefParam array,
                    int sort_flags /* = 0 */) {
-  bool use_collator = RuntimeOption::EnableZendSorting;
-  return php_ksort(array, sort_flags, false, use_collator);
+  bool use_zend_sort = RuntimeOption::EnableZendSorting;
+  return php_ksort(array, sort_flags, false, use_zend_sort);
 }
 
 // NOTE: PHP's implementation of natsort and natcasesort accepts ArrayAccess
 // objects as well, which does not make much sense, and which is not supported
 // here.
 
-Variant HHVM_FUNCTION(natsort,
-                      VRefParam array) {
+bool HHVM_FUNCTION(natsort, VRefParam array) {
   return php_asort(array, SORT_NATURAL, true, false);
 }
 
-Variant HHVM_FUNCTION(natcasesort,
-                      VRefParam array) {
+bool HHVM_FUNCTION(natcasesort, VRefParam array) {
   return php_asort(array, SORT_NATURAL_CASE, true, false);
 }
 
@@ -2417,26 +2659,35 @@ bool HHVM_FUNCTION(usort,
                    VRefParam container,
                    const Variant& cmp_function) {
   if (container.isArray()) {
-    Array& arr_array = container.wrapped().toArrRef();
-    if (RuntimeOption::EnableZendSorting) {
-      arr_array.sort(cmp_func, false, true, &cmp_function);
-      return true;
-    } else {
-      ArraySortTmp ast(arr_array);
-      return ast->usort(cmp_function);
+    auto sort = [](Array& arr_array, const Variant& cmp_function) -> bool {
+      if (RuntimeOption::EnableZendSorting) {
+        arr_array.sort(cmp_func, false, true, &cmp_function);
+        return true;
+      } else {
+        ArraySortTmp ast(arr_array, SORTFUNC_USORT);
+        return ast->usort(cmp_function);
+      }
+    };
+    auto ref = container.getVariantOrNull();
+    if (LIKELY(ref != nullptr)) {
+      return sort(ref->asArrRef(), cmp_function);
     }
+    auto tmp = container->asCArrRef();
+    return sort(tmp, cmp_function);
   }
   if (container.isObject()) {
     ObjectData* obj = container.getObjectData();
-    if (obj->getCollectionType() == Collection::VectorType) {
-      c_Vector* vec = static_cast<c_Vector*>(obj);
-      return vec->usort(cmp_function);
+    if (obj->isCollection()) {
+      if (obj->collectionType() == CollectionType::Vector) {
+        c_Vector* vec = static_cast<c_Vector*>(obj);
+        return vec->usort(cmp_function);
+      }
     }
     // other collections are not supported:
     //  - Maps and Sets require associative sort
     //  - Immutable collections are not to be modified
   }
-  throw_expected_array_or_collection_exception();
+  throw_expected_array_or_collection_exception("usort");
   return false;
 }
 
@@ -2444,27 +2695,36 @@ bool HHVM_FUNCTION(uasort,
                    VRefParam container,
                    const Variant& cmp_function) {
   if (container.isArray()) {
-    Array& arr_array = container.wrapped().toArrRef();
-    if (RuntimeOption::EnableZendSorting) {
-      arr_array.sort(cmp_func, false, false, &cmp_function);
-      return true;
-    } else {
-      ArraySortTmp ast(arr_array);
-      return ast->uasort(cmp_function);
+    auto sort = [](Array& arr_array, const Variant& cmp_function) -> bool {
+      if (RuntimeOption::EnableZendSorting) {
+        arr_array.sort(cmp_func, false, false, &cmp_function);
+        return true;
+      } else {
+        ArraySortTmp ast(arr_array, SORTFUNC_UASORT);
+        return ast->uasort(cmp_function);
+      }
+    };
+    auto ref = container.getVariantOrNull();
+    if (LIKELY(ref != nullptr)) {
+      return sort(ref->asArrRef(), cmp_function);
     }
+    auto tmp = container->asCArrRef();
+    return sort(tmp, cmp_function);
   }
   if (container.isObject()) {
     ObjectData* obj = container.getObjectData();
-    if (obj->getCollectionType() == Collection::MapType ||
-        obj->getCollectionType() == Collection::SetType) {
-      HashCollection* hc = static_cast<HashCollection*>(obj);
-      return hc->uasort(cmp_function);
+    if (obj->isCollection()) {
+      auto type = obj->collectionType();
+      if (type == CollectionType::Map || type == CollectionType::Set) {
+        HashCollection* hc = static_cast<HashCollection*>(obj);
+        return hc->uasort(cmp_function);
+      }
     }
     // other collections are not supported:
     //  - Vectors require a non-associative sort
     //  - Immutable collections are not to be modified
   }
-  throw_expected_array_or_collection_exception();
+  throw_expected_array_or_collection_exception("uasort");
   return false;
 }
 
@@ -2472,40 +2732,49 @@ bool HHVM_FUNCTION(uksort,
                    VRefParam container,
                    const Variant& cmp_function) {
   if (container.isArray()) {
-    Array& arr_array = container.wrapped().toArrRef();
-    ArraySortTmp ast(arr_array);
-    return ast->uksort(cmp_function);
+    auto sort = [](Array& arr_array, const Variant& cmp_function) -> bool {
+      ArraySortTmp ast(arr_array, SORTFUNC_UKSORT);
+      return ast->uksort(cmp_function);
+    };
+    auto ref = container.getVariantOrNull();
+    if (LIKELY(ref != nullptr)) {
+      return sort(ref->asArrRef(), cmp_function);
+    }
+    auto tmp = container->asCArrRef();
+    return sort(tmp, cmp_function);
   }
   if (container.isObject()) {
     ObjectData* obj = container.getObjectData();
-    if (obj->getCollectionType() == Collection::MapType ||
-        obj->getCollectionType() == Collection::SetType) {
-      HashCollection* hc = static_cast<HashCollection*>(obj);
-      return hc->uksort(cmp_function);
+    if (obj->isCollection()) {
+      auto type = obj->collectionType();
+      if (type == CollectionType::Map || type == CollectionType::Set) {
+        HashCollection* hc = static_cast<HashCollection*>(obj);
+        return hc->uksort(cmp_function);
+      }
     }
     // other collections are not supported:
     //  - Vectors require a non-associative sort
     //  - Immutable collections are not to be modified
   }
-  throw_expected_array_or_collection_exception();
+  throw_expected_array_or_collection_exception("uksort");
   return false;
 }
 
-Variant HHVM_FUNCTION(array_unique,
-                      const Variant& array,
-                      int sort_flags /* = 2 */) {
+TypedValue HHVM_FUNCTION(array_unique,
+                         const Variant& array,
+                         int sort_flags /* = 2 */) {
   // NOTE, PHP array_unique accepts ArrayAccess objects as well,
   // which is not supported here.
   getCheckedArray(array);
   switch (sort_flags) {
   case SORT_STRING:
   case SORT_LOCALE_STRING:
-    return ArrayUtil::StringUnique(arr_array);
+    return tvReturn(ArrayUtil::StringUnique(arr_array));
   case SORT_NUMERIC:
-    return ArrayUtil::NumericUnique(arr_array);
+    return tvReturn(ArrayUtil::NumericUnique(arr_array));
   case SORT_REGULAR:
   default:
-    return ArrayUtil::RegularSortUnique(arr_array);
+    return tvReturn(ArrayUtil::RegularSortUnique(arr_array));
   }
 }
 
@@ -2533,42 +2802,33 @@ Variant HHVM_FUNCTION(i18n_loc_get_error_code) {
   return s_collator->getErrorCode();
 }
 
-Variant HHVM_FUNCTION(hphp_array_idx,
-                      const Variant& search,
-                      const Variant& key,
-                      const Variant& def) {
+TypedValue HHVM_FUNCTION(hphp_array_idx,
+                         const Variant& search,
+                         const Variant& key,
+                         const Variant& def) {
   if (!key.isNull()) {
     if (LIKELY(search.isArray())) {
       ArrayData *arr = search.getArrayData();
-      if (UNLIKELY(arr->isVPackedArrayOrIntMapArray())) {
-        int64_t n;
-        if (key.isString() && key.getStringData()->isStrictlyInteger(n)) {
-          if (arr->isVPackedArray()) {
-            PackedArray::warnUsage(PackedArray::Reason::kNumericString);
-          } else {
-            MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                                  ArrayData::kIntMapKind);
-          }
-        }
-      }
-      VarNR index = key.toKey();
+      VarNR index = key.toKey(arr);
       if (!index.isNull()) {
         const Variant& ret = arr->get(index, false);
-        return (&ret != &null_variant) ? ret : def;
+        return tvReturn((&ret != &null_variant) ? ret : def);
       }
     } else {
       raise_error("hphp_array_idx: search must be an array");
     }
   }
-  return def;
+  return tvReturn(def);
 }
 
 static Array::PFUNC_CMP get_cmp_func(int sort_flags, bool ascending) {
   switch (sort_flags) {
   case SORT_NATURAL:
-    return Array::SortNatural;
+    return ascending ?
+      Array::SortNaturalAscending : Array::SortNaturalDescending;
   case SORT_NATURAL_CASE:
-    return Array::SortNaturalCase;
+    return ascending ?
+      Array::SortNaturalCaseAscending: Array::SortNaturalCaseDescending;
   case SORT_NUMERIC:
     return ascending ?
       Array::SortNumericAscending : Array::SortNumericDescending;
@@ -2590,8 +2850,8 @@ static Array::PFUNC_CMP get_cmp_func(int sort_flags, bool ascending) {
 
 TypedValue* HHVM_FN(array_multisort)(ActRec* ar) {
   TypedValue* tv = getArg(ar, 0);
-  if (tv == nullptr || !tvAsVariant(tv).isArray()) {
-    throw_expected_array_exception();
+  if (tv == nullptr || !tvAsVariant(tv).isPHPArray()) {
+    throw_expected_array_exception("array_multisort");
     return arReturn(ar, false);
   }
 
@@ -2636,36 +2896,103 @@ TypedValue* HHVM_FN(array_multisort)(ActRec* ar) {
   return arReturn(ar, Array::MultiSort(data, true));
 }
 
+// HH\\dict
+Array HHVM_FUNCTION(HH_dict, const Variant& input) {
+  auto const inputCell = input.asCell();
+  if (LIKELY(isArrayLikeType(inputCell->m_type))) {
+    return ArrNR{inputCell->m_data.parr}.asArray().toDict();
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->isCollection()) {
+    return HHVM_FN(HH_dict)(toArray(inputCell->m_data.pobj));
+  } else {
+    raise_warning(
+      "Only arrays, vecs, keysets, and collections can be converted into dicts"
+    );
+    return Array::CreateDict();
+  }
+}
+
+// HH\\keyset
+Array HHVM_FUNCTION(HH_keyset, const Variant& input) {
+  auto const inputCell = input.asCell();
+  if (LIKELY(isArrayLikeType(inputCell->m_type))) {
+    return ArrNR{inputCell->m_data.parr}.asArray().toKeyset();
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->isCollection()) {
+    return HHVM_FN(HH_keyset)(toArray(inputCell->m_data.pobj));
+  } else {
+    raise_warning(
+      "Only arrays, vecs, dicts, and collections can be converted into keysets"
+    );
+    return Array::CreateKeyset();
+  }
+}
+
+// HH\\vec
+Array HHVM_FUNCTION(HH_vec, const Variant& input) {
+  auto const inputCell = input.asCell();
+  if (LIKELY(isArrayLikeType(inputCell->m_type))) {
+    return ArrNR{inputCell->m_data.parr}.asArray().toVec();
+  } else if (inputCell->m_type == KindOfObject &&
+             inputCell->m_data.pobj->isCollection()) {
+    return HHVM_FN(HH_vec)(toArray(inputCell->m_data.pobj));
+  } else {
+    raise_warning(
+      "Only arrays, dicts, keysets, and collections can be converted into vecs"
+    );
+    return Array::CreateVec();
+  }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
-#define REGISTER_CONSTANT(name)                                                \
-  Native::registerConstant<KindOfInt64>(s_##name.get(), k_##name)              \
-
-class ArrayExtension : public Extension {
-public:
+struct ArrayExtension final : Extension {
   ArrayExtension() : Extension("array") {}
-  virtual void moduleInit() {
-    REGISTER_CONSTANT(UCOL_DEFAULT);
-    REGISTER_CONSTANT(UCOL_PRIMARY);
-    REGISTER_CONSTANT(UCOL_SECONDARY);
-    REGISTER_CONSTANT(UCOL_TERTIARY);
-    REGISTER_CONSTANT(UCOL_DEFAULT_STRENGTH);
-    REGISTER_CONSTANT(UCOL_QUATERNARY);
-    REGISTER_CONSTANT(UCOL_IDENTICAL);
-    REGISTER_CONSTANT(UCOL_OFF);
-    REGISTER_CONSTANT(UCOL_ON);
-    REGISTER_CONSTANT(UCOL_SHIFTED);
-    REGISTER_CONSTANT(UCOL_NON_IGNORABLE);
-    REGISTER_CONSTANT(UCOL_LOWER_FIRST);
-    REGISTER_CONSTANT(UCOL_UPPER_FIRST);
-    REGISTER_CONSTANT(UCOL_FRENCH_COLLATION);
-    REGISTER_CONSTANT(UCOL_ALTERNATE_HANDLING);
-    REGISTER_CONSTANT(UCOL_CASE_FIRST);
-    REGISTER_CONSTANT(UCOL_CASE_LEVEL);
-    REGISTER_CONSTANT(UCOL_NORMALIZATION_MODE);
-    REGISTER_CONSTANT(UCOL_STRENGTH);
-    REGISTER_CONSTANT(UCOL_HIRAGANA_QUATERNARY_MODE);
-    REGISTER_CONSTANT(UCOL_NUMERIC_COLLATION);
+  void moduleInit() override {
+    HHVM_RC_INT_SAME(UCOL_DEFAULT);
+
+    HHVM_RC_INT_SAME(UCOL_PRIMARY);
+    HHVM_RC_INT_SAME(UCOL_SECONDARY);
+    HHVM_RC_INT_SAME(UCOL_TERTIARY);
+    HHVM_RC_INT_SAME(UCOL_DEFAULT_STRENGTH);
+    HHVM_RC_INT_SAME(UCOL_QUATERNARY);
+    HHVM_RC_INT_SAME(UCOL_IDENTICAL);
+
+    HHVM_RC_INT_SAME(UCOL_OFF);
+    HHVM_RC_INT_SAME(UCOL_ON);
+
+    HHVM_RC_INT_SAME(UCOL_SHIFTED);
+    HHVM_RC_INT_SAME(UCOL_NON_IGNORABLE);
+
+    HHVM_RC_INT_SAME(UCOL_LOWER_FIRST);
+    HHVM_RC_INT_SAME(UCOL_UPPER_FIRST);
+
+    HHVM_RC_INT_SAME(UCOL_FRENCH_COLLATION);
+    HHVM_RC_INT_SAME(UCOL_ALTERNATE_HANDLING);
+    HHVM_RC_INT_SAME(UCOL_CASE_FIRST);
+    HHVM_RC_INT_SAME(UCOL_CASE_LEVEL);
+    HHVM_RC_INT_SAME(UCOL_NORMALIZATION_MODE);
+    HHVM_RC_INT_SAME(UCOL_STRENGTH);
+    HHVM_RC_INT_SAME(UCOL_HIRAGANA_QUATERNARY_MODE);
+    HHVM_RC_INT_SAME(UCOL_NUMERIC_COLLATION);
+
+    HHVM_RC_INT(ARRAY_FILTER_USE_BOTH, 1);
+    HHVM_RC_INT(ARRAY_FILTER_USE_KEY, 2);
+
+    HHVM_RC_INT(CASE_LOWER,      CaseMode::LOWER);
+    HHVM_RC_INT(CASE_UPPER,      CaseMode::UPPER);
+
+    HHVM_RC_INT(COUNT_NORMAL,    CountMode::NORMAL);
+    HHVM_RC_INT(COUNT_RECURSIVE, CountMode::RECURSIVE);
+
+    HHVM_RC_INT_SAME(SORT_ASC);
+    HHVM_RC_INT_SAME(SORT_DESC);
+    HHVM_RC_INT_SAME(SORT_FLAG_CASE);
+    HHVM_RC_INT_SAME(SORT_LOCALE_STRING);
+    HHVM_RC_INT_SAME(SORT_NATURAL);
+    HHVM_RC_INT_SAME(SORT_NUMERIC);
+    HHVM_RC_INT_SAME(SORT_REGULAR);
+    HHVM_RC_INT_SAME(SORT_STRING);
 
     HHVM_FE(array_change_key_case);
     HHVM_FE(array_chunk);
@@ -2678,6 +3005,7 @@ public:
     HHVM_FE(array_key_exists);
     HHVM_FE(key_exists);
     HHVM_FE(array_keys);
+    HHVM_FALIAS(__SystemLib\\array_map, array_map);
     HHVM_FE(array_merge_recursive);
     HHVM_FE(array_merge);
     HHVM_FE(array_replace_recursive);
@@ -2687,7 +3015,6 @@ public:
     HHVM_FE(array_product);
     HHVM_FE(array_push);
     HHVM_FE(array_rand);
-    HHVM_FE(array_reduce);
     HHVM_FE(array_reverse);
     HHVM_FE(array_search);
     HHVM_FE(array_shift);
@@ -2748,11 +3075,12 @@ public:
     HHVM_FE(i18n_loc_get_error_code);
     HHVM_FE(hphp_array_idx);
     HHVM_FE(array_multisort);
+    HHVM_FALIAS(HH\\dict, HH_dict);
+    HHVM_FALIAS(HH\\vec, HH_vec);
+    HHVM_FALIAS(HH\\keyset, HH_keyset);
 
     loadSystemlib();
   }
 } s_array_extension;
-
-#undef REGISTER_CONSTANT
 
 }

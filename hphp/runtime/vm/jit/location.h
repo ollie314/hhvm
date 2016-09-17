@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,168 +17,67 @@
 #ifndef incl_HPHP_JIT_LOCATION_H_
 #define incl_HPHP_JIT_LOCATION_H_
 
-#include <vector>
+#include "hphp/runtime/vm/jit/stack-offsets.h"
 
-#include "hphp/runtime/vm/bytecode.h"
-#include "hphp/runtime/vm/jit/region-selection.h"
-#include "hphp/util/safe-cast.h"
+#include <cstdint>
+#include <string>
 
 namespace HPHP { namespace jit {
 
-// Location --
-//   A user-program-visible, and bytecode ISA addressable place for a PHP
-//   value.
+///////////////////////////////////////////////////////////////////////////////
+
+enum class LTag : uint32_t {
+  Local,
+  Stack,
+};
+
+/*
+ * An HHBC-visible location that we track during irgen---for use in guards,
+ * hints, region post-conditions, etc.
+ *
+ * This is currently either local variables or stack slots.  Local variables
+ * are addressed by local id, and stack slots are addressed by offset from the
+ * frame pointer.
+ */
 struct Location {
-  enum Space {
-    Invalid,  // Unknown location
-    Stack,    // Stack; offset == delta from top
-    Local,    // Stack frame's registers; offset == local register
-    Iter,     // Stack frame's iterators
-    Litstr,   // Literal string pseudo-location
-    Litint,   // Literal int pseudo-location
-    This,     // $this in the current frame
+  struct Local { uint32_t locId; };
+  struct Stack { FPInvOffset stackIdx; };
+
+  /* implicit */ Location(Local l) : m_tag{LTag::Local}, m_local(l) {}
+  /* implicit */ Location(Stack s) : m_tag{LTag::Stack}, m_stack(s) {}
+
+  LTag tag() const { return m_tag; };
+
+  uint32_t localId() const;
+  FPInvOffset stackIdx() const;
+
+  bool operator==(const Location& other) const;
+  bool operator!=(const Location& other) const;
+
+  /*
+   * Comparison.
+   *
+   * This has no semantic meaning, and only exists so Location can be used as
+   * an ordered key type.
+   */
+  bool operator<(const Location& other) const;
+
+  struct Hash { size_t operator()(Location loc) const; };
+
+private:
+  LTag m_tag;
+  union {
+    Local m_local;
+    Stack m_stack;
   };
-
-  explicit Location(Space spc)
-    : space(spc)
-    , offset(0)
-  {
-    assert(spc == This);
-  }
-
-  Location(Space spc, int64_t off)
-    : space(spc)
-    , offset(off)
-  {}
-
-  Location() : space(Invalid), offset(-1) {}
-
-  int cmp(const Location &r) const {
-#define CMP(field) do { \
-  if (field > r.field)      { return 1; } \
-  else if (field < r.field) { return -1; } } while(0)
-    CMP(space);
-    CMP(offset);
-#undef CMP
-    return 0;
-  }
-
-  bool operator==(const Location& r) const {
-    return cmp(r) == 0;
-  }
-
-  bool operator!=(const Location& r) const {
-    return cmp(r) != 0;
-  }
-
-  bool operator<(const Location& r) const {
-    return cmp(r) < 0;
-  }
-
-  // Hash function.
-  size_t operator()(const Location& l) const {
-    return HPHP::hash_int64_pair(l.space, l.offset);
-  }
-
-  const char *spaceName() const {
-    switch(space) {
-    case Stack:  return "Stk";
-    case Local:  return "Local";
-    case Iter:   return "Iter";
-    case Litstr: return "Litstr";
-    case Litint: return "Litint";
-    case This:   return "This";
-    case Invalid:return "*invalid*";
-    default:     not_reached();
-    }
-  }
-
-  std::string pretty() const {
-    return folly::format("(Location {} {})", spaceName(), offset).str();
-  }
-
-  bool isStack() const {
-    return space == Stack;
-  }
-
-  bool isLocal() const {
-    return space == Local;
-  }
-
-  bool isInvalid() const {
-    return space == Invalid;
-  }
-
-  bool isValid() const {
-    return !isInvalid();
-  }
-
-  bool isLiteral() const {
-    return space == Litstr || space == Litint;
-  }
-
-  bool isThis() const {
-    return space == This;
-  }
-
-  bool isIter() const {
-    return space == Iter;
-  }
-
-  jit::RegionDesc::Location toLocation(Offset spOffsetFromFp) const {
-    typedef jit::RegionDesc::Location L;
-    switch (space) {
-      case Stack: {
-        auto offsetFromSp = safe_cast<uint32_t>(offset);
-        return L::Stack{offsetFromSp, spOffsetFromFp - offsetFromSp};
-      }
-      case Local: return L::Local{safe_cast<uint32_t>(offset)};
-      default:    not_reached();
-    }
-  }
-
-public:
-  Space space;
-  int64_t offset;
 };
 
-// A DynLocation is a Location-in-execution: a location, along with
-// whatever is known about its runtime type.
-struct DynLocation {
-  Location    location;
-  Type rtt;
+std::string show(Location);
 
-  DynLocation(Location l, DataType t) : location(l), rtt(t) {}
+///////////////////////////////////////////////////////////////////////////////
 
-  DynLocation(Location l, Type t) : location(l), rtt(t) {}
+}}
 
-  DynLocation() : location(), rtt() {}
+#include "hphp/runtime/vm/jit/location-inl.h"
 
-  bool operator==(const DynLocation& r) const = delete;
-
-  // Hash function
-  size_t operator()(const DynLocation &dl) const {
-    uint64_t rtthash = rtt.hash();
-    uint64_t locHash = location(location);
-    return rtthash ^ locHash;
-  }
-
-  std::string pretty() const {
-    return folly::to<std::string>(
-      "DynLocation(", location.pretty(), ',', rtt.toString(), ')');
-  }
-
-  bool isStack() const {
-    return location.isStack();
-  }
-  bool isLocal() const {
-    return location.isLocal();
-  }
-  bool isLiteral() const {
-    return location.isLiteral();
-  }
-};
-
-} }
-
-#endif // incl_HPHP_JIT_LOCATION_H_
+#endif

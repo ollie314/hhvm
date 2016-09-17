@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,39 +17,39 @@
 #ifndef incl_HPHP_FILE_SCOPE_H_
 #define incl_HPHP_FILE_SCOPE_H_
 
-#include <string>
 #include <map>
-#include <boost/algorithm/string.hpp>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "hphp/compiler/analysis/block_scope.h"
-#include "hphp/compiler/analysis/function_container.h"
 #include "hphp/compiler/analysis/code_error.h"
-#include "hphp/compiler/code_generator.h"
-#include <boost/graph/adjacency_list.hpp>
-#include <set>
-#include <vector>
+#include "hphp/compiler/analysis/function_container.h"
+#include "hphp/compiler/hphp.h"
 #include "hphp/compiler/json.h"
+
+#include "hphp/compiler/statement/class_statement.h"
+
+#include "hphp/util/deprecated/declare-boost-types.h"
 #include "hphp/util/md5.h"
+#include "hphp/util/text-util.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CodeGenerator;
-DECLARE_BOOST_TYPES(StatementList);
-DECLARE_BOOST_TYPES(ClassScope);
-DECLARE_BOOST_TYPES(Location);
+DECLARE_EXTENDED_BOOST_TYPES(ClassScope);
+DECLARE_BOOST_TYPES(Expression)
 DECLARE_BOOST_TYPES(FileScope);
 DECLARE_BOOST_TYPES(FunctionScope);
+DECLARE_BOOST_TYPES(StatementList);
 
 /**
  * A FileScope stores what's parsed from one single source file. It's up to
  * AnalysisResult objects to grab statements, functions and classes from
  * FileScope objects to form execution paths.
  */
-class FileScope : public BlockScope,
-                  public FunctionContainer,
-                  public JSON::DocTarget::ISerializable {
-public:
+struct FileScope : BlockScope, FunctionContainer,
+                   JSON::DocTarget::ISerializable {
   enum Attribute {
     ContainsDynamicVariable  = 0x0001,
     ContainsLDynamicVariable = 0x0002,
@@ -64,14 +64,10 @@ public:
     ContainsGetDefinedVars   = 0x0400, // need VariableTable with getDefinedVars
     IsFoldable               = 0x01000,// function can be constant folded
     NoFCallBuiltin           = 0x02000,// function should not use FCallBuiltin
-    AllowOverride            = 0x04000,// allow override of systemlib or builtin
     NeedsFinallyLocals       = 0x08000,
     VariadicArgumentParam    = 0x10000,// ...$ capture of variable arguments
     ContainsAssert           = 0x20000,// contains call to assert()
   };
-
-  typedef boost::adjacency_list<boost::setS, boost::vecS> Graph;
-  typedef boost::graph_traits<Graph>::vertex_descriptor vertex_descriptor;
 
 public:
   FileScope(const std::string &fileName, int fileSize, const MD5 &md5);
@@ -88,12 +84,11 @@ public:
   const StringToClassScopePtrVecMap &getClasses() const {
     return m_classes;
   }
-  void getClassesFlattened(ClassScopePtrVec &classes) const;
+  void getClassesFlattened(std::vector<ClassScopePtr>& classes) const;
   ClassScopePtr getClass(const char *name);
   void getScopesSet(BlockScopeRawPtrQueue &v);
 
   int getFunctionCount() const;
-  void countReturnTypes(std::map<std::string, int> &counts);
   int getClassCount() const { return m_classes.size();}
 
   void pushAttribute();
@@ -125,6 +120,8 @@ public:
   const StringToFunctionScopePtrVecMap *getRedecFunctions() {
     return m_redeclaredFunctions;
   }
+  void addAnonClass(ClassStatementPtr stmt);
+  const std::vector<ClassStatementPtr>& getAnonClasses() const;
 
   /**
    * For separate compilation
@@ -132,28 +129,13 @@ public:
    * save the symbols for our iface.
    * This stuff only happens in the filechanged state.
    */
-  void addConstant(const std::string &name, TypePtr type, ExpressionPtr value,
+  void addConstant(const std::string &name, ExpressionPtr value,
                    AnalysisResultPtr ar, ConstructPtr con);
   void declareConstant(AnalysisResultPtr ar, const std::string &name);
   void getConstantNames(std::vector<std::string> &names);
-  TypePtr getConstantType(const std::string &name);
-
-  void addIncludeDependency(AnalysisResultPtr ar, const std::string &file,
-                            bool byInlined);
-  void addClassDependency(AnalysisResultPtr ar,
-                          const std::string &classname);
-  void addFunctionDependency(AnalysisResultPtr ar,
-                             const std::string &funcname, bool byInlined);
-  void addConstantDependency(AnalysisResultPtr ar,
-                             const std::string &decname);
 
   void addClassAlias(const std::string& target, const std::string& alias) {
-    m_classAliasMap.insert(
-      std::make_pair(
-        boost::to_lower_copy(target),
-        boost::to_lower_copy(alias)
-      )
-    );
+    m_classAliasMap.emplace(toLower(target), toLower(alias));
   }
 
   std::multimap<std::string,std::string> const& getClassAliases() const {
@@ -161,19 +143,11 @@ public:
   }
 
   void addTypeAliasName(const std::string& name) {
-    m_typeAliasNames.insert(boost::to_lower_copy(name));
+    m_typeAliasNames.emplace(toLower(name));
   }
 
   std::set<std::string> const& getTypeAliasNames() const {
     return m_typeAliasNames;
-  }
-
-  /**
-   * Called only by World
-   */
-  vertex_descriptor vertex() { return m_vertex; }
-  void setVertex(vertex_descriptor vertex) {
-    m_vertex = vertex;
   }
 
   void setSystem();
@@ -182,24 +156,19 @@ public:
   void setHHFile();
   bool isHHFile() const { return m_isHHFile; }
 
+  void setUseStrictTypes();
+  bool useStrictTypes() const { return m_useStrictTypes; }
+
   void setPreloadPriority(int p) { m_preloadPriority = p; }
   int preloadPriority() const { return m_preloadPriority; }
 
   void analyzeProgram(AnalysisResultPtr ar);
-  void analyzeIncludes(AnalysisResultPtr ar);
-  void analyzeIncludesHelper(AnalysisResultPtr ar);
-  bool insertClassUtil(AnalysisResultPtr ar, ClassScopeRawPtr cls, bool def);
 
-  bool checkClass(const std::string &cls);
-  ClassScopeRawPtr resolveClass(ClassScopeRawPtr cls);
-  FunctionScopeRawPtr resolveFunction(FunctionScopeRawPtr func);
   void visit(AnalysisResultPtr ar,
              void (*cb)(AnalysisResultPtr, StatementPtr, void*),
              void *data);
   const std::string &pseudoMainName();
-  void outputFileCPP(AnalysisResultPtr ar, CodeGenerator &cg);
   bool load();
-  std::string outputFilebase() const;
 
   FunctionScopeRawPtr getPseudoMain() const {
     return m_pseudoMain;
@@ -213,9 +182,9 @@ public:
 private:
   int m_size;
   MD5 m_md5;
-  unsigned m_includeState : 2;
   unsigned m_system : 1;
   unsigned m_isHHFile : 1;
+  unsigned m_useStrictTypes : 1;
   int m_preloadPriority;
 
   std::vector<int> m_attributes;
@@ -223,12 +192,10 @@ private:
   StatementListPtr m_tree;
   StringToFunctionScopePtrVecMap *m_redeclaredFunctions;
   StringToClassScopePtrVecMap m_classes;      // name => class
+  std::vector<ClassStatementPtr> m_anonClasses;
   FunctionScopeRawPtr m_pseudoMain;
 
-  vertex_descriptor m_vertex;
-
   std::string m_pseudoMainName;
-  BlockScopeSet m_providedDefs;
   std::set<std::string> m_redecBases;
 
   // Map from class alias names to the class they are aliased to.

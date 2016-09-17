@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,24 +15,31 @@
 */
 
 #include "hphp/test/ext/test_server.h"
-#include "hphp/compiler/parser/parser.h"
-#include "hphp/compiler/builtin_symbols.h"
-#include "hphp/compiler/code_generator.h"
-#include "hphp/compiler/analysis/analysis_result.h"
-#include "hphp/util/process.h"
+
 #include "hphp/compiler/option.h"
+
 #include "hphp/util/async-func.h"
+#include "hphp/util/process-exec.h"
+
 #include "hphp/runtime/ext/curl/ext_curl.h"
 #include "hphp/runtime/ext/std/ext_std_options.h"
 #include "hphp/runtime/server/http-request-handler.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/http-client.h"
+#include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/server/server.h"
 
+#include <sys/types.h>
+
+#include <fstream>
 #include <memory>
+#include <sys/param.h>
 #include <vector>
 
 #include <folly/Conv.h>
+#include <folly/portability/Sockets.h>
 
 using namespace HPHP;
 
@@ -49,10 +56,10 @@ static int s_admin_port = 0;
 static int s_rpc_port = 0;
 static int inherit_fd = -1;
 static std::unique_ptr<AsyncFunc<TestServer>> s_func;
-static char s_pidfile[MAXPATHLEN];
-static char s_repoFile[MAXPATHLEN];
-static char s_logFile[MAXPATHLEN];
-static char s_filename[MAXPATHLEN];
+static char s_pidfile[PATH_MAX];
+static char s_repoFile[PATH_MAX];
+static char s_logFile[PATH_MAX];
+static char s_filename[PATH_MAX];
 static int k_timeout = 30;
 
 bool TestServer::VerifyServerResponse(const char *input, const char **outputs,
@@ -66,8 +73,7 @@ bool TestServer::VerifyServerResponse(const char *input, const char **outputs,
   assert(input);
   if (port == 0) port = s_server_port;
 
-  if (!CleanUp()) return false;
-  string fullPath = "runtime/tmp/string";
+  std::string fullPath = "runtime/tmp/string";
   std::ofstream f(fullPath.c_str());
   if (!f) {
     printf("Unable to open %s for write. Run this test from hphp/.\n",
@@ -99,42 +105,42 @@ bool TestServer::VerifyServerResponse(const char *input, const char **outputs,
     s_func.reset();
   }
 
-  string actual;
+  std::string actual;
 
   int url = 0;
   for (url = 0; url < nUrls; url++) {
     String server = "http://";
     server += HHVM_FN(php_uname)("n").toString();
-    server += ":" + folly::to<string>(port) + "/";
+    server += ":" + folly::to<std::string>(port) + "/";
     server += urls[url];
     actual = "<No response from server>";
-    string err;
-    for (int i = 0; i < 10; i++) {
+    std::string err;
+    for (int i = 0; i < 50; i++) {
       Variant c = HHVM_FN(curl_init)();
-      HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_URL, server);
-      HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_RETURNTRANSFER, true);
+      HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_URL, server);
+      HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_RETURNTRANSFER, true);
       if (postdata) {
-        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_POSTFIELDS, postdata);
-        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_POST, true);
+        HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_POSTFIELDS, postdata);
+        HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_POST, true);
       }
       if (header) {
-        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_HTTPHEADER,
+        HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_HTTPHEADER,
                       make_packed_array(header));
       }
       if (responseHeader) {
-        HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_HEADER, 1);
+        HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_HEADER, 1);
       }
 
       Variant res = HHVM_FN(curl_exec)(c.toResource());
       if (!same(res, false)) {
-        actual = (std::string) res.toString();
+        actual = res.toString().toCppString();
         break;
       }
       sleep(1); // wait until HTTP server is up and running
     }
     if (actual != outputs[url]) {
       if (!responseHeader ||
-          actual.find(outputs[url]) == string::npos) {
+          actual.find(outputs[url]) == std::string::npos) {
         passed = false;
         break;
       }
@@ -161,19 +167,21 @@ bool TestServer::VerifyServerResponse(const char *input, const char **outputs,
 }
 
 void TestServer::RunServer() {
-  string out, err;
-  string portConfig = "-vServer.Port=" + folly::to<string>(s_server_port);
-  string adminConfig = "-vAdminServer.Port=" +
-    folly::to<string>(s_admin_port);
-  string rpcConfig = "-vSatellites.rpc.Port=" +
-    folly::to<string>(s_rpc_port);
-  string fd = folly::to<string>(inherit_fd);
-  string option = (inherit_fd >= 0) ? (string("--port-fd=") + fd) :
-    (string("-vServer.TakeoverFilename=") + string(s_filename));
-  string serverType = string("-vServer.Type=") + m_serverType;
-  string pidFile = string("-vPidFile=") + string(s_pidfile);
-  string repoFile = string("-vRepo.Central.Path=") + string(s_repoFile);
-  string logFile = string("-vLog.File=") + string(s_logFile);
+  std::string out, err;
+  auto const portConfig = "-vServer.Port=" +
+    folly::to<std::string>(s_server_port);
+  auto const adminConfig = "-vAdminServer.Port=" +
+    folly::to<std::string>(s_admin_port);
+  auto const rpcConfig = "-vSatellites.rpc.Port=" +
+    folly::to<std::string>(s_rpc_port);
+  auto const fd = folly::to<std::string>(inherit_fd);
+  auto option = inherit_fd >= 0
+    ? "--port-fd=" + fd
+    : "-vServer.TakeoverFilename=" + std::string(s_filename);
+  auto serverType = std::string("-vServer.Type=") + m_serverType;
+  auto pidFile = std::string("-vPidFile=") + s_pidfile;
+  auto repoFile = std::string("-vRepo.Central.Path=") + s_repoFile;
+  auto logFile = std::string("-vLog.File=") + s_logFile;
 
   const char *argv[] = {
     "__HHVM__", "--mode=server", "--config=test/ext/config-server.hdf",
@@ -183,14 +191,12 @@ void TestServer::RunServer() {
     nullptr
   };
 
+#ifdef HHVM_PATH
   // replace __HHVM__
-  if (Option::EnableEval < Option::FullEval) {
-    argv[0] = "runtime/tmp/TestServer/test";
-  } else {
-    argv[0] = HHVM_PATH;
-  }
+  argv[0] = HHVM_PATH;
+#endif
 
-  Process::Exec(argv[0], argv, nullptr, out, &err);
+  proc::exec(argv[0], argv, nullptr, out, &err);
 }
 
 void TestServer::StopServer() {
@@ -198,11 +204,11 @@ void TestServer::StopServer() {
     Variant c = HHVM_FN(curl_init)();
     String url = "http://";
     url += HHVM_FN(php_uname)("n").toString();
-    url += ":" + folly::to<string>(s_admin_port) + "/stop";
-    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_URL, url);
-    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_RETURNTRANSFER, true);
-    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_TIMEOUT, 1);
-    HHVM_FN(curl_setopt)(c.toResource(), k_CURLOPT_CONNECTTIMEOUT, 1);
+    url += ":" + folly::to<std::string>(s_admin_port) + "/stop";
+    HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_URL, url);
+    HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_RETURNTRANSFER, true);
+    HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_TIMEOUT, 1);
+    HHVM_FN(curl_setopt)(c.toResource(), CURLOPT_CONNECTTIMEOUT, 1);
     Variant res = HHVM_FN(curl_exec)(c.toResource());
     if (!same(res, false)) {
       return;
@@ -223,10 +229,10 @@ void TestServer::KillServer() {
     return;
   }
   buf[ret] = 0;
-  string out, err;
+  std::string out, err;
   const char *argv[] = {"kill", buf, nullptr};
   for (int i = 0; i < 10; i++) {
-    auto ret = Process::Exec(argv[0], argv, nullptr, out, &err);
+    auto ret = proc::exec(argv[0], argv, nullptr, out, &err);
     if (ret) {
       return;
     }
@@ -235,7 +241,7 @@ void TestServer::KillServer() {
   // Last resort
   const char *argv9[] = {"kill", "-9", buf, nullptr};
   for (int i = 0; i < 10; i++) {
-    auto ret = Process::Exec(argv9[0], argv9, nullptr, out, &err);
+    auto ret = proc::exec(argv9[0], argv9, nullptr, out, &err);
     if (ret) {
       return;
     }
@@ -246,8 +252,7 @@ void TestServer::KillServer() {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class TestServerRequestHandler : public RequestHandler {
-public:
+struct TestServerRequestHandler : RequestHandler {
   explicit TestServerRequestHandler(int timeout) : RequestHandler(timeout) {}
   // implementing RequestHandler
   virtual void handleRequest(Transport *transport) {
@@ -481,8 +486,7 @@ bool TestServer::TestSetCookie() {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class TestTransport : public Transport {
-public:
+struct TestTransport final : Transport {
   TestTransport() : m_code(0) {}
 
   int m_code;
@@ -491,17 +495,18 @@ public:
   /**
    * Implementing HttpTransport...
    */
-  virtual const char *getUrl() { return "/string";}
-  virtual const char *getRemoteHost() { return "remote";}
-  virtual const void *getPostData(int &size) { size = 0; return nullptr;}
-  virtual uint16_t getRemotePort() { return 0; }
-  virtual Method getMethod() { return Transport::Method::GET;}
-  virtual std::string getHeader(const char *name) { return "";}
-  virtual void getHeaders(HeaderMap &headers) {}
-  virtual void addHeaderImpl(const char *name, const char *value) {}
-  virtual void removeHeaderImpl(const char *name) {}
+  const char *getUrl() override { return "/string"; }
+  const char *getRemoteHost() override { return "remote"; }
+  const void *getPostData(size_t &size) override { size = 0; return nullptr; }
+  uint16_t getRemotePort() override { return 0; }
+  Method getMethod() override { return Transport::Method::GET; }
+  std::string getHeader(const char *name) override { return ""; }
+  void getHeaders(HeaderMap &headers) override {}
+  void addHeaderImpl(const char *name, const char *value) override {}
+  void removeHeaderImpl(const char *name) override {}
 
-  virtual void sendImpl(const void *data, int size, int code, bool chunked) {
+  void sendImpl(const void *data, int size, int code, bool chunked, bool eom)
+       override {
     m_response.clear();
     m_response.append((const char *)data, size);
     m_code = code;
@@ -510,7 +515,7 @@ public:
   void process() {
     HttpRequestHandler handler(0);
     for (unsigned int i = 0; i < 100; i++) {
-      handler.handleRequest(this);
+      handler.run(this);
     }
   }
 };
@@ -582,7 +587,7 @@ bool TestServer::PreBindSocket() {
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;
 
-  if (getaddrinfo(nullptr, folly::to<string>(s_server_port).c_str(),
+  if (getaddrinfo(nullptr, folly::to<std::string>(s_server_port).c_str(),
                   &hints, &res0) < 0) {
     printf("Error in getaddrinfo(): %s\n", strerror(errno));
     return false;
@@ -613,7 +618,7 @@ bool TestServer::TestInheritFdServer() {
 bool TestServer::TestTakeoverServer() {
   // start a server
   snprintf(s_filename, MAXPATHLEN, "/tmp/hphp_takeover_XXXXXX");
-  int tmpfd = mkstemp(s_filename);
+  auto const tmpfd = mkstemp(s_filename);
   close(tmpfd);
 
   s_func.reset(new AsyncFunc<TestServer>(this, &TestServer::RunServer));
@@ -622,8 +627,8 @@ bool TestServer::TestTakeoverServer() {
   // Wait for the server to actually start
   HttpClient http;
   StringBuffer response;
-  vector<String> responseHeaders;
-  string url = "http://127.0.0.1:" + folly::to<string>(s_server_port) +
+  std::vector<String> responseHeaders;
+  auto url = "http://127.0.0.1:" + folly::to<std::string>(s_server_port) +
     "/status.php";
   HeaderMap headers;
   for (int i = 0; i < 10; i++) {
@@ -644,23 +649,23 @@ bool TestServer::TestTakeoverServer() {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class EchoHandler : public RequestHandler {
-public:
+struct EchoHandler final : RequestHandler {
   explicit EchoHandler(int timeout) : RequestHandler(timeout) {}
   // implementing RequestHandler
-  virtual void handleRequest(Transport *transport) {
+  void handleRequest(Transport *transport) override {
+    g_context.getCheck();
     HeaderMap headers;
     transport->getHeaders(headers);
 
-    string response;
+    std::string response;
     response = "\nGET param: name = ";
     response += transport->getParam("name");
 
     if (transport->getMethod() == Transport::Method::POST) {
-      int size = 0;
-      const char *data = (const char *)transport->getPostData(size);
+      size_t size = 0;
+      auto const data = (const char *)transport->getPostData(size);
       response += "\nPOST data: ";
-      response += string(data, size);
+      response += std::string(data, size);
     }
 
     for (HeaderMap::const_iterator iter = headers.begin();
@@ -669,7 +674,7 @@ public:
       response += iter->first;
       for (unsigned int i = 0; i < iter->second.size(); i++) {
         response += "\n";
-        response += folly::to<string>(i);
+        response += folly::to<std::string>(i);
         response += ": ";
         response += iter->second[i];
       }
@@ -677,8 +682,9 @@ public:
 
     transport->addHeader("Custom", "blah");
     transport->sendString(response);
+    hphp_memory_cleanup();
   }
-  virtual void abortRequest(Transport *transport) {
+  void abortRequest(Transport *transport) override {
     transport->sendString("Service Unavailable", 503);
   }
 };
@@ -700,7 +706,7 @@ bool TestServer::TestHttpClient() {
   HeaderMap headers;
   headers["Cookie"].push_back("c1=v1;c2=v2;");
   headers["Cookie"].push_back("c3=v3;c4=v4;");
-  string url = "http://127.0.0.1:" + folly::to<string>(s_server_port) +
+  auto url = "http://127.0.0.1:" + folly::to<std::string>(s_server_port) +
     "/echo?name=value";
 
   static const StaticString s_Custom_colon_blah("Custom: blah");
@@ -708,7 +714,7 @@ bool TestServer::TestHttpClient() {
   for (int i = 0; i < 10; i++) {
     HttpClient http;
     StringBuffer response;
-    vector<String> responseHeaders;
+    std::vector<String> responseHeaders;
     int code = http.get(url.c_str(), response, &headers, &responseHeaders);
     VS(code, 200);
     VS(response.data(),
@@ -719,7 +725,7 @@ bool TestServer::TestHttpClient() {
         "\nHeader: Accept"
         "\n0: */*"
         "\nHeader: Host"
-        "\n0: 127.0.0.1:" + folly::to<string>(s_server_port)).c_str());
+        "\n0: 127.0.0.1:" + folly::to<std::string>(s_server_port)).c_str());
 
     bool found = false;
     for (unsigned int i = 0; i < responseHeaders.size(); i++) {
@@ -732,7 +738,7 @@ bool TestServer::TestHttpClient() {
   for (int i = 0; i < 10; i++) {
     HttpClient http;
     StringBuffer response;
-    vector<String> responseHeaders;
+    std::vector<String> responseHeaders;
     int code = http.post(url.c_str(), "postdata", 8, response, &headers,
                          &responseHeaders);
     VS(code, 200);
@@ -749,7 +755,7 @@ bool TestServer::TestHttpClient() {
         "\nHeader: Content-Length"
         "\n0: 8"
         "\nHeader: Host"
-        "\n0: 127.0.0.1:" + folly::to<string>(s_server_port)).c_str());
+        "\n0: 127.0.0.1:" + folly::to<std::string>(s_server_port)).c_str());
 
     bool found = false;
     for (unsigned int i = 0; i < responseHeaders.size(); i++) {

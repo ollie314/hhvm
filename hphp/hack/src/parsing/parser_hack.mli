@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -9,17 +9,21 @@
  *)
 
 type parser_return = {
-    (* True if we are dealing with a hack file *)
-    is_hh_file : bool;
+    file_mode  : FileInfo.mode option; (* None if PHP *)
     comments   : (Pos.t * string) list;
     ast        : Ast.program;
   }
 
-val program : ?elaborate_namespaces:bool -> Relative_path.t ->
+val program :
+  ?elaborate_namespaces:bool ->
+  ?include_line_comments:bool ->
+  ?keep_errors:bool ->
+  TypecheckerOptions.t ->
+  Relative_path.t ->
   string -> parser_return
 
 (* Parses a file *)
-val from_file : Relative_path.t -> parser_return
+val from_file : TypecheckerOptions.t -> Relative_path.t -> parser_return
 
 type saved_lb
 type assoc

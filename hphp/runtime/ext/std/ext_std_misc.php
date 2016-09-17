@@ -117,8 +117,8 @@ function ignore_user_abort(bool $setting = false): int;
  * byte X Back up one byte @ NUL-fill to absolute position
  * @return mixed - Returns a binary string containing data.
  */
-<<__Native("ActRec")>>
-function pack(string $format, mixed $args, ...): mixed;
+<<__Native>>
+function pack(string $format, ...$args): mixed;
 
 /* @param int $seconds - Halt time in seconds.
  * @return int - Returns zero on success, or FALSE on errors. If the call was
@@ -220,5 +220,25 @@ function token_name(int $token): string;
  */
 <<__Native>>
 function hphp_to_string(mixed $v): string;
+
+}
+
+namespace __SystemLib {
+
+/* max2() returns the max of two operands (optimized FCallBuiltin for max).
+ * @param mixed $arg1 - The first operand of max.
+ * @param mixed $arg2 - The second operand of max.
+ * @return mixed - The max of two operands.
+ */
+<<__Native, __HipHopSpecific>>
+function max2(mixed $arg1, mixed $arg2): mixed;
+
+/* min2() returns the min of two operands (optimized FCallBuiltin for min).
+ * @param mixed $arg1 - The first operand of min.
+ * @param mixed $arg2 - The second operand of min.
+ * @return mixed - The min of two operands.
+ */
+<<__Native, __HipHopSpecific>>
+function min2(mixed $arg1, mixed $arg2): mixed;
 
 }

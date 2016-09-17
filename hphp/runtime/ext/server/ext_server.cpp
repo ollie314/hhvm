@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,41 +18,35 @@
 
 #include <folly/Conv.h>
 
-#include "hphp/runtime/server/satellite-server.h"
-#include "hphp/runtime/server/pagelet-server.h"
-#include "hphp/runtime/server/xbox-server.h"
-#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/server/http-server.h"
+#include "hphp/runtime/server/pagelet-server.h"
 #include "hphp/runtime/server/rpc-request-handler.h"
-
-#define DANGLING_HEADER "HPHP_DANGLING"
+#include "hphp/runtime/server/satellite-server.h"
+#include "hphp/runtime/server/xbox-server.h"
+#include "hphp/util/boot_timer.h"
 
 namespace HPHP {
 
-static const StaticString s_PAGELET_NOT_READY("PAGELET_NOT_READY");
-static const StaticString s_PAGELET_READY("PAGELET_READY");
-static const StaticString s_PAGELET_DONE("PAGELET_DONE");
-
-static class ServerExtension : public Extension {
-public:
+static struct ServerExtension final : Extension {
   ServerExtension() : Extension("server", NO_EXTENSION_VERSION_YET) {}
-  virtual void moduleInit() {
-    Native::registerConstant<KindOfInt64>(s_PAGELET_NOT_READY.get(),
-                                          k_PAGELET_NOT_READY);
-    Native::registerConstant<KindOfInt64>(s_PAGELET_READY.get(),
-                                          k_PAGELET_READY);
-    Native::registerConstant<KindOfInt64>(s_PAGELET_DONE.get(), k_PAGELET_DONE);
+  void moduleInit() override {
+    HHVM_RC_INT_SAME(PAGELET_NOT_READY);
+    HHVM_RC_INT_SAME(PAGELET_READY);
+    HHVM_RC_INT_SAME(PAGELET_DONE);
 
     HHVM_FE(hphp_thread_type);
-    HHVM_FE(dangling_server_proxy_old_request);
     HHVM_FE(pagelet_server_is_enabled);
     HHVM_FE(pagelet_server_task_start);
     HHVM_FE(pagelet_server_task_status);
     HHVM_FE(pagelet_server_task_result);
     HHVM_FE(pagelet_server_tasks_started);
     HHVM_FE(pagelet_server_flush);
+    HHVM_FE(pagelet_server_is_done);
     HHVM_FE(xbox_send_message);
     HHVM_FE(xbox_post_message);
     HHVM_FE(xbox_task_start);
@@ -63,6 +57,11 @@ public:
     HHVM_FE(xbox_set_thread_timeout);
     HHVM_FE(xbox_schedule_thread_reset);
     HHVM_FE(xbox_get_thread_time);
+    HHVM_FALIAS(HH\\server_is_stopping, server_is_stopping);
+    HHVM_FALIAS(HH\\server_is_prepared_to_stop, server_is_prepared_to_stop);
+    HHVM_FALIAS(HH\\server_health_level, server_health_level);
+    HHVM_FALIAS(HH\\server_uptime, server_uptime);
+    HHVM_FALIAS(HH\\server_process_start_time, server_process_start_time);
 
     loadSystemlib();
   }
@@ -74,50 +73,7 @@ int64_t HHVM_FUNCTION(hphp_thread_type) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// dangling server
-
-bool HHVM_FUNCTION(dangling_server_proxy_old_request) {
-  static bool s_detected_dangling_server = true;
-
-  if (!s_detected_dangling_server ||
-      SatelliteServerInfo::DanglingServerPort == 0) {
-    return false;
-  }
-
-  Transport *transport = g_context->getTransport();
-  if (transport == NULL) {
-    return false;
-  }
-  if (!transport->getHeader(DANGLING_HEADER).empty()) {
-    // if we are processing a dangling server request, do not do it again
-    return false;
-  }
-
-  std::string url = "http://localhost:" +
-    folly::to<std::string>(SatelliteServerInfo::DanglingServerPort) +
-    transport->getServerObject();
-
-  int code = 0;
-  std::string error;
-  StringBuffer response;
-  HeaderMap headers;
-  headers[DANGLING_HEADER].push_back("1");
-  if (!HttpProtocol::ProxyRequest(transport, false, url, code, error,
-                                  response, &headers)) {
-    s_detected_dangling_server = false;
-    return false;
-  }
-  transport->setResponse(code, "dangling_server_proxy_old_request");
-  g_context->write(response.detach());
-  return true;
-}
-
-///////////////////////////////////////////////////////////////////////////////
 // Pagelet Server
-
-const int64_t k_PAGELET_NOT_READY = PAGELET_NOT_READY;
-const int64_t k_PAGELET_READY     = PAGELET_READY;
-const int64_t k_PAGELET_DONE      = PAGELET_DONE;
 
 bool HHVM_FUNCTION(pagelet_server_is_enabled) {
   return PageletServer::Enabled();
@@ -160,8 +116,8 @@ String HHVM_FUNCTION(pagelet_server_task_result,
   int rcode;
   String response = PageletServer::TaskResult(task, rheaders, rcode,
                                               timeout_ms);
-  headers = rheaders;
-  code = rcode;
+  headers.assignIfRef(rheaders);
+  code.assignIfRef(rcode);
   return response;
 }
 
@@ -184,6 +140,16 @@ void HHVM_FUNCTION(pagelet_server_flush) {
   }
 }
 
+bool HHVM_FUNCTION(pagelet_server_is_done) {
+  PageletTransport *job =
+    dynamic_cast<PageletTransport *>(g_context->getTransport());
+  if (job) {
+    return job->isDone();
+  }
+  // if we aren't in a pagelet thread, this call is meaningless
+  return true;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // xbox
 
@@ -194,7 +160,7 @@ bool HHVM_FUNCTION(xbox_send_message,
                    const String& host /* = "localhost" */) {
   Array ret;
   auto b = XboxServer::SendMessage(msg, ret, timeout_ms, host);
-  retRef = ret;
+  retRef.assignIfRef(ret);
   return b;
 }
 
@@ -218,7 +184,7 @@ int64_t HHVM_FUNCTION(xbox_task_result,
                       const Resource& task,
                       int64_t timeout_ms,
                       VRefParam ret) {
-  return XboxServer::TaskResult(task, timeout_ms, ret);
+  return XboxServer::TaskResult(task, timeout_ms, ret.getVariantOrNull());
 }
 
 Variant HHVM_FUNCTION(xbox_process_call_message,
@@ -284,6 +250,48 @@ int64_t HHVM_FUNCTION(xbox_get_thread_time) {
     return time(nullptr) - handler->getLastResetTime();
   }
   throw Exception("Not an xbox worker!");
+}
+
+bool HHVM_FUNCTION(server_is_stopping) {
+  if (HttpServer::Server) {
+    if (auto const server = HttpServer::Server->getPageServer()) {
+      return server->getStatus() == Server::RunStatus::STOPPING;
+    }
+  }
+  // Return false if not running in server mode.
+  return false;
+}
+
+bool HHVM_FUNCTION(server_is_prepared_to_stop) {
+  auto const now = time(nullptr);
+  auto const lastPrepareTime = HttpServer::GetPrepareToStopTime();
+  if (lastPrepareTime == 0) return false;
+  return (lastPrepareTime + RuntimeOption::ServerPrepareToStopTimeout) >= now;
+}
+
+int64_t HHVM_FUNCTION(server_health_level) {
+  if (HttpServer::Server) {
+    if (auto const server = HttpServer::Server->getPageServer()) {
+      return healthLeveltToInt(server->getHealthLevel());
+    }
+  }
+  // If server is not yet started, e.g., when not running in server
+  // mode, or before server starts, we assume everything is OK.
+  return healthLeveltToInt(HealthLevel::Bold);
+}
+
+int64_t HHVM_FUNCTION(server_uptime) {
+  // return -1 if server is not yet started, e.g., when not running in
+  // server mode.
+  if (HttpServer::StartTime == 0) return -1;
+  int64_t nSeconds = time(nullptr) - HttpServer::StartTime;
+  if (nSeconds < 0) nSeconds = 0;
+  return nSeconds;
+}
+
+int64_t HHVM_FUNCTION(server_process_start_time) {
+  // Returns 0 when not running in server mode.
+  return BootStats::startTimestamp();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

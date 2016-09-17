@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,8 +15,11 @@
 */
 
 #include "hphp/compiler/analysis/code_error.h"
+
+#include <fstream>
 #include <map>
 #include <vector>
+
 #include "hphp/compiler/analysis/file_scope.h"
 #include "hphp/compiler/parser/parser.h"
 #include "hphp/compiler/construct.h"
@@ -30,8 +33,7 @@ namespace HPHP { namespace Compiler {
 ///////////////////////////////////////////////////////////////////////////////
 
 DECLARE_BOOST_TYPES(ErrorInfo);
-class ErrorInfo : public JSON::CodeError::ISerializable {
-public:
+struct ErrorInfo : JSON::CodeError::ISerializable {
   ErrorType m_error;
   ConstructPtr m_construct1;
   ConstructPtr m_construct2;
@@ -45,8 +47,7 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class CodeErrors : public JSON::CodeError::ISerializable {
-public:
+struct CodeErrors : JSON::CodeError::ISerializable {
   CodeErrors();
   void clear();
 
@@ -129,7 +130,7 @@ void ErrorInfo::serialize(JSON::CodeError::OutputStream &out) const {
 }
 
 void CodeErrors::serialize(JSON::CodeError::OutputStream &out) const {
-  vector<const char *> errorTexts = getErrorTexts();
+  auto errorTexts = getErrorTexts();
 
   unsigned int total = 0;
   for (unsigned int i = 0; i < m_errors.size(); i++) {

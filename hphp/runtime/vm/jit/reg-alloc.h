@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,61 +24,65 @@
 #include "hphp/runtime/vm/jit/state-vector.h"
 #include "hphp/runtime/vm/jit/translator-runtime.h"
 
-#ifdef VOID
-#undef VOID
-#endif
-
 namespace HPHP { namespace jit {
 
-class IRUnit;
+///////////////////////////////////////////////////////////////////////////////
+
+struct Abi;
+struct IRUnit;
+struct Vinstr;
 struct Vunit;
-struct CodegenState;
-class BackEnd;
+
+namespace irlower { struct IRLS; }
+
+///////////////////////////////////////////////////////////////////////////////
 
 // Native stack layout:
-// |               |
-// +---------------+
-// |               |
-// | MInstr state  |
-// |               |
-// +---------------+
-// |               |  <-- spill[kReservedRSPSpillSpace - 1]
-// |  spill slots  |  <-- spill[..]
-// |               |  <-- spill[1]
-// |               |  <-- spill[0]
+// | enterTCHelper |
 // +---------------+
 // |  return addr  |
+// |  saved %rbp   |
+// +---------------+
+// |               | ...up to kMaxSpillSlots
+// |  spill slots  | <-- spill[1]
+// |               | <-- spill[0]
 // +---------------+
 //
-// We need to increase spill indexes by 1 to avoid overwriting the
-// return address.
 
 /*
- * Return the byte offset to a spill slot
+ * Return the byte offset to a spill slot.
  */
 inline uint32_t slotOffset(uint32_t slot) {
-  return (slot + 1) * sizeof(uint64_t);
+  return slot * sizeof(uint64_t);
 }
 
 /*
- * return true if the offset of this spill slot is 16-byte aligned
+ * Return true if the offset of this spill slot is 16-byte aligned.
  */
 inline bool isSlotAligned(uint32_t slot) {
-  return slot % 2 == 1;
+  return slot % 2 == 0;
 }
 
-// This value must be consistent with the number of pre-allocated
-// bytes for spill locations in __enterTCHelper in mc-generator.cpp.
-// Be careful when changing this value.
-const size_t NumPreAllocatedSpillLocs = kReservedRSPSpillSpace /
-                                        sizeof(uint64_t);
+const size_t kMaxSpillSlots = 128;
 
-// Return InvalidReg, or a specific register to force tmp to use
+/*
+ * Return InvalidReg, or a specific register to force `tmp' to use.
+ */
 PhysReg forceAlloc(const SSATmp& tmp);
 
-// Assign virtual registers to all SSATmps used or defined in reachable blocks.
-void assignRegs(IRUnit& unit, Vunit& vunit, CodegenState& state,
-                const BlockList& blocks, BackEnd*);
+/*
+ * Assign virtual registers to all SSATmps used or defined in reachable blocks.
+ */
+void assignRegs(const IRUnit& unit, Vunit& vunit, irlower::IRLS& state,
+                const BlockList& blocks);
+
+/*
+ * Return the set of physical registers implicitly accessed (used or defined).
+ */
+void getEffects(const Abi& abi, const Vinstr& i,
+                RegSet& uses, RegSet& across, RegSet& defs);
+
+///////////////////////////////////////////////////////////////////////////////
 
 }}
 

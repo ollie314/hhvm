@@ -8,7 +8,7 @@
 #   TBB_ARCH_PLATFORM is set by the build script tbbvars[.bat|.sh|.csh], which can be found
 #   in the TBB installation directory (TBB_INSTALL_DIR).
 #
-# For backwards compatibility, you may explicitely set the CMake variables TBB_ARCHITECTURE and TBB_COMPILER.
+# For backwards compatibility, you may explicitly set the CMake variables TBB_ARCHITECTURE and TBB_COMPILER.
 # TBB_ARCHITECTURE     [ ia32 | em64t | itanium ]
 #   which architecture to use
 # TBB_COMPILER         e.g. vc9 or cc3.2.3_libc2.3.2_kernel2.4.21 or cc4.0.1_os10.4.9
@@ -55,8 +55,17 @@ if (WIN32)
   if (MSVC90)
     set(_TBB_COMPILER "vc9")
   endif(MSVC90)
+  if (MSVC10)
+    set(_TBB_COMPILER "vc10")
+  endif(MSVC10)
+  if (MSVC11)
+    set(_TBB_COMPILER "vc11")
+  endif(MSVC11)
+  if (MSVC12)
+    set(_TBB_COMPILER "vc12")
+  endif(MSVC12)
   if (NOT _TBB_COMPILER)
-    message("ERROR: TBB supports only VC 7.1, 8 and 9 compilers on Windows platforms.")
+    message("ERROR: TBB supports only VC 7.1, 8, 9, 10, 11, and 12 compilers on Windows platforms.")
   endif (NOT _TBB_COMPILER)
   set(_TBB_ARCHITECTURE ${TBB_ARCHITECTURE})
 endif (WIN32)
@@ -138,18 +147,6 @@ else (TBB_OBVIOUS_PLACE)
     mark_as_advanced(TBB_INSTALL_DIR)
   endif (NOT TBB_INSTALL_DIR)
 
-  #-- A macro to rewrite the paths of the library. This is necessary, because
-  #   find_library() always found the em64t/vc9 version of the TBB libs
-  macro(TBB_CORRECT_LIB_DIR var_name)
-    #    if (NOT "${_TBB_ARCHITECTURE}" STREQUAL "em64t")
-    string(REPLACE em64t "${_TBB_ARCHITECTURE}" ${var_name} ${${var_name}})
-    #    endif (NOT "${_TBB_ARCHITECTURE}" STREQUAL "em64t")
-    string(REPLACE ia32 "${_TBB_ARCHITECTURE}" ${var_name} ${${var_name}})
-    string(REPLACE vc7.1 "${_TBB_COMPILER}" ${var_name} ${${var_name}})
-    string(REPLACE vc8 "${_TBB_COMPILER}" ${var_name} ${${var_name}})
-    string(REPLACE vc9 "${_TBB_COMPILER}" ${var_name} ${${var_name}})
-  endmacro(TBB_CORRECT_LIB_DIR var_content)
-
 
   #-- Look for include directory and set ${TBB_INCLUDE_DIR}
   set (TBB_INC_SEARCH_DIR ${_TBB_INSTALL_DIR}/include)
@@ -165,11 +162,9 @@ else (TBB_OBVIOUS_PLACE)
   if (NOT $ENV{TBB_ARCH_PLATFORM} STREQUAL "")
     set (TBB_LIBRARY_DIR "${_TBB_INSTALL_DIR}/$ENV{TBB_ARCH_PLATFORM}/lib")
   else (NOT $ENV{TBB_ARCH_PLATFORM} STREQUAL "")
-    # HH: deprecated
-    message(STATUS "[Warning] FindTBB.cmake: The use of TBB_ARCHITECTURE and TBB_COMPILER is deprecated and may not be supported in future versions. Please set $ENV{TBB_ARCH_PLATFORM} (using tbbvars.[bat|csh|sh]).")
-    set (TBB_LIBRARY_DIR "${_TBB_INSTALL_DIR}/${_TBB_ARCHITECTURE}/${_TBB_COMPILER}/lib")
+    # Undeprecated to allow for Windows use. 
+    set (TBB_LIBRARY_DIR "${_TBB_INSTALL_DIR}/lib/${_TBB_ARCHITECTURE}/${_TBB_COMPILER}")
   endif (NOT $ENV{TBB_ARCH_PLATFORM} STREQUAL "")
-
 
   find_library(TBB_LIBRARY        ${_TBB_LIB_NAME}        ${TBB_LIBRARY_DIR} NO_DEFAULT_PATH)
   find_library(TBB_MALLOC_LIBRARY ${_TBB_LIB_MALLOC_NAME} ${TBB_LIBRARY_DIR} NO_DEFAULT_PATH)
@@ -184,11 +179,16 @@ else (TBB_OBVIOUS_PLACE)
   if (TBB_INCLUDE_DIR)
     if (TBB_LIBRARY)
       set (TBB_FOUND "YES")
-      set (TBB_LIBRARIES ${TBB_LIBRARY} ${TBB_MALLOC_LIBRARY} ${TBB_LIBRARIES})
-      set (TBB_DEBUG_LIBRARIES ${TBB_LIBRARY_DEBUG} ${TBB_MALLOC_LIBRARY_DEBUG} ${TBB_DEBUG_LIBRARIES})
+      if(CMAKE_CONFIGURATION_TYPES OR CMAKE_BUILD_TYPE)
+        set(TBB_LIBRARIES optimized ${TBB_LIBRARY} ${TBB_MALLOC_LIBRARY} ${TBB_LIBRARIES} debug ${TBB_LIBRARY_DEBUG} ${TBB_MALLOC_LIBRARY_DEBUG} ${TBB_DEBUG_LIBRARIES})
+      else()
+        set (TBB_LIBRARIES ${TBB_LIBRARY} ${TBB_MALLOC_LIBRARY} ${TBB_LIBRARIES})
+        set (TBB_DEBUG_LIBRARIES ${TBB_LIBRARY_DEBUG} ${TBB_MALLOC_LIBRARY_DEBUG} ${TBB_DEBUG_LIBRARIES})
+        mark_as_advanced(TBB_DEBUG_LIBRARIES)
+      endif()
       set (TBB_INCLUDE_DIRS ${TBB_INCLUDE_DIR} CACHE PATH "TBB include directory" FORCE)
       set (TBB_LIBRARY_DIRS ${TBB_LIBRARY_DIR} CACHE PATH "TBB library directory" FORCE)
-      mark_as_advanced(TBB_INCLUDE_DIRS TBB_LIBRARY_DIRS TBB_LIBRARIES TBB_DEBUG_LIBRARIES)
+      mark_as_advanced(TBB_INCLUDE_DIRS TBB_LIBRARY_DIRS TBB_LIBRARIES)
       message(STATUS "Found Intel TBB")
     endif (TBB_LIBRARY)
   endif (TBB_INCLUDE_DIR)
@@ -202,13 +202,13 @@ else (TBB_OBVIOUS_PLACE)
     endif (TBB_FIND_REQUIRED)
   endif (NOT TBB_FOUND)
 
-  endif (TBB_OBVIOUS_PLACE)
+endif (TBB_OBVIOUS_PLACE)
 
-  if (TBB_FOUND)
-    set(TBB_INTERFACE_VERSION 0)
+if (TBB_FOUND)
+  set(TBB_INTERFACE_VERSION 0)
 
-    FILE(READ "${TBB_INCLUDE_DIRS}/tbb/tbb_stddef.h" _TBB_VERSION_CONTENTS)
-    STRING(REGEX REPLACE ".*#define TBB_INTERFACE_VERSION ([0-9]+).*" "\\1" TBB_INTERFACE_VERSION "${_TBB_VERSION_CONTENTS}")
+  FILE(READ "${TBB_INCLUDE_DIRS}/tbb/tbb_stddef.h" _TBB_VERSION_CONTENTS)
+  STRING(REGEX REPLACE ".*#define TBB_INTERFACE_VERSION ([0-9]+).*" "\\1" TBB_INTERFACE_VERSION "${_TBB_VERSION_CONTENTS}")
 
   set(TBB_INTERFACE_VERSION "${TBB_INTERFACE_VERSION}")
 endif()

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,13 +25,12 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Array;
+struct Array;
 
-class CodeCoverage {
-public:
+struct CodeCoverage {
   void Record(const char* filename, int line0, int line1);
 
-  /**
+  /*
    * Returns an array in this format,
    *
    *  array('filename' => array( line => count, ...))
@@ -40,7 +39,7 @@ public:
    */
   Array Report(bool sys = true);
 
-  /**
+  /*
    * Write JSON format into the file.
    *
    *  { 'filename': [0, 0, 1, 0, 2, 0], ...}
@@ -49,7 +48,7 @@ public:
    */
   void Report(const std::string& filename);
 
-  /**
+  /*
    * Clear all coverage data.
    */
   void Reset();

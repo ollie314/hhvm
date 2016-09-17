@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,15 +25,14 @@ namespace HPHP {
 DECLARE_BOOST_TYPES(StatementList);
 DECLARE_BOOST_TYPES(IfStatement);
 
-class IfStatement : public Statement {
-public:
+struct IfStatement : Statement {
   IfStatement(STATEMENT_CONSTRUCTOR_PARAMETERS, StatementListPtr stmts);
 
   DECLARE_STATEMENT_VIRTUAL_FUNCTIONS;
-  StatementPtr preOptimize(AnalysisResultConstPtr ar);
-  virtual bool hasDecl() const;
-  virtual bool hasRetExp() const;
-  virtual int getRecursiveCount() const;
+  StatementPtr preOptimize(AnalysisResultConstPtr ar) override;
+  bool hasDecl() const override;
+  bool hasRetExp() const override;
+  int getRecursiveCount() const override;
 
   StatementListPtr getIfBranches() const { return m_stmts; }
 private:

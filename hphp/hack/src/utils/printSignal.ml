@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -31,4 +31,4 @@ let string_of_signal n =
   | _ when n = Sys.sigttou -> "sigttou"
   | _ when n = Sys.sigvtalrm -> "sigvtalrm"
   | _ when n = Sys.sigprof -> "sigprof"
-  | _ -> assert false
+  | _ -> Printf.sprintf "unknown signal %d" n

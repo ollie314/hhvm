@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,8 +28,7 @@ namespace HPHP {
 DECLARE_BOOST_TYPES(ClassStatement);
 DECLARE_BOOST_TYPES(MethodStatement);
 
-class ClassStatement : public InterfaceStatement {
-public:
+struct ClassStatement : InterfaceStatement {
   ClassStatement(STATEMENT_CONSTRUCTOR_PARAMETERS,
                  int type, const std::string &name,
                  const std::string &parent, ExpressionListPtr base,
@@ -39,21 +38,18 @@ public:
                  TypeAnnotationPtr enumBaseTy);
 
   DECLARE_BASE_STATEMENT_VIRTUAL_FUNCTIONS;
-  virtual bool hasDecl() const { return true; }
-  virtual bool hasImpl() const;
+  bool hasDecl() const override { return true; }
+  bool hasImpl() const override;
 
   void setPromotedParameterCount(int count) {
     m_promotedParameterCount = count;
   }
 
   // implementing IParseHandler
-  virtual void onParse(AnalysisResultConstPtr ar, FileScopePtr scope);
+  void onParse(AnalysisResultConstPtr ar, FileScopePtr scope) override;
   bool ignored() const { return m_ignored;}
 
-  virtual std::string getName() const;
-  virtual void getAllParents(AnalysisResultConstPtr ar,
-                             std::vector<std::string> &names);
-  void getCtorAndInitInfo(bool &needsCppCtor, bool &needsInit);
+  std::string getName() const override;
   StatementPtr addClone(StatementPtr origStmt);
 
   TypeAnnotationPtr getEnumBaseTy() { return m_enumBaseTy; }
@@ -61,13 +57,9 @@ public:
 private:
   int m_type;
   int m_promotedParameterCount;
-  std::string m_parent;
   std::string m_originalParent;
   bool m_ignored;
   TypeAnnotationPtr m_enumBaseTy;
-
-  static void GetCtorAndInitInfo(
-      StatementPtr s, bool &needsCppCtor, bool &needsInit);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

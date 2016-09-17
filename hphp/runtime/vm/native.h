@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,20 +13,23 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#ifndef _incl_HPHP_RUNTIME_VM_NATIVE_H
-#define _incl_HPHP_RUNTIME_VM_NATIVE_H
+#ifndef incl_HPHP_RUNTIME_VM_NATIVE_H
+#define incl_HPHP_RUNTIME_VM_NATIVE_H
 
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/typed-value.h"
+#include "hphp/runtime/base/tv-helpers.h"
 
 #include "hphp/runtime/vm/func.h"
+#include "hphp/util/abi-cxx.h"
 
 #include <type_traits>
 
 namespace HPHP {
 struct ActRec;
 struct Class;
-class Object;
+struct FuncEmitter;
+struct Object;
 };
 
 /* Macros related to declaring/registering internal implementations
@@ -40,7 +43,7 @@ class Object;
  *   }
  *
  * Then register it from your Extension's moduleLoad() hook:
- *   virtual moduleLoad(const IniSetting::Map& ini, Hdf config) {
+ *   void moduleLoad(const IniSetting::Map& ini, Hdf config) override {
  *     HHVM_FE(sum);
  *   }
  *
@@ -92,10 +95,17 @@ class Object;
 #define HHVM_FN(fn) f_ ## fn
 #define HHVM_FUNCTION(fn, ...) \
         HHVM_FN(fn)(__VA_ARGS__)
-#define HHVM_NAMED_FE(fn, fimpl) \
-        Native::registerBuiltinFunction(#fn, fimpl)
-#define HHVM_FE(fn) HHVM_NAMED_FE(fn, HHVM_FN(fn))
-#define HHVM_FALIAS(fn, falias) HHVM_NAMED_FE(fn, HHVM_FN(falias))
+#define HHVM_NAMED_FE_STR(fn, fimpl) \
+        do { \
+          /* This calls Extension::registerExtensionFunction() on the */ \
+          /* local 'this' at the call site. */ \
+          String name{makeStaticString(fn)}; \
+          registerExtensionFunction(name); \
+          Native::registerBuiltinFunction(name, fimpl); \
+        } while(0)
+#define HHVM_NAMED_FE(fn, fimpl) HHVM_NAMED_FE_STR(#fn, fimpl)
+#define HHVM_FE(fn) HHVM_NAMED_FE_STR(#fn, HHVM_FN(fn))
+#define HHVM_FALIAS(fn, falias) HHVM_NAMED_FE_STR(#fn, HHVM_FN(falias))
 
 /* Macros related to declaring/registering internal implementations
  * of <<__Native>> class instance methods.
@@ -133,6 +143,48 @@ class Object;
 #define HHVM_STATIC_MALIAS(cn,fn,calias,falias) \
   HHVM_NAMED_STATIC_ME(cn,fn,HHVM_STATIC_MN(calias,falias))
 
+/* Macros related to declaring/registering constants. Note that the
+ * HHVM_RCC_* macros expect a StaticString to be present via s_##class_name.
+ */
+#define HHVM_RC_STR(const_name, const_value)                         \
+  Native::registerConstant<KindOfString>(                            \
+    makeStaticString(#const_name), makeStaticString(const_value));
+#define HHVM_RC_INT(const_name, const_value)                         \
+  Native::registerConstant<KindOfInt64>(                             \
+    makeStaticString(#const_name), int64_t(const_value));
+#define HHVM_RC_DBL(const_name, const_value)                         \
+  Native::registerConstant<KindOfDouble>(                            \
+    makeStaticString(#const_name), double(const_value));
+#define HHVM_RC_BOOL(const_name, const_value)                        \
+  Native::registerConstant<KindOfBoolean>(                           \
+    makeStaticString(#const_name), bool(const_value));
+
+#define HHVM_RC_STR_SAME(const_name)                                 \
+  Native::registerConstant<KindOfString>(                            \
+    makeStaticString(#const_name), makeStaticString(const_name));
+#define HHVM_RC_INT_SAME(const_name)                                 \
+  Native::registerConstant<KindOfInt64>(                             \
+    makeStaticString(#const_name), int64_t(const_name));
+#define HHVM_RC_DBL_SAME(const_name)                                 \
+  Native::registerConstant<KindOfDouble>(                            \
+    makeStaticString(#const_name), double(const_name));
+#define HHVM_RC_BOOL_SAME(const_name)                                \
+  Native::registerConstant<KindOfBoolean>(                           \
+    makeStaticString(#const_name), bool(const_name));
+
+#define HHVM_RCC_STR(class_name, const_name, const_value)            \
+  Native::registerClassConstant<KindOfString>(s_##class_name.get(),  \
+    makeStaticString(#const_name), makeStaticString(const_value));
+#define HHVM_RCC_INT(class_name, const_name, const_value)            \
+  Native::registerClassConstant<KindOfInt64>(s_##class_name.get(),   \
+    makeStaticString(#const_name), int64_t(const_value));
+#define HHVM_RCC_DBL(class_name, const_name, const_value)            \
+  Native::registerClassConstant<KindOfDouble>(s_##class_name.get(),  \
+    makeStaticString(#const_name), double(const_value));
+#define HHVM_RCC_BOOL(class_name, const_name, const_value)           \
+  Native::registerClassConstant<KindOfBoolean>(s_##class_name.get(), \
+    makeStaticString(#const_name), bool(const_value));
+
 namespace HPHP { namespace Native {
 //////////////////////////////////////////////////////////////////////////////
 
@@ -147,38 +199,19 @@ namespace HPHP { namespace Native {
 // using make_native-func-caller.php
 const int kMaxBuiltinArgs = 32;
 
-// t#3982283 - Our ARM code gen doesn't support stack args yet.
-// In fact, it only supports six of the eight register args.
-// Put a hard limit of five to account for the return register for now.
-constexpr int kMaxFCallBuiltinArgsARM = 5;
-
 inline int maxFCallBuiltinArgs() {
-#ifdef __AARCH64EL__
-  return kMaxFCallBuiltinArgsARM;
-#else
-  if (UNLIKELY(RuntimeOption::EvalSimulateARM)) {
-    return kMaxFCallBuiltinArgsARM;
-  }
   return kMaxBuiltinArgs;
-#endif
 }
 
-// t#3982283 - Our ARM code gen doesn't support FP args/returns yet.
 inline bool allowFCallBuiltinDoubles() {
-#ifdef __AARCH64EL__
-  return false;
-#else
-  if (UNLIKELY(RuntimeOption::EvalSimulateARM)) {
-    return false;
-  }
   return true;
-#endif
 }
 
 enum Attr {
   AttrNone = 0,
   AttrActRec = 1 << 0,
   AttrZendCompat = 1 << 1,
+  AttrOpCodeImpl = 1 << 2, //Methods whose implementation is in the emitter
 };
 
 /**
@@ -189,22 +222,175 @@ enum Attr {
  */
 bool coerceFCallArgs(TypedValue* args,
                      int32_t numArgs, int32_t numNonDefault,
-                     const Func* func);
+                     const Func* func, bool useStrictTypes);
 
 /**
  * Dispatches a call to the native function bound to <func>
  * If <ctx> is not nullptr, it is prepended to <args> when
  * calling.
  */
-template<bool usesDoubles, bool variadic>
+template<bool usesDoubles>
 void callFunc(const Func* func, void* ctx,
-              TypedValue* args, TypedValue& ret);
+              TypedValue* args, int32_t numNonDefault,
+              TypedValue& ret);
 
 /**
  * Extract the name used to invoke the function from the ActRec where name
  * maybe be stored in invName, or may include the classname (e.g. Class::func)
  */
 const StringData* getInvokeName(ActRec* ar);
+
+#define NATIVE_TYPES                                \
+  /* kind       arg type              return type */  \
+  X(Int32,      int32_t,              int32_t)        \
+  X(Int64,      int64_t,              int64_t)        \
+  X(Double,     double,               double)         \
+  X(Bool,       bool,                 bool)           \
+  X(Object,     const Object&,        Object)         \
+  X(String,     const String&,        String)         \
+  X(Array,      const Array&,         Array)          \
+  X(Resource,   const Resource&,      Resource)       \
+  X(Mixed,      const Variant&,       Variant)        \
+  X(ObjectArg,  ObjectArg,            ObjectArg)      \
+  X(StringArg,  StringArg,            StringArg)      \
+  X(ArrayArg,   ArrayArg,             ArrayArg)       \
+  X(ResourceArg,ResourceArg,          ResourceArg)    \
+  X(OutputArg,  OutputArg,            OutputArg)      \
+  X(ARReturn,   TypedValue*,          TypedValue*)    \
+  X(MixedTV,    TypedValue,           TypedValue)     \
+  X(MixedRef,   const VRefParamValue&,VRefParamValue) \
+  X(VarArgs,    ActRec*,              ActRec*)        \
+  X(This,       ObjectData*,          ObjectData*)    \
+  X(Class,      const Class*,         const Class*)   \
+  X(Void,       void,                 void)           \
+  X(Zend,       ZendFuncType,         ZendFuncType)   \
+  /**/
+
+enum class ZendFuncType {};
+
+template <class T>
+struct NativeArg {
+  /*
+   * If we define, or delete a copy/move constructor,
+   * the class will be passed by address, which would
+   * defeat the point.
+   * However, deleting a move assignment operator causes
+   * the copy constructor to be implicitly deleted, and
+   * its still passed in registers. tada!
+   */
+  NativeArg& operator=(NativeArg&&) = delete;
+  T* operator->()        { return m_px; }
+  T* get()               { return m_px; }
+  bool operator!() const { return m_px == nullptr; }
+  bool isNull() const    { return m_px == nullptr; }
+private:
+  T* m_px;
+};
+}
+
+using ObjectArg   = Native::NativeArg<ObjectData>;
+using StringArg   = Native::NativeArg<StringData>;
+using ArrayArg    = Native::NativeArg<ArrayData>;
+using ResourceArg = Native::NativeArg<ResourceData>;
+using OutputArg   = Native::NativeArg<RefData>;
+
+namespace Native {
+
+struct NativeSig {
+  enum class Type : uint8_t {
+#define X(name, ...) name,
+    NATIVE_TYPES
+#undef X
+  };
+
+  explicit NativeSig(ZendFuncType) : ret(Type::Zend) {}
+  NativeSig() : ret(Type::Void) {}
+
+  template<class Ret>
+  explicit NativeSig(Ret (*ptr)());
+
+  template<class Ret, class... Args>
+  explicit NativeSig(Ret (*ptr)(Args...));
+
+  std::string toString(const char* classname, const char* fname) const;
+
+  Type ret;
+  std::vector<Type> args;
+};
+
+namespace detail {
+
+template<class T> struct native_arg_type {};
+template<class T> struct native_ret_type {};
+template<class T> struct known_native_arg : std::false_type {};
+
+#define X(name, argTy, retTy)                                       \
+  template<> struct native_ret_type<retTy>                          \
+    : std::integral_constant<NativeSig::Type,NativeSig::Type::name> \
+  {};                                                               \
+  template<> struct native_arg_type<argTy>                          \
+    : std::integral_constant<NativeSig::Type,NativeSig::Type::name> \
+  {};                                                               \
+  template<> struct known_native_arg<argTy> : std::true_type {};
+
+NATIVE_TYPES
+
+#undef X
+
+template<class... Args> struct all_known_arg_type {};
+template<class A>       struct all_known_arg_type<A> : known_native_arg<A> {};
+
+template<class A, class... Rest>
+struct all_known_arg_type<A,Rest...>
+  : std::integral_constant<
+      bool,
+      known_native_arg<A>::value && all_known_arg_type<Rest...>::value
+    >
+{};
+
+template<class T> struct understandable_sig          : std::false_type {};
+template<class R> struct understandable_sig<R (*)()> : std::true_type {};
+template<class R, class... Args>
+struct understandable_sig<R (*)(Args...)>
+  : all_known_arg_type<Args...>
+{};
+
+template<class... Args>
+std::vector<NativeSig::Type> build_args() {
+  return {
+    native_arg_type<Args>::value...
+  };
+}
+
+}
+
+template<class Ret>
+NativeSig::NativeSig(Ret (*ptr)())
+  : ret(detail::native_ret_type<Ret>::value)
+{}
+
+template<class Ret, class... Args>
+NativeSig::NativeSig(Ret (*ptr)(Args...))
+  : ret(detail::native_ret_type<Ret>::value)
+  , args(detail::build_args<Args...>())
+{}
+
+#undef NATIVE_TYPES
+
+struct BuiltinFunctionInfo {
+  BuiltinFunctionInfo() : ptr(nullptr) {}
+
+  template<typename Func>
+  explicit BuiltinFunctionInfo(Func f)
+    : sig(f)
+    , ptr((BuiltinFunction)f)
+  {}
+
+  NativeSig sig;
+  BuiltinFunction ptr;
+};
+
+/////////////////////////////////////////////////////////////////////////////
 
 /**
  * Returns a specialization of either functionWrapper or methodWrapper
@@ -220,13 +406,18 @@ const StringData* getInvokeName(ActRec* ar);
  * ret c_class_ni_method(ObjectData* this_, type arg1, type arg2, ...)
  * ret c_class_ns_method(Class* self_, type arg1, type arg2, ...)
  */
-BuiltinFunction getWrapper(bool method, bool usesDoubles, bool variadic);
+void getFunctionPointers(const BuiltinFunctionInfo& info,
+                         int nativeAttrs,
+                         BuiltinFunction& bif,
+                         BuiltinFunction& nif);
 
 /**
  * Fallback method bound to declared methods with no matching
  * internal implementation.
  */
 TypedValue* unimplementedWrapper(ActRec* ar);
+
+/////////////////////////////////////////////////////////////////////////////
 
 /**
  * Case insensitive map of "name" to function pointer
@@ -236,42 +427,123 @@ TypedValue* unimplementedWrapper(ActRec* ar);
  * be a static string because this table is shared and outlives
  * individual requests.
  */
-typedef hphp_hash_map<const StringData*, BuiltinFunction,
+typedef hphp_hash_map<const StringData*, BuiltinFunctionInfo,
                       string_data_hash, string_data_isame> BuiltinFunctionMap;
 
 extern BuiltinFunctionMap s_builtinFunctions;
 
-template <class Fun>
-inline void registerBuiltinFunction(const char* name, Fun func) {
+template <class Fun> typename
+  std::enable_if<!std::is_member_function_pointer<Fun>::value, void>::type
+registerBuiltinFunction(const char* name, Fun func) {
   static_assert(
     std::is_pointer<Fun>::value &&
     std::is_function<typename std::remove_pointer<Fun>::type>::value,
-    "You can only register pointers to function.");
-  s_builtinFunctions[makeStaticString(name)] = (BuiltinFunction)func;
+    "You can only register pointers to functions."
+  );
+  static_assert(
+    detail::understandable_sig<Fun>::value,
+    "Arguments on builtin function were not understood types"
+  );
+  s_builtinFunctions[makeStaticString(name)] = BuiltinFunctionInfo(func);
 }
 
-template <class Fun>
-inline void registerBuiltinFunction(const String& name, Fun func) {
+template <class Fun> typename
+  std::enable_if<!std::is_member_function_pointer<Fun>::value, void>::type
+registerBuiltinFunction(const String& name, Fun func) {
   static_assert(
     std::is_pointer<Fun>::value &&
     std::is_function<typename std::remove_pointer<Fun>::type>::value,
-    "You can only register pointers to function.");
-  s_builtinFunctions[makeStaticString(name)] = (BuiltinFunction)func;
+    "You can only register pointers to functions."
+  );
+  static_assert(
+    detail::understandable_sig<Fun>::value,
+    "Arguments on builtin function were not understood types"
+  );
+  s_builtinFunctions[makeStaticString(name)] = BuiltinFunctionInfo(func);
 }
 
-inline BuiltinFunction GetBuiltinFunction(const StringData* fname,
-                                          const StringData* cname = nullptr,
-                                          bool isStatic = false) {
+template <class Fun> typename
+  std::enable_if<!std::is_member_function_pointer<Fun>::value, void>::type
+registerBuiltinZendFunction(const char* name, Fun func) {
+  static_assert(
+    std::is_pointer<Fun>::value &&
+    std::is_function<typename std::remove_pointer<Fun>::type>::value,
+    "You can only register pointers to functions."
+  );
+  auto bfi = BuiltinFunctionInfo();
+  bfi.ptr = (BuiltinFunction)func;
+  bfi.sig = NativeSig(ZendFuncType{});
+  s_builtinFunctions[makeStaticString(name)] = bfi;
+}
+
+template <class Fun> typename
+  std::enable_if<!std::is_member_function_pointer<Fun>::value, void>::type
+registerBuiltinZendFunction(const String& name, Fun func) {
+  static_assert(
+    std::is_pointer<Fun>::value &&
+    std::is_function<typename std::remove_pointer<Fun>::type>::value,
+    "You can only register pointers to function."
+  );
+  auto bfi = BuiltinFunctionInfo();
+  bfi.ptr = (BuiltinFunction)func;
+  bfi.sig = NativeSig(ZendFuncType{});
+  s_builtinFunctions[makeStaticString(name)] = bfi;
+}
+
+// Specializations of registerBuiltinFunction for taking
+// Pointers to Member Functions and making them look like HNI wrapper funcs
+//
+// This allows invoking object method calls directly,
+// but ONLY for specialized subclasses of ObjectData.
+//
+// This API is limited to: Closure, Asio, and Collections
+// Do not use it if you are not implementing one of these
+template<class Ret, class Cls> typename
+  std::enable_if<std::is_base_of<ObjectData, Cls>::value, void>::type
+registerBuiltinFunction(const char* name, Ret (Cls::*func)()) {
+  registerBuiltinFunction(name,
+                          (Ret (*)(ObjectData*))getMethodPtr(func));
+}
+
+template<class Ret, class Cls, class... Args> typename
+  std::enable_if<std::is_base_of<ObjectData, Cls>::value, void>::type
+registerBuiltinFunction(const char* name, Ret (Cls::*func)(Args...)) {
+  registerBuiltinFunction(name,
+                          (Ret (*)(ObjectData*, Args...))getMethodPtr(func));
+}
+
+template<class Ret, class Cls> typename
+  std::enable_if<std::is_base_of<ObjectData, Cls>::value, void>::type
+registerBuiltinFunction(const char* name, Ret (Cls::*func)() const) {
+  registerBuiltinFunction(name,
+                          (Ret (*)(ObjectData*))getMethodPtr(func));
+}
+template<class Ret, class Cls, class... Args> typename
+  std::enable_if<std::is_base_of<ObjectData, Cls>::value, void>::type
+registerBuiltinFunction(const char* name, Ret (Cls::*func)(Args...) const) {
+  registerBuiltinFunction(name,
+                          (Ret (*)(ObjectData*, Args...))getMethodPtr(func));
+}
+
+/////////////////////////////////////////////////////////////////////////////
+
+const char* checkTypeFunc(const NativeSig& sig,
+                          const TypeConstraint& retType,
+                          const Func* func);
+
+inline BuiltinFunctionInfo GetBuiltinFunction(const StringData* fname,
+                                              const StringData* cname = nullptr,
+                                              bool isStatic = false) {
   auto it = s_builtinFunctions.find((cname == nullptr) ? fname :
                     (String(const_cast<StringData*>(cname)) +
                     (isStatic ? "::" : "->") +
                      String(const_cast<StringData*>(fname))).get());
-  return (it == s_builtinFunctions.end()) ? nullptr : it->second;
+  return (it == s_builtinFunctions.end()) ? BuiltinFunctionInfo() : it->second;
 }
 
-inline BuiltinFunction GetBuiltinFunction(const char* fname,
-                                          const char* cname = nullptr,
-                                          bool isStatic = false) {
+inline BuiltinFunctionInfo GetBuiltinFunction(const char* fname,
+                                              const char* cname = nullptr,
+                                              bool isStatic = false) {
   return GetBuiltinFunction(makeStaticString(fname),
                     cname ? makeStaticString(cname) : nullptr,
                     isStatic);
@@ -311,6 +583,9 @@ inline
 const ConstantMap& getConstants() {
   return s_constant_map;
 }
+
+using NativeConstantCallback = const Variant& (*)();
+bool registerConstant(const StringData*, NativeConstantCallback);
 
 //////////////////////////////////////////////////////////////////////////////
 // Class Constants
@@ -361,4 +636,4 @@ const ConstantMap* getClassConstants(const StringData* clsName) {
 //////////////////////////////////////////////////////////////////////////////
 }} // namespace HPHP::Native
 
-#endif // _incl_HPHP_RUNTIME_VM_NATIVE_H
+#endif

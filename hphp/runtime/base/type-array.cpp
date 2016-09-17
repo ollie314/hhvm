@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,15 +16,16 @@
 
 #include "hphp/runtime/base/type-array.h"
 
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/apc-local-array.h"
 #include "hphp/runtime/base/array-util.h"
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/comparisons.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
+#include "hphp/runtime/base/packed-array.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/variable-serializer.h"
@@ -45,19 +46,20 @@ namespace HPHP {
 const Array null_array{};
 const Array empty_array_ref{staticEmptyArray()};
 const StaticString array_string("Array");
+const StaticString vec_string("Vec");
+const StaticString dict_string("Dict");
+const StaticString keyset_string("Keyset");
 
 void Array::setEvalScalar() const {
   Array* thisPtr = const_cast<Array*>(this);
-  if (!m_px) *thisPtr = ArrayData::Create();
-  if (!m_px->isStatic()) {
-    ArrayData *ad = ArrayData::GetScalarArray(m_px);
-    *thisPtr = ad;
+  if (!m_arr) thisPtr->m_arr = Ptr::attach(ArrayData::Create());
+  if (!m_arr->isStatic()) {
+    thisPtr->m_arr = ArrayData::GetScalarArray(get());
   }
 }
 
 void Array::compileTimeAssertions() {
-  static_assert(sizeof(Array) == sizeof(ArrayBase), "Fix this.");
-  static_assert(offsetof(Array, m_px) == kExpectedMPxOffset, "");
+  static_assert(sizeof(Array) == sizeof(req::ptr<ArrayData>), "Fix this.");
 }
 
 void ArrNR::compileTimeAssertions() {
@@ -68,7 +70,13 @@ void ArrNR::compileTimeAssertions() {
 // constructors
 
 Array Array::Create(const Variant& name, const Variant& var) {
-  return Array(ArrayData::Create(name.isString() ? name.toKey() : name, var));
+  return Array{
+    ArrayData::Create(
+      name.isString() ? name.toKey(staticEmptyArray()) : name,
+      var
+    ),
+    NoIncRef{}
+  };
 }
 
 Array::~Array() {}
@@ -76,24 +84,14 @@ Array::~Array() {}
 ///////////////////////////////////////////////////////////////////////////////
 // operators
 
-Array &Array::operator=(ArrayData *data) {
-  ArrayBase::operator=(data);
-  return *this;
-}
-
-Array &Array::operator=(const Array& arr) {
-  ArrayBase::operator=(arr.m_px);
-  return *this;
-}
-
 Array &Array::operator=(const Variant& var) {
   return operator=(var.toArray());
 }
 
 // Move assign
 Array& Array::operator=(Variant&& v) {
-  if (v.asTypedValue()->m_type == KindOfArray) {
-    m_px = v.asTypedValue()->m_data.parr;
+  if (isArrayLikeType(v.asTypedValue()->m_type)) {
+    m_arr = req::ptr<ArrayData>::attach(v.asTypedValue()->m_data.parr);
     v.asTypedValue()->m_type = KindOfNull;
   } else {
     *this = const_cast<const Variant&>(v);
@@ -102,11 +100,11 @@ Array& Array::operator=(Variant&& v) {
 }
 
 Array Array::operator+(ArrayData *data) const {
-  return Array(m_px).plusImpl(data);
+  return Array(*this).plusImpl(data);
 }
 
 Array Array::operator+(const Array& arr) const {
-  return Array(m_px).plusImpl(arr.m_px);
+  return Array(*this).plusImpl(arr.get());
 }
 
 Array &Array::operator+=(ArrayData *data) {
@@ -120,14 +118,14 @@ static void throw_bad_array_merge() {
 }
 
 Array &Array::operator+=(const Variant& var) {
-  if (var.getType() != KindOfArray) {
+  if (!var.isArray()) {
     throw_bad_array_merge();
   }
   return operator+=(var.getArrayData());
 }
 
 Array &Array::operator+=(const Array& arr) {
-  return plusImpl(arr.m_px);
+  return plusImpl(arr.get());
 }
 
 Array Array::diff(const Variant& array, bool by_key, bool by_value,
@@ -290,26 +288,40 @@ Array Array::diffImpl(const Array& array, bool by_key, bool by_value, bool match
 // manipulations
 
 String Array::toString() const {
-  if (m_px == nullptr) return empty_string();
-  raise_notice("Array to string conversion");
-  return array_string;
+  if (m_arr == nullptr) return empty_string();
+  if (m_arr->isPHPArray()) {
+    raise_notice("Array to string conversion");
+    return array_string;
+  }
+  assert(m_arr->isHackArray());
+  if (m_arr->isVecArray()) {
+    raise_notice("Vec to string conversion");
+    return vec_string;
+  }
+  if (m_arr->isDict()) {
+    raise_notice("Dict to string conversion");
+    return dict_string;
+  }
+  assert(m_arr->isKeyset());
+  raise_notice("Keyset to string conversion");
+  return keyset_string;
 }
 
 Array &Array::merge(const Array& arr) {
-  return mergeImpl(arr.m_px);
+  return mergeImpl(arr.get());
 }
 
 Array &Array::plusImpl(ArrayData *data) {
-  if (m_px == nullptr || data == nullptr) {
+  if (m_arr == nullptr || data == nullptr) {
     throw_bad_array_merge();
   }
   if (!data->empty()) {
-    if (m_px->empty()) {
-      ArrayBase::operator=(data);
-    } else if (m_px != data) {
-      auto const escalated = m_px->plusEq(data);
-      if (escalated != m_px) {
-        ArrayBase::operator=(Array::attach(escalated));
+    if (m_arr->empty()) {
+      m_arr = data;
+    } else if (m_arr != data) {
+      auto const escalated = m_arr->plusEq(data);
+      if (escalated != m_arr) {
+        m_arr = Ptr::attach(escalated);
       }
     }
   }
@@ -317,13 +329,14 @@ Array &Array::plusImpl(ArrayData *data) {
 }
 
 Array &Array::mergeImpl(ArrayData *data) {
-  if (m_px == nullptr || data == nullptr) {
+  if (m_arr == nullptr || data == nullptr) {
     throw_bad_array_merge();
   }
   if (!data->empty()) {
-    ArrayBase::operator=(Array::attach(m_px->merge(data)));
+    auto const escalated = m_arr->merge(data);
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   } else {
-    m_px->renumber();
+    m_arr->renumber();
   }
   return *this;
 }
@@ -332,11 +345,24 @@ Array &Array::mergeImpl(ArrayData *data) {
 // comparisons
 
 bool Array::same(const Array& v2) const {
-  if (m_px == nullptr && v2.get() == nullptr) return true;
-  if (m_px && v2.get()) {
-    return m_px->equal(v2.get(), true);
+  if (!m_arr) return !v2.get();
+  if (m_arr->isPHPArray()) {
+    if (UNLIKELY(!v2.isPHPArray())) return false;
+    return ArrayData::Same(m_arr.get(), v2.get());
   }
-  return false;
+  if (m_arr->isVecArray()) {
+    if (UNLIKELY(!v2.isVecArray())) return false;
+    return PackedArray::VecSame(m_arr.get(), v2.get());
+  }
+  if (m_arr->isDict()) {
+    if (UNLIKELY(!v2.isDict())) return false;
+    return MixedArray::DictSame(m_arr.get(), v2.get());
+  }
+  if (m_arr->isKeyset()) {
+    if (UNLIKELY(!v2.isKeyset())) return false;
+    return SetArray::Same(m_arr.get(), v2.get());
+  }
+  not_reached();
 }
 
 bool Array::same(const Object& v2) const {
@@ -344,185 +370,273 @@ bool Array::same(const Object& v2) const {
 }
 
 bool Array::equal(const Array& v2) const {
-  if (m_px == nullptr || v2.get() == nullptr) {
-    return HPHP::equal(toBoolean(), v2.toBoolean());
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2.isPHPArray())) return false;
+    if (m_arr == nullptr || v2.get() == nullptr) {
+      return HPHP::equal(toBoolean(), v2.toBoolean());
+    }
+    return ArrayData::Equal(m_arr.get(), v2.get());
   }
-  return m_px->equal(v2.get(), false);
+  if (m_arr->isVecArray()) {
+    if (UNLIKELY(!v2.isVecArray())) return false;
+    return PackedArray::VecEqual(m_arr.get(), v2.get());
+  }
+  if (m_arr->isDict()) {
+    if (UNLIKELY(!v2.isDict())) return false;
+    return MixedArray::DictEqual(m_arr.get(), v2.get());
+  }
+  if (m_arr->isKeyset()) {
+    if (UNLIKELY(!v2.isKeyset())) return false;
+    return SetArray::Equal(m_arr.get(), v2.get());
+  }
+  not_reached();
 }
 
 bool Array::equal(const Object& v2) const {
-  if (m_px == nullptr || v2.get() == nullptr) {
-    return HPHP::equal(toBoolean(), v2.toBoolean());
+  if (LIKELY(isPHPArray())) {
+    if (m_arr == nullptr || v2.get() == nullptr) {
+      return HPHP::equal(toBoolean(), v2.toBoolean());
+    }
   }
   return false;
 }
 
 bool Array::less(const Array& v2, bool flip /* = false */) const {
-  if (m_px == nullptr || v2.get() == nullptr) {
-    return HPHP::less(toBoolean(), v2.toBoolean());
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2.isPHPArray())) {
+      if (v2.isVecArray()) throw_vec_compare_exception();
+      if (v2.isDict()) throw_dict_compare_exception();
+      if (v2.isKeyset()) throw_keyset_compare_exception();
+      not_reached();
+    }
+    if (m_arr == nullptr || v2.get() == nullptr) {
+      return HPHP::less(toBoolean(), v2.toBoolean());
+    }
+    return flip
+      ? ArrayData::Gt(v2.get(), m_arr.get())
+      : ArrayData::Lt(m_arr.get(), v2.get());
   }
-  if (flip) {
-    return v2.get()->compare(m_px) > 0;
+  if (m_arr->isVecArray()) {
+    if (UNLIKELY(!v2.isVecArray())) throw_vec_compare_exception();
+    return flip
+      ? PackedArray::VecGt(v2.get(), m_arr.get())
+      : PackedArray::VecLt(m_arr.get(), v2.get());
   }
-  return m_px->compare(v2.get()) < 0;
+  if (m_arr->isDict()) throw_dict_compare_exception();
+  if (m_arr->isKeyset()) throw_keyset_compare_exception();
+  not_reached();
 }
 
 bool Array::less(const Object& v2) const {
-  if (m_px == nullptr || v2.get() == nullptr) {
-    return HPHP::less(toBoolean(), v2.toBoolean());
+  if (LIKELY(isPHPArray())) {
+    if (m_arr == nullptr || v2.get() == nullptr) {
+      return HPHP::less(toBoolean(), v2.toBoolean());
+    }
+    check_collection_compare(v2.get());
+    return true;
   }
-  check_collection_compare(v2.get());
-  return true;
+  if (m_arr->isVecArray()) throw_vec_compare_exception();
+  if (m_arr->isDict()) throw_dict_compare_exception();
+  if (m_arr->isKeyset()) throw_keyset_compare_exception();
+  not_reached();
 }
 
 bool Array::less(const Variant& v2) const {
-  if (m_px == nullptr || v2.isNull()) {
-    return HPHP::less(toBoolean(), v2.toBoolean());
-  }
-  if (v2.getType() == KindOfArray) {
-    return m_px->compare(v2.toArray().get()) < 0;
+  if (isPHPArray()) {
+    if (m_arr == nullptr || v2.isNull()) {
+      return HPHP::less(toBoolean(), v2.toBoolean());
+    }
   }
   return HPHP::more(v2, *this);
 }
 
 bool Array::more(const Array& v2, bool flip /* = true */) const {
-  if (m_px == nullptr || v2.get() == nullptr) {
-    return HPHP::more(toBoolean(), v2.toBoolean());
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2.isPHPArray())) {
+      if (v2.isVecArray()) throw_vec_compare_exception();
+      if (v2.isDict()) throw_dict_compare_exception();
+      if (v2.isKeyset()) throw_keyset_compare_exception();
+      not_reached();
+    }
+    if (m_arr == nullptr || v2.get() == nullptr) {
+      return HPHP::more(toBoolean(), v2.toBoolean());
+    }
+    return flip
+      ? ArrayData::Lt(v2.get(), m_arr.get())
+      : ArrayData::Gt(m_arr.get(), v2.get());
   }
-  if (flip) {
-    return v2.get()->compare(m_px) < 0;
+  if (m_arr->isVecArray()) {
+    if (UNLIKELY(!v2.isVecArray())) throw_vec_compare_exception();
+    return flip
+      ? PackedArray::VecGt(v2.get(), m_arr.get())
+      : PackedArray::VecLt(m_arr.get(), v2.get());
   }
-  return m_px->compare(v2.get()) > 0;
+  if (m_arr->isDict()) throw_dict_compare_exception();
+  if (m_arr->isKeyset()) throw_keyset_compare_exception();
+  not_reached();
 }
 
 bool Array::more(const Object& v2) const {
-  if (m_px == nullptr || v2.get() == nullptr) {
-    return HPHP::more(toBoolean(), v2.toBoolean());
+  if (LIKELY(isPHPArray())) {
+    if (m_arr == nullptr || v2.get() == nullptr) {
+      return HPHP::more(toBoolean(), v2.toBoolean());
+    }
+    check_collection_compare(v2.get());
+    return false;
   }
-  check_collection_compare(v2.get());
-  return false;
+  if (isVecArray()) throw_vec_compare_exception();
+  if (isDict()) throw_dict_compare_exception();
+  if (isKeyset()) throw_keyset_compare_exception();
+  not_reached();
 }
 
 bool Array::more(const Variant& v2) const {
-  if (m_px == nullptr || v2.isNull()) {
-    return HPHP::more(toBoolean(), v2.toBoolean());
-  }
-  if (v2.getType() == KindOfArray) {
-    return v2.toArray().get()->compare(m_px) < 0;
+  if (isPHPArray()) {
+    if (m_arr == nullptr || v2.isNull()) {
+      return HPHP::more(toBoolean(), v2.toBoolean());
+    }
   }
   return HPHP::less(v2, *this);
+}
+
+int Array::compare(const Array& v2, bool flip /* = false */) const {
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2.isPHPArray())) {
+      if (v2.isVecArray()) throw_vec_compare_exception();
+      if (v2.isDict()) throw_dict_compare_exception();
+      if (v2.isKeyset()) throw_keyset_compare_exception();
+      not_reached();
+    }
+    if (m_arr == nullptr || v2.get() == nullptr) {
+      return HPHP::compare(toBoolean(), v2.toBoolean());
+    }
+    return flip
+      ? -ArrayData::Compare(v2.get(), m_arr.get())
+      : ArrayData::Compare(m_arr.get(), v2.get());
+  }
+  if (m_arr->isVecArray()) {
+    if (UNLIKELY(!v2.isVecArray())) throw_vec_compare_exception();
+    return flip
+      ? -PackedArray::VecCmp(v2.get(), m_arr.get())
+      : PackedArray::VecCmp(m_arr.get(), v2.get());
+  }
+  if (m_arr->isDict()) throw_dict_compare_exception();
+  if (m_arr->isKeyset()) throw_keyset_compare_exception();
+  not_reached();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // iterator
 
 ArrayIter Array::begin(const String& context /* = null_string */) const {
-  return ArrayIter(m_px);
+  return ArrayIter(*this);
 }
 
 void Array::escalate() {
-  if (m_px) ArrayBase::operator=(m_px->escalate());
+  if (m_arr) {
+    auto escalated = m_arr->escalate();
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // offset functions
 
-Variant Array::rvalAt(int key, ACCESSPARAMS_IMPL) const {
-  if (m_px) return m_px->get((int64_t)key, flags & AccessFlags::Error);
+Variant Array::rvalAt(int key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get((int64_t)key, any(flags & AccessFlags::Error));
   return init_null();
 }
 
-const Variant& Array::rvalAtRef(int key, ACCESSPARAMS_IMPL) const {
-  if (m_px) return m_px->get((int64_t)key, flags & AccessFlags::Error);
+const Variant& Array::rvalAtRef(int key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get((int64_t)key, any(flags & AccessFlags::Error));
   return null_variant;
 }
 
-Variant Array::rvalAt(int64_t key, ACCESSPARAMS_IMPL) const {
-  if (m_px) return m_px->get(key, flags & AccessFlags::Error);
+Variant Array::rvalAt(int64_t key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get(key, any(flags & AccessFlags::Error));
   return init_null();
 }
 
-const Variant& Array::rvalAtRef(int64_t key, ACCESSPARAMS_IMPL) const {
-  if (m_px) return m_px->get(key, flags & AccessFlags::Error);
+const Variant& Array::rvalAtRef(int64_t key, AccessFlags flags) const {
+  if (m_arr) return m_arr->get(key, any(flags & AccessFlags::Error));
   return null_variant;
 }
 
-const Variant& Array::rvalAtRef(const String& key, ACCESSPARAMS_IMPL) const {
-  if (m_px) {
-    bool error = flags & AccessFlags::Error;
-    if (flags & AccessFlags::Key) return m_px->get(key, error);
-    if (key.isNull()) return m_px->get(staticEmptyString(), error);
+const Variant& Array::rvalAtRef(const String& key, AccessFlags flags) const {
+  if (m_arr) {
+    auto const error = any(flags & AccessFlags::Error);
+    if (any(flags & AccessFlags::Key)) return m_arr->get(key, error);
+    if (key.isNull()) {
+      if (!useWeakKeys()) {
+        throwInvalidArrayKeyException(null_variant.asTypedValue(), m_arr.get());
+      }
+      return m_arr->get(staticEmptyString(), error);
+    }
     int64_t n;
-    if (!key.get()->isStrictlyInteger(n)) {
-      if (UNLIKELY(m_px->isVPackedArrayOrIntMapArray())) {
-        if (m_px->isVPackedArray()) {
-          PackedArray::warnUsage(PackedArray::Reason::kGetStr);
-        } else {
-          MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                                ArrayData::kIntMapKind);
-        }
-      }
-      return m_px->get(key, error);
+    if (!m_arr->convertKey(key.get(), n)) {
+      return m_arr->get(key, error);
     } else {
-      if (UNLIKELY(m_px->isVPackedArray())) {
-        PackedArray::warnUsage(PackedArray::Reason::kGetStr);
-      }
-      return m_px->get(n, error);
+      return m_arr->get(n, error);
     }
   }
   return null_variant;
 }
 
-Variant Array::rvalAt(const String& key, ACCESSPARAMS_IMPL) const {
+Variant Array::rvalAt(const String& key, AccessFlags flags) const {
   return Array::rvalAtRef(key, flags);
 }
 
-const Variant& Array::rvalAtRef(const Variant& key, ACCESSPARAMS_IMPL) const {
-  if (!m_px) return null_variant;
+const Variant& Array::rvalAtRef(const Variant& key, AccessFlags flags) const {
+  if (!m_arr) return null_variant;
+  auto bad_key = [&] {
+    if (!useWeakKeys()) {
+      throwInvalidArrayKeyException(key.asTypedValue(), m_arr.get());
+    }
+  };
   switch (key.getRawType()) {
     case KindOfUninit:
     case KindOfNull:
-      return m_px->get(staticEmptyString(), flags & AccessFlags::Error);
+      bad_key();
+      return m_arr->get(staticEmptyString(), any(flags & AccessFlags::Error));
 
     case KindOfBoolean:
+      bad_key();
     case KindOfInt64:
-      return m_px->get(key.asTypedValue()->m_data.num,
-                       flags & AccessFlags::Error);
+      return m_arr->get(key.asTypedValue()->m_data.num,
+                        any(flags & AccessFlags::Error));
 
     case KindOfDouble:
-      return m_px->get((int64_t)key.asTypedValue()->m_data.dbl,
-                       flags & AccessFlags::Error);
+      bad_key();
+      return m_arr->get((int64_t)key.asTypedValue()->m_data.dbl,
+                        any(flags & AccessFlags::Error));
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       {
         int64_t n;
-        if (!(flags & AccessFlags::Key) &&
-            key.asTypedValue()->m_data.pstr->isStrictlyInteger(n)) {
-          if (UNLIKELY(m_px->isVPackedArrayOrIntMapArray())) {
-            if (m_px->isVPackedArray()) {
-              PackedArray::warnUsage(PackedArray::Reason::kGetStr);
-            } else {
-              MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                                    ArrayData::kIntMapKind);
-            }
-          }
-
-          return m_px->get(n, flags & AccessFlags::Error);
+        if (!any(flags & AccessFlags::Key) &&
+            m_arr->convertKey(key.asTypedValue()->m_data.pstr, n)) {
+          return m_arr->get(n, any(flags & AccessFlags::Error));
         }
       }
-      if (UNLIKELY(m_px->isVPackedArray())) {
-        PackedArray::warnUsage(PackedArray::Reason::kGetStr);
-      }
-      return m_px->get(key.asCStrRef(), flags & AccessFlags::Error);
+      return m_arr->get(key.asCStrRef(), any(flags & AccessFlags::Error));
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
+      bad_key();
       throw_bad_type_exception("Invalid type used as key");
       return null_variant;
 
     case KindOfResource:
-      return m_px->get(key.toInt64(), flags & AccessFlags::Error);
+      bad_key();
+      return m_arr->get(key.toInt64(), any(flags & AccessFlags::Error));
 
     case KindOfRef:
       return rvalAtRef(*(key.asTypedValue()->m_data.pref->var()), flags);
@@ -533,40 +647,52 @@ const Variant& Array::rvalAtRef(const Variant& key, ACCESSPARAMS_IMPL) const {
   not_reached();
 }
 
-Variant Array::rvalAt(const Variant& key, ACCESSPARAMS_IMPL) const {
+Variant Array::rvalAt(const Variant& key, AccessFlags flags) const {
   return Array::rvalAtRef(key, flags);
 }
 
 Variant &Array::lvalAt() {
-  if (!m_px) ArrayBase::operator=(ArrayData::Create());
+  if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   Variant *ret = nullptr;
-  ArrayData *arr = m_px;
-  ArrayData *escalated = arr->lvalNew(ret, arr->hasMultipleRefs());
-  if (escalated != arr) ArrayBase::operator=(escalated);
+  ArrayData *escalated = m_arr->lvalNew(ret, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   assert(ret);
   return *ret;
 }
 
 Variant &Array::lvalAtRef() {
-  if (!m_px) ArrayBase::operator=(ArrayData::Create());
+  if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   Variant *ret = nullptr;
-  ArrayData *arr = m_px;
-  ArrayData *escalated = arr->lvalNewRef(ret, arr->hasMultipleRefs());
-  if (escalated != arr) ArrayBase::operator=(escalated);
+  ArrayData *escalated = m_arr->lvalNewRef(ret, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   assert(ret);
   return *ret;
 }
 
-Variant &Array::lvalAt(const String& key, ACCESSPARAMS_IMPL) {
-  if (flags & AccessFlags::Key) return lvalAtImpl(key, flags);
-  return lvalAtImpl(key.toKey(), flags);
+Variant &Array::lvalAt(const String& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtImpl(key, flags);
+  return lvalAtImpl(convertKey(key), flags);
 }
 
-Variant &Array::lvalAt(const Variant& key, ACCESSPARAMS_IMPL) {
-  if (flags & AccessFlags::Key) return lvalAtImpl(key, flags);
-  VarNR k(key.toKey());
+Variant &Array::lvalAt(const Variant& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtImpl(key, flags);
+  VarNR k(convertKey(key));
   if (!k.isNull()) {
     return lvalAtImpl(k, flags);
+  }
+  return lvalBlackHole();
+}
+
+Variant &Array::lvalAtRef(const String& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtRefImpl(key, flags);
+  return lvalAtRefImpl(convertKey(key), flags);
+}
+
+Variant &Array::lvalAtRef(const Variant& key, AccessFlags flags) {
+  if (any(flags & AccessFlags::Key)) return lvalAtRefImpl(key, flags);
+  VarNR k(convertKey(key));
+  if (!k.isNull()) {
+    return lvalAtRefImpl(k, flags);
   }
   return lvalBlackHole();
 }
@@ -574,37 +700,34 @@ Variant &Array::lvalAt(const Variant& key, ACCESSPARAMS_IMPL) {
 template<typename T>
 ALWAYS_INLINE
 void Array::setImpl(const T &key, const Variant& v) {
-  if (!m_px) {
-    ArrayData *data = ArrayData::Create(key, v);
-    ArrayBase::operator=(data);
+  if (!m_arr) {
+    m_arr = Ptr::attach(ArrayData::Create(key, v));
   } else {
-    ArrayData *escalated = m_px->set(key, v, (m_px->hasMultipleRefs()));
-    if (escalated != m_px) ArrayBase::operator=(escalated);
+    ArrayData *escalated = m_arr->set(key, v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
 }
 
 template<typename T>
 ALWAYS_INLINE
 void Array::setRefImpl(const T &key, Variant& v) {
-  if (!m_px) {
-    ArrayData *data = ArrayData::CreateRef(key, v);
-    ArrayBase::operator=(data);
+  if (!m_arr) {
+    m_arr = Ptr::attach(ArrayData::CreateRef(key, v));
   } else {
     escalate();
-    ArrayData *escalated = m_px->setRef(key, v, (m_px->hasMultipleRefs()));
-    if (escalated != m_px) ArrayBase::operator=(escalated);
+    ArrayData *escalated = m_arr->setRef(key, v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
 }
 
 template<typename T>
 ALWAYS_INLINE
 void Array::addImpl(const T &key, const Variant& v) {
-  if (!m_px) {
-    ArrayData *data = ArrayData::Create(key, v);
-    ArrayBase::operator=(data);
+  if (!m_arr) {
+    m_arr = Ptr::attach(ArrayData::Create(key, v));
   } else {
-    ArrayData *escalated = m_px->add(key, v, (m_px->hasMultipleRefs()));
-    if (escalated != m_px) ArrayBase::operator=(escalated);
+    ArrayData *escalated = m_arr->add(key, v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
 }
 
@@ -614,13 +737,13 @@ void Array::set(int64_t key, const Variant& v) {
 
 void Array::set(const String& key, const Variant& v, bool isKey /* = false */) {
   if (isKey) return setImpl(key, v);
-  setImpl(key.toKey(), v);
+  setImpl(convertKey(key), v);
 }
 
 void Array::set(const Variant& key, const Variant& v, bool isKey /* = false */) {
   if (key.getRawType() == KindOfInt64) return setImpl(key.getNumData(), v);
   if (isKey) return setImpl(key, v);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) setImpl(k, v);
 }
 
@@ -630,13 +753,13 @@ void Array::setRef(int64_t key, Variant& v) {
 
 void Array::setRef(const String& key, Variant& v, bool isKey /* = false */) {
   if (isKey) return setRefImpl(key, v);
-  setRefImpl(key.toKey(), v);
+  setRefImpl(convertKey(key), v);
 }
 
 void Array::setRef(const Variant& key, Variant& v, bool isKey /* = false */) {
   if (key.getRawType() == KindOfInt64) return setRefImpl(key.getNumData(), v);
   if (isKey) return setRefImpl(key, v);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) setRefImpl<Variant>(k, v);
 }
 
@@ -646,13 +769,13 @@ void Array::add(int64_t key, const Variant& v) {
 
 void Array::add(const String& key, const Variant& v, bool isKey /* = false */) {
   if (isKey) return addImpl(key, v);
-  addImpl(key.toKey(), v);
+  addImpl(convertKey(key), v);
 }
 
 void Array::add(const Variant& key, const Variant& v, bool isKey /* = false */) {
   if (key.getRawType() == KindOfInt64) return addImpl(key.getNumData(), v);
   if (isKey) return addImpl(key, v);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) addImpl(k, v);
 }
 
@@ -669,16 +792,16 @@ Array Array::values() const {
 
 bool Array::exists(const String& key, bool isKey /* = false */) const {
   if (isKey) return existsImpl(key);
-  return existsImpl(key.toKey());
+  return existsImpl(convertKey(key));
 }
 
 bool Array::exists(const Variant& key, bool isKey /* = false */) const {
-  if (IS_BOOL_TYPE(key.getType()) ||
-      IS_INT_TYPE(key.getType())) {
+  if (isBoolType(key.getType()) ||
+      isIntType(key.getType())) {
     return existsImpl(key.toInt64());
   }
   if (isKey) return existsImpl(key);
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) {
     return existsImpl(k);
   }
@@ -689,132 +812,81 @@ void Array::remove(const String& key, bool isString /* = false */) {
   if (isString) {
     removeImpl(key);
   } else {
-    removeImpl(key.toKey());
+    removeImpl(convertKey(key));
   }
 }
 
 void Array::remove(const Variant& key) {
-  if (IS_BOOL_TYPE(key.getType()) ||
-      IS_INT_TYPE(key.getType())) {
+  if (isBoolType(key.getType()) ||
+      isIntType(key.getType())) {
     removeImpl(key.toInt64());
     return;
   }
-  VarNR k(key.toKey());
+  VarNR k(convertKey(key));
   if (!k.isNull()) {
     removeImpl(k);
   }
 }
 
 const Variant& Array::append(const Variant& v) {
-  if (!m_px) {
-    ArrayBase::operator=(ArrayData::Create(v));
-  } else {
-    ArrayData *escalated = m_px->append(v, (m_px->hasMultipleRefs()));
-    if (escalated != m_px) ArrayBase::operator=(escalated);
-  }
+  if (!m_arr) operator=(Create());
+  assertx(m_arr);
+
+  auto cell = *v.asCell();
+  if (UNLIKELY(cell.m_type == KindOfUninit)) cell = make_tv<KindOfNull>();
+
+  auto escalated = m_arr->append(cell, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
+
   return v;
 }
 
 const Variant& Array::appendRef(Variant& v) {
-  if (!m_px) {
-    ArrayBase::operator=(ArrayData::CreateRef(v));
+  if (!m_arr) {
+    m_arr = Ptr::attach(ArrayData::CreateRef(v));
   } else {
-    ArrayData *escalated = m_px->appendRef(v, (m_px->hasMultipleRefs()));
-    if (escalated != m_px) ArrayBase::operator=(escalated);
+    ArrayData *escalated = m_arr->appendRef(v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
   return v;
 }
 
 const Variant& Array::appendWithRef(const Variant& v) {
-  if (!m_px) ArrayBase::operator=(ArrayData::Create());
-  ArrayData *escalated = m_px->appendWithRef(v, (m_px->hasMultipleRefs()));
-  if (escalated != m_px) ArrayBase::operator=(escalated);
+  if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
+  ArrayData *escalated = m_arr->appendWithRef(v, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   return v;
 }
 
 Variant Array::pop() {
-  if (m_px) {
+  if (m_arr) {
     Variant ret;
-    ArrayData *newarr = m_px->pop(ret);
-    if (newarr != m_px) ArrayBase::operator=(newarr);
+    ArrayData *newarr = m_arr->pop(ret);
+    if (newarr != m_arr) m_arr = Ptr::attach(newarr);
     return ret;
   }
   return init_null();
 }
 
 Variant Array::dequeue() {
-  if (m_px) {
+  if (m_arr) {
     Variant ret;
-    ArrayData *newarr = m_px->dequeue(ret);
-    if (newarr != m_px) ArrayBase::operator=(newarr);
+    ArrayData *newarr = m_arr->dequeue(ret);
+    if (newarr != m_arr) m_arr = Ptr::attach(newarr);
     return ret;
   }
   return init_null();
 }
 
 void Array::prepend(const Variant& v) {
-  if (!m_px) operator=(Create());
-  assert(m_px);
-  ArrayData *newarr = m_px->prepend(v, (m_px->hasMultipleRefs()));
-  if (newarr != m_px) ArrayBase::operator=(newarr);
-}
+  if (!m_arr) operator=(Create());
+  assertx(m_arr);
 
-///////////////////////////////////////////////////////////////////////////////
-// output functions
+  auto cell = *v.asCell();
+  if (UNLIKELY(cell.m_type == KindOfUninit)) cell = make_tv<KindOfNull>();
 
-void Array::serialize(VariableSerializer *serializer,
-                      bool isObject /* = false */) const {
-  if (m_px) {
-    m_px->serialize(serializer, isObject);
-  } else {
-    serializer->writeNull();
-  }
-}
-
-void Array::unserialize(VariableUnserializer *uns) {
-  int64_t size = uns->readInt();
-  char sep = uns->readChar();
-  if (sep != ':') {
-    throw Exception("Expected ':' but got '%c'", sep);
-  }
-  sep = uns->readChar();
-  if (sep != '{') {
-    throw Exception("Expected '{' but got '%c'", sep);
-  }
-
-  if (size == 0) {
-    operator=(Create());
-  } else {
-    auto const cmret = computeCapAndMask(size);
-    auto const allocsz = computeAllocBytes(cmret.first, cmret.second);
-
-    // For large arrays, do a naive pre-check for OOM.
-    if (UNLIKELY(allocsz > kMaxSmartSize && MM().preAllocOOM(allocsz))) {
-      check_request_surprise_unlikely();
-    }
-
-    // Pre-allocate an ArrayData of the given size, to avoid escalation in the
-    // middle, which breaks references.
-    operator=(ArrayInit(size, ArrayInit::Mixed{}).toArray());
-    for (int64_t i = 0; i < size; i++) {
-      Variant key(uns->unserializeKey());
-      if (!key.isString() && !key.isInteger()) {
-        throw Exception("Invalid key");
-      }
-      // for apc, we know the key can't exist, but ignore that optimization
-      assert(uns->getType() != VariableUnserializer::Type::APCSerialize ||
-             !exists(key, true));
-      Variant &value = lvalAt(key, AccessFlags::Key);
-      value.unserialize(uns);
-    }
-  }
-
-  check_request_surprise_unlikely();
-
-  sep = uns->readChar();
-  if (sep != '}') {
-    throw Exception("Expected '}' but got '%c'", sep);
-  }
+  auto escalated = m_arr->prepend(cell, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -897,9 +969,9 @@ void Array::sort(PFUNC_CMP cmp_func, bool by_key, bool renumber,
   for (int i = 0; i < count; i++) {
     ssize_t pos = opaque.positions[indices[i]];
     if (renumber) {
-      sorted.appendWithRef(m_px->getValueRef(pos));
+      sorted.appendWithRef(m_arr->getValueRef(pos));
     } else {
-      sorted.setWithRef(m_px->getKey(pos), m_px->getValueRef(pos), true);
+      sorted.setWithRef(m_arr->getKey(pos), m_arr->getValueRef(pos), true);
     }
   }
   operator=(sorted);
@@ -946,11 +1018,6 @@ bool Array::MultiSort(std::vector<SortData> &data, bool renumber) {
   for (unsigned int k = 0; k < data.size(); k++) {
     SortData &opaque = data[k];
     const Array& arr = *opaque.array;
-    if (renumber && (opaque.original->getArrayData()->isIntMapArray())) {
-      MixedArray::downgradeAndWarn(opaque.original->getArrayData(),
-                                   MixedArray::Reason::kSort);
-    }
-
     Array sorted;
     for (int i = 0; i < count; i++) {
       ssize_t pos = opaque.positions[indices[i]];
@@ -970,25 +1037,29 @@ bool Array::MultiSort(std::vector<SortData> &data, bool renumber) {
   return true;
 }
 
-int Array::SortRegularAscending(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortRegularAscending(const Variant& v1, const Variant& v2,
+                                const void *data) {
   if (HPHP::less(v1, v2)) return -1;
   if (tvEqual(*v1.asTypedValue(), *v2.asTypedValue())) return 0;
   return 1;
 }
-int Array::SortRegularDescending(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortRegularDescending(const Variant& v1, const Variant& v2,
+                                 const void *data) {
   if (HPHP::less(v1, v2)) return 1;
   if (tvEqual(*v1.asTypedValue(), *v2.asTypedValue())) return 0;
   return -1;
 }
 
-int Array::SortNumericAscending(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortNumericAscending(const Variant& v1, const Variant& v2,
+                                const void *data) {
   double d1 = v1.toDouble();
   double d2 = v2.toDouble();
   if (d1 < d2) return -1;
   if (d1 == d2) return 0;
   return 1;
 }
-int Array::SortNumericDescending(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortNumericDescending(const Variant& v1, const Variant& v2,
+                                 const void *data) {
   double d1 = v1.toDouble();
   double d2 = v2.toDouble();
   if (d1 < d2) return 1;
@@ -996,25 +1067,29 @@ int Array::SortNumericDescending(const Variant& v1, const Variant& v2, const voi
   return -1;
 }
 
-int Array::SortStringAscending(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortStringAscending(const Variant& v1, const Variant& v2,
+                               const void *data) {
   String s1 = v1.toString();
   String s2 = v2.toString();
   return string_strcmp(s1.data(), s1.size(), s2.data(), s2.size());
 }
 
-int Array::SortStringAscendingCase(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortStringAscendingCase(const Variant& v1, const Variant& v2,
+                                   const void *data) {
   String s1 = v1.toString();
   String s2 = v2.toString();
   return bstrcasecmp(s1.data(), s1.size(), s2.data(), s2.size());
 }
 
-int Array::SortStringDescending(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortStringDescending(const Variant& v1, const Variant& v2,
+                                const void *data) {
   String s1 = v1.toString();
   String s2 = v2.toString();
   return string_strcmp(s2.data(), s2.size(), s1.data(), s1.size());
 }
 
-int Array::SortStringDescendingCase(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortStringDescendingCase(const Variant& v1, const Variant& v2,
+                                    const void *data) {
   String s1 = v1.toString();
   String s2 = v2.toString();
   return bstrcasecmp(s2.data(), s2.size(), s1.data(), s1.size());
@@ -1036,16 +1111,32 @@ int Array::SortLocaleStringDescending(const Variant& v1, const Variant& v2,
   return strcoll(s2.data(), s1.data());
 }
 
-int Array::SortNatural(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortNaturalAscending(const Variant& v1, const Variant& v2,
+                                const void *data) {
   String s1 = v1.toString();
   String s2 = v2.toString();
   return string_natural_cmp(s1.data(), s1.size(), s2.data(), s2.size(), 0);
 }
 
-int Array::SortNaturalCase(const Variant& v1, const Variant& v2, const void *data) {
+int Array::SortNaturalDescending(const Variant& v1, const Variant& v2,
+                                 const void *data) {
+  String s1 = v1.toString();
+  String s2 = v2.toString();
+  return string_natural_cmp(s2.data(), s2.size(), s1.data(), s1.size(), 0);
+}
+
+int Array::SortNaturalCaseAscending(const Variant& v1, const Variant& v2,
+                                    const void *data) {
   String s1 = v1.toString();
   String s2 = v2.toString();
   return string_natural_cmp(s1.data(), s1.size(), s2.data(), s2.size(), 1);
+}
+
+int Array::SortNaturalCaseDescending(const Variant& v1, const Variant& v2,
+                                     const void *data) {
+  String s1 = v1.toString();
+  String s2 = v2.toString();
+  return string_natural_cmp(s2.data(), s2.size(), s1.data(), s1.size(), 1);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,19 +7,31 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
-(*****************************************************************************)
-(* Library code *)
-(*****************************************************************************)
-open DfindEnv
 
-let start root = 
-  let msg_out, result_in, pid = DfindServer.fork_in_pipe root in
-  (Unix.out_channel_of_descr msg_out,
-  Unix.in_channel_of_descr result_in),
-  pid
+type t = (DfindServer.msg, unit) Daemon.handle
 
-let get_changes (msg_out, result_in) =
-  Marshal.to_channel msg_out "Go" [];
-  flush msg_out;
-  let (result: SSet.t) = Marshal.from_channel result_in in
-  result
+let init log_fds (scuba_table, roots) =
+  Daemon.spawn log_fds DfindServer.entry_point (scuba_table, roots)
+
+let pid handle = handle.Daemon.pid
+
+let wait_until_ready {Daemon.channels = (ic, _oc); pid = _} =
+  assert (Daemon.from_channel ic = DfindServer.Ready)
+
+let request_changes ?timeout {Daemon.channels = (ic, oc); pid = _} =
+  Daemon.to_channel oc ();
+  Daemon.from_channel ?timeout ic
+
+let get_changes ?timeout daemon =
+  let rec loop acc =
+    let diff =
+      match request_changes ?timeout daemon with
+      | DfindServer.Updates s -> s
+      | DfindServer.Ready -> assert false in
+    if SSet.is_empty diff
+    then acc
+    else begin
+      let acc = SSet.union diff acc in
+      loop acc
+    end
+  in loop SSet.empty

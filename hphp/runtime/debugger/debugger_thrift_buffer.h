@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,54 +17,55 @@
 #ifndef incl_HPHP_DEBUGGER_THRIFT_BUFFER_H_
 #define incl_HPHP_DEBUGGER_THRIFT_BUFFER_H_
 
-#include "hphp/runtime/base/thrift-buffer.h"
 #include "hphp/runtime/base/socket.h"
+#include "hphp/runtime/base/thrift-buffer.h"
 #include "hphp/runtime/base/variable-serializer.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-/**
+/*
  * Wire format and buffer for socket communication between DebuggerClient and
  * DebuggerProxy.
  */
-class DebuggerThriftBuffer: public ThriftBuffer {
-public:
-  static const int BUFFER_SIZE = 1024;
+struct DebuggerThriftBuffer : ThriftBuffer {
+  static constexpr int BUFFER_SIZE = 1024;
 
-public:
   DebuggerThriftBuffer()
     : ThriftBuffer(BUFFER_SIZE, VariableSerializer::Type::DebuggerSerialize) {}
 
-  SmartPtr<Socket> getSocket() { return m_socket;}
+  req::ptr<Socket> getSocket() {
+    return req::make<Socket>(m_socket);
+  }
 
-  void create(SmartPtr<Socket> socket) {
-    m_socket = socket;
+  void create(req::ptr<Socket> socket) {
+    m_socket = socket->getData();
   }
   void close() {
-    m_socket->close();
+    getSocket()->close();
   }
 
 protected:
   virtual String readImpl();
   virtual void flushImpl(const String& data);
-  virtual void throwError(const char *msg, int code);
+  virtual void throwError(const char* msg, int code);
 
 private:
   char m_buffer[BUFFER_SIZE + 1];
-  SmartPtr<Socket> m_socket;
+  std::shared_ptr<SocketData> m_socket;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class DebuggerWireHelpers {
-public:
+struct DebuggerWireHelpers {
   enum SError { // SerializationError
     NoError,
     HitLimit,
     UnknownError,
     TypeMismatch,
+    ErrorMsg,
   };
+
   // Serialization functions for Array, Object, and Variant
   // Return true on success, false on error
   // On error, the result would be a special string indicating the error

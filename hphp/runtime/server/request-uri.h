@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,16 +17,15 @@
 #ifndef incl_HPHP_REQUEST_URI_H_
 #define incl_HPHP_REQUEST_URI_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class VirtualHost;
-class Transport;
+struct VirtualHost;
+struct Transport;
 
-class RequestURI {
-public:
+struct RequestURI {
   RequestURI(const VirtualHost *vhost, Transport *transport,
              const std::string &pathTranslation,
              const std::string &sourceRoot);

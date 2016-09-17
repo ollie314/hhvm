@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,29 +17,31 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_CMD_LIST_H_
 #define incl_HPHP_EVAL_DEBUGGER_CMD_LIST_H_
 
+#include "hphp/runtime/base/type-variant.h"
+#include "hphp/runtime/base/req-root.h"
 #include "hphp/runtime/debugger/debugger_command.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdList : public DebuggerCommand {
-public:
+struct CmdList : DebuggerCommand {
+  static Variant GetSourceFile(DebuggerClient& client, const std::string& file);
+
   CmdList() : DebuggerCommand(KindOfList) {}
-  static Variant GetSourceFile(DebuggerClient &client,
-                               const std::string &file);
-  virtual void list(DebuggerClient &client);
-  virtual void help(DebuggerClient &client);
-  virtual bool onServer(DebuggerProxy &proxy);
-  virtual void onClient(DebuggerClient &client);
+
+  void list(DebuggerClient&) override;
+  void help(DebuggerClient&) override;
+  bool onServer(DebuggerProxy&) override;
+  void onClient(DebuggerClient&) override;
 
 protected:
-  virtual void sendImpl(DebuggerThriftBuffer &thrift);
-  virtual void recvImpl(DebuggerThriftBuffer &thrift);
+  void sendImpl(DebuggerThriftBuffer&) override;
+  void recvImpl(DebuggerThriftBuffer&) override;
 
 private:
   void getListLocation(DebuggerClient &client, int &line,
-                            int &charFocus0, int &lineFocus1,
-                            int &charFocus1);
+                       int &charFocus0, int &lineFocus1,
+                       int &charFocus1);
   void listEvalCode(DebuggerClient &client);
   bool listFileRange(DebuggerClient &client, int line,
                      int charFocus0, int lineFocus1,
@@ -59,8 +61,7 @@ private:
   // If null, this is uninitialized. If false, there is no such range/file.
   // Otherwise, this contains an HPHP::String instance representing the
   // range of source text to be listed by this command.
-  Variant m_code;
-
+  req::root<Variant> m_code;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

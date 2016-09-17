@@ -29,15 +29,23 @@
 
 #include "hphp/util/assertions.h"
 
+#ifdef _M_X64
+#include <intrin.h> // for __debugbreak()
+#endif
+
 // Define platform specific functionalities.
 
 namespace vixl {
 inline void HostBreakpoint() {
 #if defined(__x86_64__)
   asm("int3");
+#elif defined(_M_X64)
+  __debugbreak();
 #elif defined(__AARCH64EL__)
   // TODO: Implement HostBreakpoint on a64.
   not_implemented();
+#elif defined(__powerpc64__)
+  asm("trap");
 #else
 # error How do you set a host breakpoint on your architecture?
 #endif

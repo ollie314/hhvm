@@ -14,11 +14,19 @@
    +----------------------------------------------------------------------+
 */
 
+#include "hphp/runtime/vm/jit/vasm.h"
+
+#include "hphp/runtime/vm/jit/timer.h"
+#include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-print.h"
-#include "hphp/runtime/vm/jit/vasm-x64.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/vasm-unit.h"
+#include "hphp/runtime/vm/jit/vasm-util.h"
+#include "hphp/runtime/vm/jit/vasm-visit.h"
+
+#include <boost/dynamic_bitset.hpp>
 
 #include <algorithm>
-#include <boost/dynamic_bitset.hpp>
 
 TRACE_SET_MOD(vasm);
 
@@ -28,71 +36,260 @@ namespace {
 typedef boost::dynamic_bitset<> LiveSet;
 bool effectful(Vinstr& inst) {
   switch (inst.op) {
-    case Vinstr::copy:
-    case Vinstr::copy2:
-    case Vinstr::copyargs:
-    case Vinstr::ldpoint:
-    case Vinstr::load:
-    case Vinstr::nop:
+    case Vinstr::absdbl:
+    case Vinstr::addl:
+    case Vinstr::addli:
+    case Vinstr::addq:
+    case Vinstr::addqi:
+    case Vinstr::addsd:
+    case Vinstr::addxi:
     case Vinstr::andb:
     case Vinstr::andbi:
     case Vinstr::andl:
     case Vinstr::andli:
     case Vinstr::andq:
     case Vinstr::andqi:
-    case Vinstr::addq:
-    case Vinstr::addqi:
-    case Vinstr::addsd:
+    case Vinstr::asrxi:
+    case Vinstr::asrxis:
     case Vinstr::cloadq:
+    case Vinstr::cmovb:
+    case Vinstr::cmovw:
+    case Vinstr::cmovl:
     case Vinstr::cmovq:
-    case Vinstr::cvttsd2siq:
+    case Vinstr::cmpb:
+    case Vinstr::cmpbi:
+    case Vinstr::cmpbim:
+    case Vinstr::cmpbm:
+    case Vinstr::cmpl:
+    case Vinstr::cmpli:
+    case Vinstr::cmplim:
+    case Vinstr::cmplims:
+    case Vinstr::cmplm:
+    case Vinstr::cmpq:
+    case Vinstr::cmpqi:
+    case Vinstr::cmpqim:
+    case Vinstr::cmpqm:
+    case Vinstr::cmpsd:
+    case Vinstr::cmpsds:
+    case Vinstr::cmpwim:
+    case Vinstr::cmpwm:
+    case Vinstr::copy:
+    case Vinstr::copy2:
+    case Vinstr::copyargs:
     case Vinstr::cvtsi2sd:
+    case Vinstr::cvtsi2sdm:
+    case Vinstr::cvttsd2siq:
     case Vinstr::decl:
     case Vinstr::decq:
+    case Vinstr::defvmret:
+    case Vinstr::defvmsp:
+    case Vinstr::divint:
     case Vinstr::divsd:
+    case Vinstr::extrb:
+    case Vinstr::extsb:
+    case Vinstr::extsw:
+    case Vinstr::fabs:
+    case Vinstr::fcmpo:
+    case Vinstr::fcmpu:
+    case Vinstr::fctidz:
+    case Vinstr::fcvtzs:
     case Vinstr::imul:
     case Vinstr::incl:
     case Vinstr::incq:
+    case Vinstr::incw:
+    case Vinstr::ldarx:
+    case Vinstr::ldimmb:
+    case Vinstr::ldimml:
+    case Vinstr::ldimmq:
+    case Vinstr::ldimmqs:
+    case Vinstr::ldimmw:
     case Vinstr::lea:
-    case Vinstr::loaddqu:
+    case Vinstr::lead:
+    case Vinstr::leap:
+    case Vinstr::load:
+    case Vinstr::loadb:
     case Vinstr::loadl:
+    case Vinstr::loadqd:
+    case Vinstr::loadqp:
     case Vinstr::loadsd:
+    case Vinstr::loadtqb:
+    case Vinstr::loadups:
+    case Vinstr::loadw:
     case Vinstr::loadzbl:
+    case Vinstr::loadzbq:
+    case Vinstr::loadzlq:
+    case Vinstr::lslwi:
+    case Vinstr::lslwis:
+    case Vinstr::lslxi:
+    case Vinstr::lslxis:
+    case Vinstr::lsrwi:
+    case Vinstr::lsrwis:
+    case Vinstr::lsrxi:
+    case Vinstr::lsrxis:
+    case Vinstr::mfcr:
+    case Vinstr::mflr:
+    case Vinstr::mfvsrd:
     case Vinstr::movb:
     case Vinstr::movl:
+    case Vinstr::movtqb:
+    case Vinstr::movtdb:
+    case Vinstr::movtdq:
+    case Vinstr::movtql:
+    case Vinstr::movw:
+    case Vinstr::movzbw:
     case Vinstr::movzbl:
+    case Vinstr::movzbq:
+    case Vinstr::movzlq:
+    case Vinstr::mrs:
     case Vinstr::mulsd:
     case Vinstr::neg:
+    case Vinstr::nop:
     case Vinstr::not:
+    case Vinstr::notb:
+    case Vinstr::orsw:
+    case Vinstr::orswi:
     case Vinstr::orq:
     case Vinstr::orqi:
     case Vinstr::psllq:
     case Vinstr::psrlq:
     case Vinstr::roundsd:
+    case Vinstr::sar:
     case Vinstr::sarq:
     case Vinstr::sarqi:
     case Vinstr::setcc:
+    case Vinstr::shl:
     case Vinstr::shlli:
     case Vinstr::shlq:
     case Vinstr::shlqi:
     case Vinstr::shrli:
     case Vinstr::shrqi:
     case Vinstr::sqrtsd:
+    case Vinstr::srem:
+    case Vinstr::subbi:
+    case Vinstr::subl:
     case Vinstr::subli:
     case Vinstr::subq:
     case Vinstr::subqi:
+    case Vinstr::subsb:
     case Vinstr::subsd:
+    case Vinstr::testb:
+    case Vinstr::testbi:
+    case Vinstr::testbim:
+    case Vinstr::testl:
+    case Vinstr::testli:
+    case Vinstr::testlim:
+    case Vinstr::testq:
+    case Vinstr::testqi:
+    case Vinstr::testqim:
+    case Vinstr::testqm:
+    case Vinstr::testwim:
+    case Vinstr::ucomisd:
     case Vinstr::unpcklpd:
+    case Vinstr::uxth:
     case Vinstr::xorb:
     case Vinstr::xorbi:
+    case Vinstr::xorl:
     case Vinstr::xorq:
     case Vinstr::xorqi:
+    case Vinstr::xscvdpsxds:
+    case Vinstr::xscvsxddp:
+    case Vinstr::xxlxor:
+    case Vinstr::xxpermdi:
       return false;
-    case Vinstr::ldimm:
-      return !inst.ldimm_.saveflags;
-    default:
+
+    case Vinstr::addlm:
+    case Vinstr::addlim:
+    case Vinstr::addqim:
+    case Vinstr::andbim:
+    case Vinstr::bindaddr:
+    case Vinstr::bindjcc:
+    case Vinstr::bindjmp:
+    case Vinstr::bln:
+    case Vinstr::call:
+    case Vinstr::callarray:
+    case Vinstr::callfaststub:
+    case Vinstr::callm:
+    case Vinstr::callphp:
+    case Vinstr::callr:
+    case Vinstr::calls:
+    case Vinstr::callstub:
+    case Vinstr::calltc:
+    case Vinstr::contenter:
+    case Vinstr::cqo:
+    case Vinstr::debugtrap:
+    case Vinstr::declm:
+    case Vinstr::decqm:
+    case Vinstr::decqmlock:
+    case Vinstr::fallback:
+    case Vinstr::fallbackcc:
+    case Vinstr::fallthru:
+    case Vinstr::idiv:
+    case Vinstr::inclm:
+    case Vinstr::incqm:
+    case Vinstr::incqmlock:
+    case Vinstr::incwm:
+    case Vinstr::inittc:
+    case Vinstr::jcc:
+    case Vinstr::jcci:
+    case Vinstr::jmp:
+    case Vinstr::jmpi:
+    case Vinstr::jmpm:
+    case Vinstr::jmpr:
+    case Vinstr::landingpad:
+    case Vinstr::leavetc:
+    case Vinstr::loadstubret:
+    case Vinstr::mcprep:
+    case Vinstr::msr:
+    case Vinstr::mtlr:
+    case Vinstr::mtvsrd:
+    case Vinstr::nothrow:
+    case Vinstr::orbim:
+    case Vinstr::orqim:
+    case Vinstr::orwim:
+    case Vinstr::phidef:
+    case Vinstr::phijcc:
+    case Vinstr::phijmp:
+    case Vinstr::phplogue:
+    case Vinstr::phpret:
+    case Vinstr::pop:
+    case Vinstr::popm:
+    case Vinstr::popp:
+    case Vinstr::push:
+    case Vinstr::pushm:
+    case Vinstr::pushp:
+    case Vinstr::resumetc:
+    case Vinstr::ret:
+    case Vinstr::retransopt:
+    case Vinstr::stdcx:
+    case Vinstr::store:
+    case Vinstr::storeb:
+    case Vinstr::storebi:
+    case Vinstr::storeups:
+    case Vinstr::storel:
+    case Vinstr::storeli:
+    case Vinstr::storeqi:
+    case Vinstr::storesd:
+    case Vinstr::storew:
+    case Vinstr::storewi:
+    case Vinstr::stublogue:
+    case Vinstr::stubret:
+    case Vinstr::stubtophp:
+    case Vinstr::stubunwind:
+    case Vinstr::syncpoint:
+    case Vinstr::syncvmret:
+    case Vinstr::syncvmsp:
+    case Vinstr::tailcallphp:
+    case Vinstr::tailcallstub:
+    case Vinstr::ud2:
+    case Vinstr::unwind:
+    case Vinstr::vcall:
+    case Vinstr::vcallarray:
+    case Vinstr::vinvoke:
+    case Vinstr::conjure:
+    case Vinstr::conjureuse:
       return true;
   }
+  always_assert(false);
 }
 }
 
@@ -111,9 +308,11 @@ bool effectful(Vinstr& inst) {
 // or not a useful block executes, and useless branches can be forwarded to
 // the nearest useful post-dominator.
 void removeDeadCode(Vunit& unit) {
+  Timer timer(Timer::vasm_dce);
   auto blocks = sortBlocks(unit);
   jit::vector<LiveSet> livein(unit.blocks.size());
   LiveSet live(unit.next_vr);
+
   auto pass = [&](bool mutate) {
     bool changed = false;
     for (auto blockIt = blocks.end(); blockIt != blocks.begin();) {
@@ -144,7 +343,7 @@ void removeDeadCode(Vunit& unit) {
         }
       }
       if (mutate) {
-        assert(live == livein[b]);
+        assertx(live == livein[b]);
       } else {
         if (live != livein[b]) {
           livein[b] = live;
@@ -154,18 +353,32 @@ void removeDeadCode(Vunit& unit) {
     }
     return changed;
   };
+
   // analyze until livein reaches a fixed point
   while (pass(false)) {}
-  // nop-out useless instructions
-  if (pass(true)) {
-    for (auto b : blocks) {
-      auto& code = unit.blocks[b].code;
-      auto end = std::remove_if(code.begin(), code.end(), [&](Vinstr& inst) {
-        return inst.op == Vinstr::nop;
-      });
-      code.erase(end, code.end());
-    }
+  auto const changed = pass(true);
+  removeTrivialNops(unit);
+  if (changed) {
     printUnit(kVasmDCELevel, "after vasm-dead", unit);
+  }
+}
+
+/*
+ * A very simple dead code elimination pass that just removes trivial nop
+ * instructions.  We run this before any other passes because it allows
+ * code-gen to create things like self-copies or self-lea's without affect on
+ * optimizations downstream.  (In particular early passes like optimizeExits
+ * that are looking for specific vasm sequences inside of a block.)
+ */
+void removeTrivialNops(Vunit& unit) {
+  for (auto& b : unit.blocks) {
+    b.code.erase(
+      std::remove_if(
+        begin(b.code), end(b.code),
+        is_trivial_nop
+      ),
+      end(b.code)
+    );
   }
 }
 

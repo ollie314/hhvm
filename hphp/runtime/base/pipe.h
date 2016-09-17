@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,19 +25,18 @@ namespace HPHP {
 /**
  * Wrapper around popen/pclose.
  */
-class Pipe : public PlainFile {
-public:
+struct Pipe : PlainFile {
   DECLARE_RESOURCE_ALLOCATION(Pipe);
 
   Pipe();
   virtual ~Pipe();
 
   // overriding ResourceData
-  const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   // implementing File
-  virtual bool open(const String& filename, const String& mode);
-  virtual bool close();
+  bool open(const String& filename, const String& mode) override;
+  bool close() override;
 
 private:
   bool closeImpl();

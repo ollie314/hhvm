@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,12 +15,15 @@
 */
 #include "hphp/runtime/debugger/debugger_server.h"
 
-#include <poll.h>
 #include <exception>
+
+#include <folly/portability/Sockets.h>
 
 #include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/req-ptr.h"
 #include "hphp/util/network.h"
 #include "hphp/util/logger.h"
 
@@ -97,12 +100,12 @@ bool DebuggerServer::start() {
   /* use a cur pointer so we still have ai to be able to free the struct */
   struct addrinfo *cur;
   for (cur = ai; cur; cur = cur->ai_next) {
-    SmartPtr<Socket> m_sock;
     int s_fd = socket(cur->ai_family, cur->ai_socktype, cur->ai_protocol);
     if (s_fd < 0 && errno == EAFNOSUPPORT) {
       continue;
     }
-    m_sock = new Socket(s_fd, cur->ai_family, cur->ai_addr->sa_data, port);
+    auto m_sock = req::make<Socket>(
+      s_fd, cur->ai_family, cur->ai_addr->sa_data, port);
 
     int yes = 1;
     setsockopt(m_sock->fd(), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -126,7 +129,7 @@ bool DebuggerServer::start() {
       return false;
     }
 
-    m_socks.push_back(m_sock);
+    m_socks.push_back(m_sock->getData());
   }
 
   if (m_socks.size() == 0) {
@@ -146,18 +149,17 @@ void DebuggerServer::stop() {
 }
 
 void DebuggerServer::accept() {
+  g_context.getCheck();
   TRACE(2, "DebuggerServer::accept\n");
   // Setup server-side usage logging before accepting any connections.
   Debugger::InitUsageLogging();
   // server loop
   unsigned int count = m_socks.size();
-  struct pollfd fds[count];
+  struct pollfd* fds = (struct pollfd*)alloca(sizeof(struct pollfd) * count);
 
-  unsigned int i = 0;
-  for (auto& m_sock : m_socks) {
-    fds[i].fd = m_sock->fd();
+  for (unsigned int i = 0; i < count; i++) {
+    fds[i].fd = nthSocket(i)->fd();
     fds[i].events = POLLIN|POLLERR|POLLHUP;
-    i++;
   }
 
   while (!m_stopped) {
@@ -168,11 +170,11 @@ void DebuggerServer::accept() {
         struct sockaddr sa;
         socklen_t salen = sizeof(sa);
         try {
-          Socket *new_sock = new Socket(::accept(m_socks[i]->fd(), &sa, &salen),
-                                        m_socks[i]->getType());
-          SmartPtr<Socket> ret(new_sock);
+          auto sock = nthSocket(i);
+          auto new_sock = req::make<Socket>(
+            ::accept(sock->fd(), &sa, &salen), sock->getType());
           if (new_sock->valid()) {
-            Debugger::CreateProxy(ret, false);
+            Debugger::CreateProxy(new_sock, false);
           } else {
             Logger::Error("unable to accept incoming debugger request");
           }
@@ -195,6 +197,7 @@ void DebuggerServer::accept() {
   for(auto &m_sock : m_socks) {
     m_sock.reset();
   }
+  hphp_memory_cleanup();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

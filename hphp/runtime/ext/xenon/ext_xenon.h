@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_XENON_H_
 #define incl_HPHP_EXT_XENON_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include <semaphore.h>
 
 /*
@@ -38,7 +38,7 @@
   Instead, Xenon has a pthread waiting for the semaphore.  When the semaphore
   is set in the handler, it wakes, sets the Xenon Surprise flag for every
   thread - this is the flash.
-  There are is a mechanism that hooks the enter/exit of every PHP function,
+  There is a mechanism that hooks the enter/exit of every PHP function,
   using the Surprise flags leverages that mechanism and calls logging.
   At this point, if the flag is set for this thread, the PHP and async stack
   will be logged for that thread.
@@ -61,13 +61,31 @@
 */
 
 namespace HPHP {
-class Xenon final {
-  public:
+
+struct c_WaitableWaitHandle;
+
+struct Xenon final {
 
     enum SampleType {
-      IOWaitSample,  // sample was taken during a function that is wait time
-      EnterSample,   // sample was during CPU time at the start of a function
-      ExitSample,    // sample was during CPU time at the end of a function
+      // Sample was taken during I/O wait and thus does not represent CPU time.
+      IOWaitSample,
+
+      // Sample was taken before an async function was resumed at await opcode.
+      // The CPU time is attributed to the resumed async function, because the
+      // CPU time was spent by the scheduler on the behalf of the resumed
+      // function (preparing for reentry, unserializing result of external
+      // thread event, etc.).
+      ResumeAwaitSample,
+
+      // Sample was taken before a function was called or a generator was
+      // resumed at yield opcode.
+      // The CPU time is attributed to the caller of the entered function.
+      EnterSample,
+
+      // Sample was taken before a function returned, suspended or failed
+      // with an exception.
+      // The CPU time is attributed to the exited function.
+      ExitSample,
     };
 
     static Xenon& getInstance(void) noexcept;
@@ -79,15 +97,15 @@ class Xenon final {
 
     void start(uint64_t msec);
     void stop();
-    void log(SampleType t) const;
+    void log(SampleType t, c_WaitableWaitHandle* wh = nullptr) const;
     void surpriseAll();
     void onTimer();
 
     bool      m_stopping;
   private:
     sem_t     m_timerTriggered;
+#if !defined(__APPLE__) && !defined(_MSC_VER)
     pthread_t m_triggerThread;
-#ifndef __APPLE__
     timer_t   m_timerid;
 #endif
 };

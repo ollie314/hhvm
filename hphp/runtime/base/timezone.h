@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,42 +19,41 @@
 
 #include "hphp/runtime/base/resource-data.h"
 #include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/ext/std/ext_std_misc.h"
+
+#include <map>
+#include <memory>
 
 extern "C" {
 #include <timelib.h>
-#include <map>
-#include <memory>
 }
 
 namespace HPHP {
 
-class Array;
-template <typename T> class SmartResource;
+struct Array;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
  * Handles all timezone related functions.
  */
-class TimeZone : public SweepableResourceData {
-public:
+struct TimeZone : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(TimeZone);
 
   /**
    * Get/set current timezone that controls how local time is interpreted.
    */
-  static String CurrentName();            // current timezone's name
-  static SmartResource<TimeZone> Current(); // current timezone
-  static bool SetCurrent(const String& name);   // returns false if invalid
+  static String CurrentName();              // current timezone's name
+  static req::ptr<TimeZone> Current();      // current timezone
+  static bool SetCurrent(const char* name); // returns false if invalid
 
   /**
    * TimeZone database queries.
    */
-  static bool IsValid(const String& name);
+  static bool IsValid(const char* name);
   static Array GetAbbreviations();
-  static Array GetNamesToCountryCodes();
   static String AbbreviationToName(String abbr, int utcoffset = -1,
-                                   bool isdst = true);
+                                   int isdst = 1);
 
 public:
   /**
@@ -69,7 +68,7 @@ public:
     return result;
   }
   // overriding ResourceData
-  const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   /**
    * Whether this represents a valid timezone.
@@ -95,7 +94,8 @@ public:
   /**
    * Query transition times for DST.
    */
-  Array transitions() const;
+  Array transitions(int64_t timestamp_begin = k_PHP_INT_MIN,
+                    int64_t timestamp_end = k_PHP_INT_MAX) const;
 
   /**
    * Get information about a timezone
@@ -113,12 +113,12 @@ public:
   /**
    * Make a copy of this timezone object, so it can be changed independently.
    */
-  SmartResource<TimeZone> cloneTimeZone() const;
+  req::ptr<TimeZone> cloneTimeZone() const;
 
 protected:
-  friend class DateTime;
-  friend class TimeStamp;
-  friend class DateInterval;
+  friend struct DateTime;
+  friend struct TimeStamp;
+  friend struct DateInterval;
 
   /**
    * Returns raw pointer. For internal use only.
@@ -139,6 +139,7 @@ private:
 ///////////////////////////////////////////////////////////////////////////////
 
 void timezone_init();
+const timelib_tzdb* timezone_get_builtin_tzdb();
 
 ///////////////////////////////////////////////////////////////////////////////
 }

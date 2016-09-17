@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,6 @@
  *)
 
 open Ast
-open Utils
 module Str = Str_ext
 let (=~) = Str.(=~)
 let mk_set = List.fold_left (fun acc x -> SSet.add x acc) SSet.empty
@@ -117,10 +116,11 @@ let default_method = {
   m_name = (Pos.none, "");
   m_params = [];
   m_body = [Noop];
-  m_user_attributes = SMap.empty;
+  m_user_attributes = [];
   m_ret = None;
   m_ret_by_ref = false;
-  m_fun_kind = FSync
+  m_fun_kind = FSync;
+  m_span = Pos.none;
 }
 
 let negate (p, expr_) =
@@ -157,14 +157,15 @@ let rec is_collection_expr_ = function
   | Collection _ -> Some true
   | New ((_, Id (_, name)), _, _) when is_collection_str name -> Some true
   | New ((_, Id (_, _)), _, _) -> Some false
-  | Lvar _ | Clone _ | Obj_get _ | Array_get _ | Class_get _  | Yield _
+  | Lvar _ | Lvarvar _ | Clone _ | Obj_get _ | Array_get _ | Class_get _
+  | Yield _
   (* casts to object are the only type we need to worry about *)
-  | Cast ((_, Happly ((_, "object"), [])), _) | Eif _ | Call _
+  | Cast ((_, Happly ((_, "object"), [])), _) | Eif _ | NullCoalesce _ | Call _
   | Unsafeexpr _ | Expr_list _ | New _ -> None
-  | Binop ((Eq None), _, (_, e)) | Ref (_, e) -> is_collection_expr_ e
+  | Binop ((Eq None), _, (_, e)) | Unop (Uref, (_, e)) -> is_collection_expr_ e
   | Array _  | Shape _ | Null | True | False | Class_const _ | Int _
   | Float _ | String _ | String2 _ | Yield_break | List _  | InstanceOf _
   | Efun _ | Lfun _ | Xml _ | Import _ | Id _
    (* await returns an awaitable *)
-  | Await _ | Unop _ | Binop _
+  | Await _ | Unop _ | Binop _ | Pipe _ | Dollardollar
   | Cast _ -> Some false

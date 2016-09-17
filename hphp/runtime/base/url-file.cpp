@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,6 @@
 
 #include "hphp/runtime/base/url-file.h"
 #include <vector>
-#include "hphp/runtime/base/hphp-system.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/ext/pcre/ext_pcre.h"
 #include "hphp/runtime/ext/stream/ext_stream.h"
@@ -49,7 +48,7 @@ UrlFile::UrlFile(const char *method /* = "GET" */,
   m_maxRedirect = maxRedirect;
   m_timeout = timeout;
   m_ignoreErrors = ignoreErrors;
-  m_isLocal = false;
+  setIsLocal(false);
 }
 
 void UrlFile::sweep() {
@@ -61,6 +60,15 @@ void UrlFile::sweep() {
 const StaticString
   s_remove_user_pass_pattern("#://[^@]+@#"),
   s_remove_user_pass_replace("://");
+
+void UrlFile::setProxy(const String& proxy_host, int proxy_port,
+                       const String& proxy_user, const String& proxy_pass) {
+  m_proxyHost = proxy_host.c_str();
+  m_proxyPort = proxy_port;
+  m_proxyUsername = proxy_user.c_str();
+  m_proxyPassword = proxy_pass.c_str();
+}
+
 bool UrlFile::open(const String& input_url, const String& mode) {
   String url = input_url;
   const char* modestr = mode.c_str();
@@ -71,7 +79,15 @@ bool UrlFile::open(const String& input_url, const String& mode) {
     return false;
   }
   HttpClient http(m_timeout, m_maxRedirect);
+  auto ctx = this->getStreamContext();
+  if (ctx) {
+    http.setStreamContextOptions(ctx->getOptions());
+  }
   m_response.clear();
+
+  if (!m_proxyHost.empty()) {
+    http.proxy(m_proxyHost, m_proxyPort, m_proxyUsername, m_proxyPassword);
+  }
 
   HeaderMap *pHeaders = nullptr;
   HeaderMap requestHeaders;
@@ -92,7 +108,7 @@ bool UrlFile::open(const String& input_url, const String& mode) {
       s_remove_user_pass_replace,
       url,
       1
-    );
+    ).toString();
   }
 
   int code;
@@ -112,7 +128,7 @@ bool UrlFile::open(const String& input_url, const String& mode) {
   VMRegAnchor vra;
   ActRec* fp = vmfp();
   while (fp->skipFrame()) {
-    fp = g_context->getPrevVMStateUNSAFE(fp);
+    fp = g_context->getPrevVMState(fp);
   }
   auto id = fp->func()->lookupVarId(s_http_response_header.get());
   if (id != kInvalidId) {
@@ -123,18 +139,22 @@ bool UrlFile::open(const String& input_url, const String& mode) {
       tvTo = tvTo->m_data.pref->tv();
     }
     tvDup(*tvFrom, *tvTo);
-  } else if (fp->hasVarEnv()) {
+  } else if ((fp->func()->attrs() & AttrMayUseVV) && fp->hasVarEnv()) {
     fp->getVarEnv()->set(s_http_response_header.get(),
                          Variant(m_responseHeaders).asTypedValue());
   }
 
   /*
    * If code == 0, Curl failed to connect; per PHP5, ignore_errors just means
-   * to not worry if we get an http resonse code that isn't 200, but we
-   * shouldn't ignore other errors.
+   * to not worry if we get an http resonse code that isn't between 200 and 400,
+   * but we shouldn't ignore other errors.
+   * all status codes in the 2xx range are defined by the specification as
+   * successful;
+   * all status codes in the 3xx range are for redirection, and so also should
+   * never fail.
    */
-  if (code == 200 || (m_ignoreErrors && code != 0)) {
-    m_name = (std::string) url;
+  if ((code >= 200 && code < 400) || (m_ignoreErrors && code != 0)) {
+    setName(url.toCppString());
     m_data = const_cast<char*>(m_response.data());
     m_len = m_response.size();
     return true;
@@ -146,14 +166,14 @@ bool UrlFile::open(const String& input_url, const String& mode) {
 
 int64_t UrlFile::writeImpl(const char *buffer, int64_t length) {
   assert(m_len != -1);
-  throw FatalErrorException((std::string("cannot write a url stream: ") +
-                             m_name).c_str());
+  raise_fatal_error((std::string("cannot write a url stream: ") +
+                             getName()).c_str());
 }
 
 bool UrlFile::flush() {
   assert(m_len != -1);
-  throw FatalErrorException((std::string("cannot flush a url stream: ") +
-                             m_name).c_str());
+  raise_fatal_error((std::string("cannot flush a url stream: ") +
+                             getName()).c_str());
 }
 
 String UrlFile::getLastError() {

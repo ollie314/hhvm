@@ -358,7 +358,7 @@ file_getbuffer(struct magic_set *ms)
     return NULL;
   }
 
-#if defined(HAVE_WCHAR_H) && defined(HAVE_MBRTOWC) && defined(HAVE_WCWIDTH)
+#if defined(HAVE_WCHAR_H) && defined(HAVE_MBRTOWC)
   {
     mbstate_t state;
     wchar_t nextchar;
@@ -414,7 +414,7 @@ file_check_mem(struct magic_set *ms, unsigned int level)
   size_t len;
 
   if (level >= ms->c.len) {
-    len = (ms->c.len += 20) * sizeof(*ms->c.li);
+    len = (ms->c.len += 20 + level) * sizeof(*ms->c.li);
     ms->c.li = CAST(struct level_info *, (ms->c.li == NULL) ?
         emalloc(len) :
         erealloc(ms->c.li, len));
@@ -450,7 +450,7 @@ file_replace(struct magic_set *ms, const char *pat, const char *rep)
   convert_libmagic_pattern(patt, opts);
 
   auto ret = HPHP::preg_replace_impl(patt, rep, ms->o.buf,
-                                     -1, rep_cnt, false, false);
+                                     -1, &rep_cnt, false, false);
   if (!ret.isString()) {
     return -1;
   }

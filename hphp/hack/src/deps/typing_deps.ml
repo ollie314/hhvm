@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,7 +8,7 @@
  *
  *)
 
-
+open Core
 open Utils
 
 (**********************************)
@@ -30,13 +30,12 @@ module Dep = struct
     | Class of string
     | Fun of string
     | FunName of string
-    | CVar of string * string
-    | SCVar of string * string
+    | Prop of string * string
+    | SProp of string * string
     | Method of string * string
     | SMethod of string * string
     | Cstr of string
     | Extends of string
-    | Injectable
 
   type t = int
 
@@ -61,27 +60,66 @@ module Dep = struct
   let is_class x = x land 1 = 1
   let extends_of_class x = x lxor 1
 
-  let compare x y = x - y
+  let compare = (-)
 
+  let to_string = function
+    | GConst s -> "GConst "^s
+    | GConstName s -> "GConstName "^s
+    | Const (cls, s) -> spf "Const %s::%s" cls s
+    | Class s -> "Class "^s
+    | Fun s -> "Fun "^s
+    | FunName s -> "FunName "^s
+    | Prop (cls, s) -> spf "Prop %s::%s" cls s
+    | SProp (cls, s) -> spf "SProp %s::%s" cls s
+    | Method (cls, s) -> spf "Method %s::%s" cls s
+    | SMethod (cls, s) -> spf "SMethod %s::%s" cls s
+    | Cstr s -> "Cstr "^s
+    | Extends s -> "Extends "^s
+
+end
+
+module DepSet = Set.Make (Dep)
+
+(****************************************************************************)
+(* Module for a compact graph. *)
+(* Please consult hh_shared.c for the underlying representation. *)
+(****************************************************************************)
+module Graph = struct
+  external hh_add_dep: int -> unit     = "hh_add_dep"
+  external hh_get_dep: int -> int list = "hh_get_dep"
+
+  let add x y = hh_add_dep ((x lsl 31) lor y)
+
+  let get x =
+    let l = hh_get_dep x in
+    List.fold_left l ~f:begin fun acc node ->
+      DepSet.add node acc
+    end ~init:DepSet.empty
 end
 
 (*****************************************************************************)
 (* Module keeping track of what object depends on what. *)
 (*****************************************************************************)
-module Graph = Typing_graph
-
 let trace = ref true
 
+(* Instead of actually recording the dependencies in shared memory, we record
+ * string representations of them for printing out *)
+let debug_trace = ref false
+let dbg_dep_set = HashSet.create 0
+
 let add_idep root obj =
-  if !trace
-  then
-    let root =
-      match root with
-      | None -> assert false
-      | Some x -> x
-    in
-    Graph.add (Dep.make obj) (Dep.make root)
-  else ()
+  if !trace then Graph.add (Dep.make obj) (Dep.make root);
+  if !debug_trace then
+    (* Note: this is the inverse of what is actually stored in the shared
+     * memory table. I find it easier to read "X depends on Y" instead of
+     * "Y is a dependent of X" *)
+    HashSet.add dbg_dep_set
+      ((Dep.to_string root) ^ " -> " ^ (Dep.to_string obj))
+
+let dump_deps oc =
+  let xs = HashSet.fold (fun x xs -> x :: xs) dbg_dep_set [] in
+  let xs = List.sort String.compare xs in
+  List.iter xs print_endline
 
 let get_ideps_from_hash x =
   Graph.get x
@@ -93,8 +131,8 @@ let get_ideps x =
 let get_bazooka x =
   match x with
   | Dep.Const (cid, _)
-  | Dep.CVar (cid, _)
-  | Dep.SCVar (cid, _)
+  | Dep.Prop (cid, _)
+  | Dep.SProp (cid, _)
   | Dep.Method (cid, _)
   | Dep.Cstr cid
   | Dep.SMethod (cid, _)
@@ -104,16 +142,15 @@ let get_bazooka x =
   | Dep.FunName fid -> get_ideps (Dep.FunName fid)
   | Dep.GConst cid -> get_ideps (Dep.GConst cid)
   | Dep.GConstName cid -> get_ideps (Dep.GConstName cid)
-  | Dep.Injectable -> ISet.empty
 
 (*****************************************************************************)
 (* Module keeping track which files contain the toplevel definitions. *)
 (*****************************************************************************)
 
-let (ifiles: (int, Relative_path.Set.t) Hashtbl.t ref) = ref (Hashtbl.create 23)
+let (ifiles: (Dep.t, Relative_path.Set.t) Hashtbl.t ref) = ref (Hashtbl.create 23)
 
 let get_files deps =
-  ISet.fold begin fun dep acc ->
+  DepSet.fold begin fun dep acc ->
     try
       let files = Hashtbl.find !ifiles dep in
       Relative_path.Set.union files acc
@@ -121,26 +158,27 @@ let get_files deps =
   end deps Relative_path.Set.empty
 
 let update_files fast =
-  Relative_path.Map.iter begin fun filename info ->
-    let {FileInfo.funs; classes; types;
+  Relative_path.Map.iter fast begin fun filename info ->
+    let {FileInfo.funs; classes; typedefs;
          consts = _ (* TODO probably a bug #3844332 *);
          comments = _;
+         file_mode = _;
          consider_names_just_for_autoload = _;
         } = info in
-    let funs = List.fold_left begin fun acc (_, fun_id) ->
-      ISet.add (Dep.make (Dep.Fun fun_id)) acc
-    end ISet.empty funs in
-    let classes = List.fold_left begin fun acc (_, class_id) ->
-      ISet.add (Dep.make (Dep.Class class_id)) acc
-    end ISet.empty classes in
-    let classes = List.fold_left begin fun acc (_, type_id) ->
-      ISet.add (Dep.make (Dep.Class type_id)) acc
-    end classes types in
-    let defs = ISet.union funs classes in
-    ISet.iter begin fun def ->
+    let funs = List.fold_left funs ~f:begin fun acc (_, fun_id) ->
+      DepSet.add (Dep.make (Dep.Fun fun_id)) acc
+    end ~init:DepSet.empty in
+    let classes = List.fold_left classes ~f:begin fun acc (_, class_id) ->
+      DepSet.add (Dep.make (Dep.Class class_id)) acc
+    end ~init:DepSet.empty in
+    let classes = List.fold_left typedefs ~f:begin fun acc (_, type_id) ->
+      DepSet.add (Dep.make (Dep.Class type_id)) acc
+    end ~init:classes in
+    let defs = DepSet.union funs classes in
+    DepSet.iter begin fun def ->
       let previous =
         try Hashtbl.find !ifiles def with Not_found -> Relative_path.Set.empty
       in
-      Hashtbl.replace !ifiles def (Relative_path.Set.add filename previous)
+      Hashtbl.replace !ifiles def (Relative_path.Set.add previous filename)
     end defs
-  end fast
+  end

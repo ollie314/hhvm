@@ -1,9 +1,8 @@
 <?hh
-// Copyright 2004-present Facebook. All Rights Reserved.
 
 trait T1 {
   require extends X;
-  <<Override>>
+  <<__Override>>
   final protected function foo() { }
 }
 

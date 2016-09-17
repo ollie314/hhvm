@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -47,7 +47,6 @@ std::vector<PrimePair> primable_n(Store& store,
   for (auto& pair : pairs) {
     auto key = folly::sformat("{}_{}", prefix, counter);
     pair.key = alloc_leaked_string(key.c_str());
-    pair.len = key.size();
 
     Variant v(create(counter));
     store.constructPrime(v, pair);
@@ -73,7 +72,7 @@ std::vector<PrimePair> primable_ints(Store& store) {
  */
 std::vector<PrimePair> primable_objs(Store& store) {
   return primable_n(store, "obj", [&] (int64_t n) {
-    return Variant(SystemLib::AllocStdClassObject());
+      return Variant::attach(SystemLib::AllocStdClassObject().detach());
   });
 }
 
@@ -88,7 +87,7 @@ std::unique_ptr<Store> new_store() {
  * Make an APC table with some things primed for tests to use.
  */
 std::unique_ptr<Store> new_primed_store() {
-  s_apc_file_storage.enable("/tmp/apc_unit_test", 1ul << 20, 1ul << 32);
+  s_apc_file_storage.enable("/tmp/apc_unit_test", 1ul << 20);
 
   auto ret = folly::make_unique<Store>();
   ret->prime(primable_ints(*ret));
@@ -99,6 +98,7 @@ std::unique_ptr<Store> new_primed_store() {
 
 const StaticString s_key("key");
 const StaticString s_key2("key2");
+const StaticString s_foo("foo");
 const StaticString s_value1("value1");
 const StaticString s_value2("value2");
 
@@ -114,8 +114,8 @@ TEST(APC, Basic) {
   Variant got;
   EXPECT_EQ(store->get(s_key, got), true);
   EXPECT_TRUE(cellSame(*got.asCell(),
-    make_tv<KindOfStaticString>(s_value1.get())));
-  EXPECT_EQ(store->erase(s_key), true);
+    make_tv<KindOfPersistentString>(s_value1.get())));
+  EXPECT_EQ(store->eraseKey(s_key), true);
   EXPECT_EQ(store->get(s_key, got), false);
 }
 
@@ -126,11 +126,11 @@ TEST(APC, SetOverwrite) {
   Variant got;
   EXPECT_EQ(store->get(s_key, got), true);
   EXPECT_TRUE(cellSame(*got.asCell(),
-              make_tv<KindOfStaticString>(s_value1.get())));
+              make_tv<KindOfPersistentString>(s_value1.get())));
   store->set(s_key, Variant(s_value2), 1500);
   EXPECT_EQ(store->get(s_key, got), true);
   EXPECT_TRUE(cellSame(*got.asCell(),
-              make_tv<KindOfStaticString>(s_value2.get())));
+              make_tv<KindOfPersistentString>(s_value2.get())));
 }
 
 TEST(APC, Clear) {
@@ -189,7 +189,7 @@ TEST(APC, IncCas) {
   EXPECT_EQ(store->inc(s_key, 1, found), 0);
   EXPECT_FALSE(found);
   EXPECT_FALSE(store->cas(s_key, 1, 2));
-  store->erase(s_key);
+  store->eraseKey(s_key);
   EXPECT_EQ(store->inc(s_key, 1, found), 0);
   EXPECT_FALSE(found);
   EXPECT_FALSE(store->cas(s_key, 1, 2));
@@ -211,6 +211,34 @@ TEST(APC, BasicPrimeStuff) {
   EXPECT_EQ(store->cas("obj_2", 4, 5), false);
   EXPECT_EQ(store->cas("int_4", 4, 5), true);
   EXPECT_EQ(store->cas("int_5", 4, 5), false);
+}
+
+TEST(APC, SampleEntries) {
+  auto store = new_store();
+  // Empty store gives an empty sample.
+  auto entries = store->sampleEntriesInfo(10);
+  EXPECT_EQ(entries.size(), 0);
+  // Single-element store results in repetition.
+  store->set(s_foo, s_value1, 1500);
+  for (uint32_t count = 0; count <= 10; ++count) {
+    entries = store->sampleEntriesInfo(count);
+    EXPECT_EQ(entries.size(), count);
+    for (const auto& entry : entries) {
+      EXPECT_STREQ(entry.key.c_str(), "foo");
+    }
+  }
+  // More entries.
+  store->set(s_key, s_value1, 1500);
+  store->set(s_key2, s_value2, 1500);
+  for (uint32_t count = 0; count <= 10; ++count) {
+    entries = store->sampleEntriesInfo(count);
+    EXPECT_EQ(entries.size(), count);
+    for (const auto& entry : entries) {
+      EXPECT_TRUE(entry.key == std::string("foo") ||
+                  entry.key == std::string("key") ||
+                  entry.key == std::string("key2"));
+    }
+  }
 }
 
 //////////////////////////////////////////////////////////////////////

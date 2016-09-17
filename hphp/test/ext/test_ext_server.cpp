@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,8 @@
 #include "hphp/runtime/ext/server/ext_server.h"
 #include "hphp/runtime/server/pagelet-server.h"
 #include "hphp/runtime/server/xbox-server.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
 
@@ -40,7 +42,6 @@ bool TestExtServer::RunTests(const std::string &which) {
   RuntimeOption::XboxServerInfoReqInitDoc = root + "test_xbox_init.php";
   XboxServer::Restart();
 
-  RUN_TEST(test_dangling_server_proxy_old_request);
   RUN_TEST(test_pagelet_server_task_start);
   RUN_TEST(test_pagelet_server_task_status);
   RUN_TEST(test_pagelet_server_task_result);
@@ -53,11 +54,6 @@ bool TestExtServer::RunTests(const std::string &which) {
   return ret;
 }
 
-///////////////////////////////////////////////////////////////////////////////
-
-bool TestExtServer::test_dangling_server_proxy_old_request() {
-  return Count(true);
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Pagelet Server unit test
@@ -114,8 +110,18 @@ bool TestExtServer::test_pagelet_server_task_result() {
     VS(expected, HHVM_FN(pagelet_server_task_result)(tasks[i], ref(headers),
                                                      ref(code), 0));
     VS(code, 200);
-    VS(headers.toArray()[1], "ResponseHeader: okay");
 
+    Array headerArray = headers.toArray();
+    bool hasResponseHeader = false;
+    String expectedHeader = String("ResponseHeader: okay");
+
+    for (int headerIdx = 0; headerIdx < headerArray.size(); headerIdx++) {
+      if (headerArray[headerIdx].toString() == expectedHeader) {
+        hasResponseHeader = true;
+        break;
+      }
+    }
+    VERIFY(hasResponseHeader);
     VS(expected, HHVM_FN(pagelet_server_task_result)(tasks[i], ref(headers),
                                                      ref(code), 1));
     VS(code, 200);

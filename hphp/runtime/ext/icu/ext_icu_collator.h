@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_COLLATOR_H
 #define incl_HPHP_ICU_COLLATOR_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/ucol.h>
@@ -10,19 +10,18 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_Collator;
 
-class Collator : public IntlError {
- public:
+struct Collator : IntlError {
   Collator() {}
   Collator(const Collator&) = delete;
   Collator& operator=(const Collator& src) {
-    *this = src;
+    IntlError::operator =(src);
     char stack[U_COL_SAFECLONE_BUFFERSIZE];
     int32_t stack_size = sizeof(stack);
     UErrorCode error = U_ZERO_ERROR;
     m_collator = ucol_safeClone(src.m_collator, stack, &stack_size, &error);
     if (U_FAILURE(error)) {
-      throw getException("Something went wrong cloning Collator: %d",
-                         (int)error);
+      throwException("Something went wrong cloning Collator: %d",
+                     (int)error);
     }
     return *this;
   }

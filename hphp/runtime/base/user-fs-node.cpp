@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,8 +16,8 @@
 
 #include "hphp/runtime/base/user-fs-node.h"
 
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
-
 #include "hphp/runtime/vm/jit/translator-inline.h"
 
 
@@ -25,7 +25,8 @@ namespace HPHP {
 
 StaticString s_call("__call");
 
-UserFSNode::UserFSNode(Class* cls, const Variant& context /*= null */) {
+UserFSNode::UserFSNode(Class* cls,
+                       const req::ptr<StreamContext>& context /*= nullptr */) {
   VMRegAnchor _;
   const Func* ctor;
   m_cls = cls;
@@ -34,8 +35,8 @@ UserFSNode::UserFSNode(Class* cls, const Variant& context /*= null */) {
     raise_error("Unable to call %s'n constructor", m_cls->name()->data());
   }
 
-  m_obj = ObjectData::newInstance(m_cls);
-  m_obj.o_set("context", context);
+  m_obj = Object{m_cls};
+  m_obj.o_set("context", Variant(context));
   Variant ret;
   g_context->invokeFuncFew(ret.asTypedValue(), ctor, m_obj.get());
 

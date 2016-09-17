@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,6 @@
 #ifndef incl_HPHP_FILEINFO_COMPAT_H_
 #define incl_HPHP_FILEINFO_COMPAT_H_
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/directory.h"
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/base/preg.h"
@@ -29,14 +28,14 @@
 
 #define PCRE_CASELESS 0x00000001
 #define PCRE_MULTILINE 0x00000002
-#define emalloc HPHP::smart_malloc
-#define ecalloc HPHP::smart_calloc
-#define efree HPHP::smart_free
-#define erealloc HPHP::smart_realloc
+#define emalloc HPHP::req::malloc
+#define ecalloc HPHP::req::calloc
+#define efree HPHP::req::free
+#define erealloc HPHP::req::realloc
 #define php_stream HPHP::File
 
 inline char *estrndup(const char *s, unsigned int length) {
-  char* ret = (char*) emalloc(length + 1);
+  char* ret = (char*)HPHP::req::malloc_noptrs(length + 1);
   memcpy(ret, s, length);
   ret[length] = '\0';
   return ret;

@@ -30,16 +30,13 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
-#ifdef HAVE_UNISTD_H
-#include <unistd.h>
-#endif
 #include <fcntl.h>
 #include <string.h>
 #include <time.h>
 #ifdef PHP_WIN32
 #include <winsock2.h>
 #elif defined(NETWARE)
-#ifdef USE_WINSOCK    /* Modified to use Winsock (NOVSOCK2.H), atleast for now */
+#ifdef USE_WINSOCK    /* Modified to use Winsock (NOVSOCK2.H), at least for now */
 #include <novsock2.h>
 #else
 #include <sys/socket.h>
@@ -57,9 +54,8 @@
 #endif
 #include <errno.h>
 
-#if HAVE_SYS_TIME_H
-#include <sys/time.h>
-#endif
+#include <folly/portability/SysTime.h>
+#include <folly/portability/Unistd.h>
 
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
@@ -1613,8 +1609,8 @@ ftp_genlist(ftpbuf_t *ftp, const char *cmd, const char *path TSRMLS_DC)
 	databuf_t	*data = NULL;
 	char		*ptr;
 	int		ch, lastch;
-	int		size, rcvd;
-	int		lines;
+	size_t		size, rcvd;
+	size_t		lines;
 	char		**ret = NULL;
 	char		**entry;
 	char		*text;
@@ -1656,7 +1652,7 @@ ftp_genlist(ftpbuf_t *ftp, const char *cmd, const char *path TSRMLS_DC)
 	lines = 0;
 	lastch = 0;
 	while ((rcvd = my_recv(ftp, data->fd, data->buf, FTP_BUFSIZE))) {
-		if (rcvd == -1) {
+		if (rcvd == -1 || rcvd > ((size_t)(-1))-size) {
 			goto bail;
 		}
 
@@ -1666,8 +1662,6 @@ ftp_genlist(ftpbuf_t *ftp, const char *cmd, const char *path TSRMLS_DC)
 		for (ptr = data->buf; rcvd; rcvd--, ptr++) {
 			if (*ptr == '\n' && lastch == '\r') {
 				lines++;
-			} else {
-				size++;
 			}
 			lastch = *ptr;
 		}

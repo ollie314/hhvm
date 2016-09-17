@@ -16,13 +16,18 @@
 #ifndef incl_HPHP_TARGET_PROFILE_H_
 #define incl_HPHP_TARGET_PROFILE_H_
 
-#include <folly/Optional.h>
-
 #include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+
 #include "hphp/runtime/vm/jit/ir-instruction.h"
+#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/type.h"
+
+#include "hphp/util/type-scan.h"
+
+#include <folly/Optional.h>
 
 namespace HPHP {
 struct Func;
@@ -32,6 +37,8 @@ struct Class;
 namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
+
+void addTargetProfileInfo(const rds::Profile& key, const std::string& dbgInfo);
 
 /*
  * This is a utility for creating or querying a 'target profiling'
@@ -61,33 +68,67 @@ namespace HPHP { namespace jit {
  *      gen(ProfMyTarget, RDSHandleData { prof.handle() }, ...);
  *    }
  *
+ * The type must have a toString(...) method returning a std::string with a
+ * single human-readable line representing the state of the profile, taking
+ * the same set of extra arguments as the reduce function passed to 'data'.
  */
 template<class T>
 struct TargetProfile {
-  explicit TargetProfile(const TransContext& context,
-                         BCMarker marker,
-                         const StringData* name)
-    : m_link(createLink(context, marker, name))
+  TargetProfile(TransID profTransID,
+                TransKind kind,
+                Offset bcOff,
+                const StringData* name,
+                size_t extraSize = 0)
+    : m_link(createLink(profTransID, kind, bcOff, name, extraSize))
+    , m_kind(kind)
+    , m_key{profTransID, bcOff, name}
+  {}
+
+  TargetProfile(const TransContext& context,
+                BCMarker marker,
+                const StringData* name,
+                size_t extraSize = 0)
+    : TargetProfile(context.kind == TransKind::Profile ? context.transID
+                                                       : marker.profTransID(),
+                    context.kind,
+                    marker.bcOff(),
+                    name,
+                    extraSize)
   {}
 
   /*
    * Access the data we collected during profiling.
    *
    * ReduceFn is used to fold the data from each local RDS slot.  It must have
-   * the signature void(T&, const T&), and should assume the second argument
-   * might be concurrently written to by other threads running in the
-   * translation cache.
+   * the signature void(T&, const T&, Args...), and should assume the second
+   * argument might be concurrently written to by other threads running in the
+   * translation cache. Any arguments passed to data() after reduce will be
+   * forwarded to the reduce function.
+   *
+   * Most callers probably want the second overload, for simplicity. The
+   * two-argument version is for variable-sized T, and the caller must ensure
+   * that out is zero-initialized before calling data().
    *
    * Pre: optimizing()
    */
-  template<class ReduceFn>
-  T data(ReduceFn reduce) const {
-    assert(optimizing());
+  template<class ReduceFn, class... Args>
+  void data(T& out, ReduceFn reduce, Args&&... extraArgs) const {
+    assertx(optimizing());
     auto const hand = handle();
-    auto accum = T{};
-    for (auto& base : RDS::allTLBases()) {
-      reduce(accum, RDS::handleToRef<T>(base, hand));
+    for (auto& base : rds::allTLBases()) {
+      reduce(out, rds::handleToRef<T>(base, hand),
+             std::forward<Args>(extraArgs)...);
     }
+    if (RuntimeOption::EvalDumpTargetProfiles) {
+      addTargetProfileInfo(m_key,
+                           out.toString(std::forward<Args>(extraArgs)...));
+    }
+  }
+
+  template<class ReduceFn, class... Args>
+  T data(ReduceFn reduce, Args&&... extraArgs) const {
+    auto accum = T{};
+    data(accum, reduce, std::forward<Args>(extraArgs)...);
     return accum;
   }
 
@@ -98,152 +139,243 @@ struct TargetProfile {
    * attached for some reason.).
    */
   bool profiling() const {
-    return mcg->tx().mode() == TransKind::Profile;
+    return m_kind == TransKind::Profile;
   }
   bool optimizing() const {
-    return mcg->tx().mode() == TransKind::Optimize && m_link.bound();
+    return m_kind == TransKind::Optimize && m_link.bound();
   }
 
   /*
    * Access the handle to the link.  You generally should only need to do this
    * if profiling().
    */
-  RDS::Handle handle() const { return m_link.handle(); }
+  rds::Handle handle() const { return m_link.handle(); }
 
 private:
-  RDS::Link<T> link() {
-    if (!m_link) m_link = createLink();
-    return *m_link;
-  }
+  static rds::Link<T> createLink(TransID profTransID,
+                                 TransKind kind,
+                                 Offset bcOff,
+                                 const StringData* name,
+                                 size_t extraSize) {
+    auto const rdsKey = rds::Profile{profTransID, bcOff, name};
 
-  static RDS::Link<T> createLink(const TransContext& context,
-                                 BCMarker marker,
-                                 const StringData* name) {
-    switch (mcg->tx().mode()) {
+    switch (kind) {
     case TransKind::Profile:
-      return RDS::bind<T>(
-        RDS::Profile {
-          context.transID,
-          marker.bcOff(),
-          name
-        },
-        RDS::Mode::Local
-      );
+      return rds::bind<T>(rdsKey, rds::Mode::Local, extraSize);
 
     case TransKind::Optimize:
-      if (isValidTransID(marker.m_profTransID)) {
-        return RDS::attach<T>(
-          RDS::Profile {
-            marker.m_profTransID, // transId from profiling translation
-            marker.bcOff(),
-            name
-          }
-        );
-      }
+      if (isValidTransID(profTransID)) return rds::attach<T>(rdsKey);
+
       // fallthrough
     case TransKind::Anchor:
-    case TransKind::Prologue:
     case TransKind::Interp:
     case TransKind::Live:
-    case TransKind::Proflogue:
+    case TransKind::LivePrologue:
+    case TransKind::ProfPrologue:
+    case TransKind::OptPrologue:
     case TransKind::Invalid:
-      return RDS::Link<T>(RDS::kInvalidHandle);
+      return rds::Link<T>(rds::kInvalidHandle);
     }
     not_reached();
   }
 
 private:
-  RDS::Link<T> const m_link;
+  rds::Link<T> const m_link;
+  TransKind const m_kind;
+  rds::Profile const m_key;
 };
 
 //////////////////////////////////////////////////////////////////////
 
-/*
- * DecRefProfile is used to track which DecRef instructions are likely to go to
- * zero. During an optimized translation, the release path will be put in
- * acold if it rarely went to zero during profiling.
- */
-struct DecRefProfile {
-  uint16_t decrement;
-  uint16_t destroy;
+struct MethProfile {
+  using RawType = LowPtr<Class>::storage_type;
 
-  int hitRate() const {
-    return decrement ? destroy * 100 / decrement : 0;
-  }
-
-  std::string toString() const {
-    return folly::format("decl: {:3}, destroy: {:3} ({:3}%)",
-                         decrement, destroy, hitRate()).str();
-  }
-
-  static void reduce(DecRefProfile& a, const DecRefProfile& b) {
-    // This is slightly racy but missing a few either way isn't a
-    // disaster. It's already racy at profiling time because the two values
-    // aren't updated atomically.
-    a.decrement += b.decrement;
-    a.destroy   += b.destroy;
-  }
-};
-typedef folly::Optional<TargetProfile<DecRefProfile>> OptDecRefProfile;
-
-//////////////////////////////////////////////////////////////////////
-
-/*
- * This records the specific types of values that pass KindOfString guards,
- * which fall into one of three categories: KindOfStaticString, KindOfString
- * with a static _count, or KindOfString with a non-static _count. When a guard
- * only sees KindOfStaticString during profiling, we replace it with a
- * KindOfStaticString guard during optimized translations.
- */
-struct StrProfile {
-  uint32_t staticStr; // m_type == KindOfStaticString
-  uint32_t strStatic; // m_type == KindOfString, _count == StaticValue
-  uint32_t str;       // m_type == KindOfString, _count != StaticValue
-
-  std::string toString() const {
-    return folly::format("StaticStr: {:5}, StrStatic: {:5}, Str: {:5}",
-                         staticStr, strStatic, str).str();
-  }
-
-  size_t total() const {
-    return staticStr + strStatic + str;
-  }
-
-  static void reduce(StrProfile& a, const StrProfile& b) {
-    a.staticStr += b.staticStr;
-    a.strStatic += b.strStatic;
-    a.str += b.str;
-  }
-};
-
-/*
- * Record profiling information about non-packed arrays. This counts the
- * number of times a non-packed array was used as the base of a CGetElem
- * operation.
- */
-struct NonPackedArrayProfile {
-  int32_t count;
-  static void reduce(NonPackedArrayProfile& a, const NonPackedArrayProfile& b) {
-    a.count += b.count;
-  }
-};
-
-//////////////////////////////////////////////////////////////////////
-
-struct ReleaseVVProfile {
-  uint16_t executed;
-  uint16_t released;
-
-  int percentReleased() const {
-    return executed ? (100 * released / executed) : 0;
+  enum class Tag {
+    UniqueClass = 0,
+    UniqueMeth = 1,
+    BaseMeth = 2,
+    InterfaceMeth = 3,
+    Invalid = 4
   };
 
-  static void reduce(ReleaseVVProfile& a, const ReleaseVVProfile& b) {
-    // Racy but OK -- just used for profiling to trigger optimization.
-    a.executed += b.executed;
-    a.released += b.released;
+  MethProfile() : m_curMeth(nullptr), m_curClass(nullptr) {}
+  MethProfile(const MethProfile& other) :
+      m_curMeth(other.m_curMeth),
+      m_curClass(other.m_curClass) {}
+
+  std::string toString() const;
+
+  const Class* uniqueClass() const {
+    return curTag() == Tag::UniqueClass ? rawClass() : nullptr;
   }
+
+  const Func* uniqueMeth() const {
+    return curTag() == Tag::UniqueMeth || curTag() == Tag::UniqueClass ?
+      rawMeth() : nullptr;
+  }
+
+  const Func* baseMeth() const {
+    return curTag() == Tag::BaseMeth ? rawMeth() : nullptr;
+  }
+
+  const Func* interfaceMeth() const {
+    return curTag() == Tag::InterfaceMeth ? rawMeth() : nullptr;
+  }
+
+  void reportMeth(const ActRec* ar, const Class* cls) {
+    auto const meth = ar->func();
+    if (!cls && meth->cls()) {
+      cls = ar->hasThis() ?
+        ar->getThis()->getVMClass() : ar->getClass();
+    }
+    reportMethHelper(cls, meth);
+  }
+
+  static void reduce(MethProfile& a, const MethProfile& b);
+ private:
+  void reportMethHelper(const Class* cls, const Func* meth);
+
+  static Tag toTag(uintptr_t val) {
+    return static_cast<Tag>(val & 7);
+  }
+
+  static const Func* fromValue(uintptr_t value) {
+    return (Func*)(value & uintptr_t(-8));
+  }
+
+  Tag curTag() const { return toTag(methValue()); }
+
+  const Class* rawClass() const {
+    return m_curClass;
+  }
+
+  const Func* rawMeth() const {
+    return fromValue(methValue());
+  }
+
+  const uintptr_t methValue() const {
+    return uintptr_t(m_curMeth.get());
+  }
+
+  void setMeth(const Func* meth, Tag tag) {
+    auto encoded_meth = (Func*)(uintptr_t(meth) | static_cast<uintptr_t>(tag));
+    m_curMeth = encoded_meth;
+  }
+
+  AtomicLowPtr<const Func,
+               std::memory_order_acquire, std::memory_order_release> m_curMeth;
+  AtomicLowPtr<const Class,
+               std::memory_order_acquire, std::memory_order_release> m_curClass;
 };
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * ArrayKindProfile profiles the distribution of the array kinds
+ * observed for a given value.  The array kinds currently tracked are
+ * Empty, Packed, and Mixed.
+ */
+struct ArrayKindProfile {
+
+  static const uint32_t kNumProfiledArrayKinds = 4;
+
+  std::string toString() const {
+    std::ostringstream out;
+    for (auto c : count) out << folly::format("{},", c);
+    return out.str();
+  }
+
+  static void reduce(ArrayKindProfile& a, const ArrayKindProfile& b) {
+    for (uint32_t i = 0; i < kNumProfiledArrayKinds; i++) {
+      a.count[i] += b.count[i];
+    }
+  }
+
+  void report(ArrayData::ArrayKind kind);
+
+  /*
+   * Returns what fraction of the total profiled arrays had the given `kind'.
+   */
+  double fraction(ArrayData::ArrayKind kind) const;
+
+  /*
+   * Returns the total number of samples profiled so far.
+   */
+  uint32_t total() const {
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < kNumProfiledArrayKinds; i++) {
+      sum += count[i];
+    }
+    return sum;
+  }
+
+  uint32_t count[kNumProfiledArrayKinds];
+};
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * TypeProfile keeps the union of all the types observed during profiling.
+ */
+struct TypeProfile {
+  Type type; // this gets initialized with 0, which is TBottom
+  static_assert(Type::Bits::kBottom == 0, "Assuming TBottom is 0");
+
+  std::string toString() const { return type.toString(); }
+
+  void report(TypedValue tv) {
+    type |= typeFromTV(&tv, nullptr);
+  }
+
+  static void reduce(TypeProfile& a, const TypeProfile& b) {
+    a.type |= b.type;
+  }
+
+  // In RDS but can't contain pointers to request-allocated data
+  TYPE_SCAN_IGNORE_ALL;
+};
+
+//////////////////////////////////////////////////////////////////////
+
+struct SwitchProfile {
+  SwitchProfile(const SwitchProfile&) = delete;
+  SwitchProfile& operator=(const SwitchProfile&) = delete;
+
+  std::string toString(int nCases) const {
+    std::ostringstream out;
+    for (int i = 0; i < nCases; ++i) out << folly::format("{},", cases[i]);
+    return out.str();
+  }
+
+  uint32_t cases[0]; // dynamically sized
+
+  static void reduce(SwitchProfile& a, const SwitchProfile& b, int nCases) {
+    for (uint32_t i = 0; i < nCases; ++i) {
+      a.cases[i] += b.cases[i];
+    }
+  }
+
+  // In RDS but can't contain pointers to request-allocated data
+  TYPE_SCAN_IGNORE_ALL;
+};
+
+struct SwitchCaseCount {
+  int32_t caseIdx;
+  uint32_t count;
+
+  bool operator<(const SwitchCaseCount& b) const { return count > b.count; }
+};
+
+/*
+ * Collect the data for the given SwitchProfile, and return a vector of case
+ * indexes and hit count, sorted in descending order of hit count.
+ */
+std::vector<SwitchCaseCount> sortedSwitchProfile(
+  TargetProfile<SwitchProfile>& profile,
+  int32_t nCases
+);
+
+//////////////////////////////////////////////////////////////////////
 
 }}
 

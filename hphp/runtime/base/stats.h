@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -35,20 +35,11 @@ namespace Stats {
   STAT(TgtCache_StaticMethodFHit) \
   STAT(TgtCache_StaticMethodFMiss) \
   STAT(TgtCache_StaticMethodFFill) \
-  /* Type prediction stats */ \
-  STAT(TypePred_Insert) \
-  STAT(TypePred_Evict) \
-  STAT(TypePred_Hit) \
-  STAT(TypePred_Miss) \
-  STAT(TypePred_MissTooFew) \
-  STAT(TypePred_MissTooWeak) \
   /* Translation cache statistics */ \
   STAT(TC_Sync) \
   STAT(TC_SyncUnwind) \
   STAT(TC_CatchTrace) \
   STAT(TC_CatchSideExit) \
-  STAT(TC_SetMStrGuess_Hit) \
-  STAT(TC_SetMStrGuess_Miss) \
   STAT(TC_DecRef_NZ) \
   STAT(TC_DecRef_Normal_Decl) \
   STAT(TC_DecRef_Normal_Destroy) \
@@ -77,6 +68,7 @@ namespace Stats {
   STAT(UnitMerge_mergeable_global) \
   STAT(UnitMerge_mergeable_class) \
   STAT(UnitMerge_mergeable_require) \
+  STAT(UnitMerge_mergeable_typealias) \
   STAT(UnitMerge_redo_hoistable) \
   /* stub reuse stats */ \
   STAT(Astub_New) \
@@ -85,19 +77,14 @@ namespace Stats {
   STAT(Switch_Generic) \
   STAT(Switch_Integer) \
   STAT(Switch_String) \
-  /* ARM simulator */ \
-  STAT(vixl_SimulatedInstr) \
-  STAT(vixl_SimulatedLoad) \
-  STAT(vixl_SimulatedStore) \
-  /* ArrayGet */ \
-  STAT(ArrayGet_Total) \
-  STAT(ArrayGet_Opt) \
-  STAT(ArrayGet_Mono) \
-  STAT(ArrayGet_Packed) \
-  STAT(ArrayGet_Mixed) \
   /* ObjectData construction */ \
   STAT(ObjectData_new_dtor_yes) \
   STAT(ObjectData_new_dtor_no) \
+  STAT(ObjMethod_total) \
+  STAT(ObjMethod_known) \
+  STAT(ObjMethod_methodslot) \
+  STAT(ObjMethod_ifaceslot) \
+  STAT(ObjMethod_cached) \
 
 enum StatCounter {
 #define STAT(name) \
@@ -132,18 +119,9 @@ inline void inc(StatCounter stat, int n = 1) {
 static_assert(static_cast<uint64_t>(OpLowInvalid) == 0,
               "stats.h assumes OpLowInvalid == 0");
 
-inline StatCounter opcodeToStatCounter(Op opc) {
-  return StatCounter(Instr_InterpBBLowInvalid +
-                     STATS_PER_OPCODE * uint8_t(opc));
-}
-
-inline void incOp(Op opc) {
-  inc(opcodeToStatCounter(opc));
-}
-
-inline StatCounter opcodeToTranslStatCounter(Op opc) {
+inline StatCounter opToTranslStat(Op opc) {
   return StatCounter(Instr_TranslLowInvalid +
-                     STATS_PER_OPCODE * uint8_t(opc));
+                     STATS_PER_OPCODE * size_t(opc));
 }
 
 extern void init();

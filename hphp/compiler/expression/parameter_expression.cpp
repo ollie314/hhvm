@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -107,20 +107,21 @@ const std::string ParameterExpression::getTypeHintDisplayName() const {
 ///////////////////////////////////////////////////////////////////////////////
 // parser functions
 
-void ParameterExpression::parseHandler(ClassScopePtr cls) {
+void ParameterExpression::parseHandler(FileScopeRawPtr file,
+                                       ClassScopePtr cls) {
   // Trait has not been 'inlined' into using class so context is not available
   if (!m_type.empty() && !cls->isTrait()) {
     fixupSelfAndParentTypehints(cls);
 
     if (m_defaultValue) {
-      compatibleDefault();
+      compatibleDefault(file);
     }
   }
 }
 
 void ParameterExpression::fixupSelfAndParentTypehints(ClassScopePtr cls) {
   if (m_type == "self") {
-    m_type = cls->getName();
+    m_type = toLower(cls->getOriginalName());
   } else if (m_type == "parent") {
     if (!cls->getOriginalParent().empty()) {
       m_type = toLower(cls->getOriginalParent());
@@ -133,17 +134,6 @@ void ParameterExpression::fixupSelfAndParentTypehints(ClassScopePtr cls) {
 
 void ParameterExpression::analyzeProgram(AnalysisResultPtr ar) {
   if (m_defaultValue) m_defaultValue->analyzeProgram(ar);
-
-  if (ar->getPhase() == AnalysisResult::AnalyzeFinal) {
-    if (!m_type.empty()) {
-      addUserClass(ar, m_type);
-    }
-    // Have to use non const ref params for magic methods
-    FunctionScopePtr fs = getFunctionScope();
-    if (fs->isMagicMethod() || fs->getName() == "offsetget") {
-      fs->getVariables()->addLvalParam(m_name);
-    }
-  }
 }
 
 ConstructPtr ParameterExpression::getNthKid(int n) const {
@@ -171,69 +161,9 @@ void ParameterExpression::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-TypePtr ParameterExpression::getTypeSpecForClass(AnalysisResultPtr ar,
-                                                 bool forInference) {
-  TypePtr ret;
-  if (forInference) {
-    ClassScopePtr cls = ar->findClass(m_type);
-    if (!cls || cls->isRedeclaring() || cls->derivedByDynamic()) {
-      if (!cls && getScope()->isFirstPass() && !ar->isTypeAliasName(m_type)) {
-        ConstructPtr self = shared_from_this();
-        Compiler::Error(Compiler::UnknownClass, self);
-      }
-      ret = Type::Variant;
-    }
-    if (cls) {
-      // Classes must be redeclaring if there are also type aliases
-      // with the same name.
-      assert(!ar->isTypeAliasName(m_type) || cls->isRedeclaring());
-    }
-  }
-  if (!ret) {
-    ret = ar->isTypeAliasName(m_type) || !Option::WholeProgram
-      ? Type::Variant
-      : Type::CreateObjectType(m_type);
-  }
-  always_assert(ret);
-  return ret;
-}
-
-TypePtr ParameterExpression::getTypeSpec(AnalysisResultPtr ar,
-                                         bool forInference) {
-  const Type::TypePtrMap &types = Type::GetTypeHintTypes(m_hhType);
-  Type::TypePtrMap::const_iterator iter;
-
-  TypePtr ret;
-  if (m_type.empty()) {
-    ret = Type::Some;
-  } else if ((iter = types.find(m_type)) != types.end()) {
-    ret = iter->second;
-  } else {
-    ret = getTypeSpecForClass(ar, forInference);
-  }
-
-  ConstantExpressionPtr p;
-  if (ret->isPrimitive() &&
-      m_defaultValue &&
-      (p = dynamic_pointer_cast<ConstantExpression>(m_defaultValue)) &&
-      p->isNull()) {
-    // if we have a primitive type on the LHS w/ a default
-    // of null, then don't bother to infer it's type, since we will
-    // not specialize for this case
-    ret = Type::Some;
-  }
-
-  // we still want the above to run, so to record errors and infer defaults
-  if (m_ref && forInference) {
-    ret = Type::Variant;
-  }
-
-  return ret;
-}
-
 static bool useHackTypeHintErrorMessage(const char* hint) {
   String typeName(hint);
-  MaybeDataType dt = TypeConstraint::typeNameToMaybeDataType(typeName.get());
+  MaybeDataType dt = nameToMaybeDataType(typeName.get());
   if (!dt.hasValue()) {
     return false;
   }
@@ -249,7 +179,7 @@ static bool useHackTypeHintErrorMessage(const char* hint) {
   }
 }
 
-void ParameterExpression::compatibleDefault() {
+void ParameterExpression::compatibleDefault(FileScopeRawPtr file) {
   bool compat = true;
   if (!m_defaultValue || !hasTypeHint()) return;
 
@@ -272,7 +202,8 @@ void ParameterExpression::compatibleDefault() {
   [&] {
     switch (defaultType) {
       case KindOfUninit:
-        compat = m_hhType;
+        // PHP 7 allows user defined constants as parameter default values
+        compat = m_hhType || RuntimeOption::PHP7_ScalarTypes;
         return;
       case KindOfNull:
         compat = true;
@@ -286,6 +217,9 @@ void ParameterExpression::compatibleDefault() {
         compat = (!strcasecmp(hint, "HH\\int") ||
                   !strcasecmp(hint, "HH\\num") ||
                   !strcasecmp(hint, "HH\\arraykey") ||
+                  // PHP 7 allows widening conversions
+                  (RuntimeOption::PHP7_ScalarTypes &&
+                   !strcasecmp(hint, "HH\\float")) ||
                   (m_hhType && interface_supports_int(hint)));
         return;
 
@@ -295,13 +229,32 @@ void ParameterExpression::compatibleDefault() {
                   (m_hhType && interface_supports_double(hint)));
         return;
 
-      case KindOfStaticString:
+      case KindOfPersistentString:
       case KindOfString:
         compat = (!strcasecmp(hint, "HH\\string") ||
                   !strcasecmp(hint, "HH\\arraykey") ||
                   (m_hhType && interface_supports_string(hint)));
         return;
 
+      case KindOfPersistentVec:
+      case KindOfVec:
+        compat = (!strcasecmp(hint, "HH\\vec") ||
+                  (m_hhType && interface_supports_vec(hint)));
+        return;
+
+      case KindOfPersistentDict:
+      case KindOfDict:
+        compat = (!strcasecmp(hint, "HH\\dict") ||
+                  (m_hhType && interface_supports_dict(hint)));
+        return;
+
+      case KindOfPersistentKeyset:
+      case KindOfKeyset:
+        compat = (!strcasecmp(hint, "HH\\keyset")  ||
+                  (m_hhType && interface_supports_keyset(hint)));
+        return;
+
+      case KindOfPersistentArray:
       case KindOfArray:
         compat = (!strcasecmp(hint, "array") ||
                   (m_hhType && interface_supports_array(hint)));
@@ -334,59 +287,13 @@ void ParameterExpression::compatibleDefault() {
        }
     }
 
-    string name = getName();
-    string tdefault = HPHP::tname(defaultType);
-    parseTimeFatal(Compiler::BadDefaultValueType, msg,
+    auto const& name = getName();
+    auto const tdefault = HPHP::tname(defaultType);
+    parseTimeFatal(file,
+                   Compiler::BadDefaultValueType, msg,
                    name.c_str(), tdefault.c_str(),
                    getTypeHintDisplayName().c_str());
   }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void ParameterExpression::outputCodeModel(CodeGenerator &cg) {
-  auto propCount = 2;
-  if (m_attributeList) propCount++;
-  if (m_modifier != 0) propCount++;
-  if (m_originalType) propCount++;
-  if (m_ref) propCount++;
-  if (m_defaultValue != nullptr) propCount++;
-  cg.printObjectHeader("ParameterDeclaration", propCount);
-  if (m_attributeList) {
-    cg.printPropertyHeader("attributes");
-    cg.printExpressionVector(m_attributeList);
-  }
-  if (m_modifier != 0) {
-    cg.printPropertyHeader("modifiers");
-    cg.printf("V:9:\"HH\\Vector\":1:{");
-    cg.printObjectHeader("Modifier", 1);
-    cg.printPropertyHeader("name");
-    switch (m_modifier) {
-      case T_PUBLIC: cg.printValue("public"); break;
-      case T_PROTECTED: cg.printValue("protected"); break;
-      case T_PRIVATE: cg.printValue("private"); break;
-      default: assert(false);
-    }
-    cg.printObjectFooter();
-    cg.printf("}");
-  }
-  if (m_originalType) {
-    cg.printPropertyHeader("typeAnnotation");
-    m_originalType->outputCodeModel(cg);
-  }
-  if (m_ref) {
-    cg.printPropertyHeader("isPassedByReference");
-    cg.printBool(true);
-  }
-  cg.printPropertyHeader("name");
-  cg.printValue(m_name);
-  if (m_defaultValue) {
-    cg.printPropertyHeader("expression");
-    m_defaultValue->outputCodeModel(cg);
-  }
-  cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
-  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

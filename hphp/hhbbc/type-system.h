@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,7 +26,6 @@
 
 #include "hphp/util/copy-ptr.h"
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/base/repo-auth-type-array.h"
 
@@ -197,6 +196,18 @@ enum trep : uint32_t {
   BRes      = 1 << 13,
   BCls      = 1 << 14,
   BRef      = 1 << 15,
+  BSVecE    = 1 << 16, // static empty vec
+  BCVecE    = 1 << 17, // counted empty vec
+  BSVecN    = 1 << 18, // static non-empty vec
+  BCVecN    = 1 << 19, // counted non-empty vec
+  BSDictE   = 1 << 20, // static empty dict
+  BCDictE   = 1 << 21, // counted empty dict
+  BSDictN   = 1 << 22, // static non-empty dict
+  BCDictN   = 1 << 23, // counted non-empty dict
+  BSKeysetE = 1 << 24, // static empty keyset
+  BCKeysetE = 1 << 25, // counted empty keyset
+  BSKeysetN = 1 << 26, // static non-empty keyset
+  BCKeysetN = 1 << 27, // counted non-empty keyset
 
   BNull     = BUninit | BInitNull,
   BBool     = BFalse | BTrue,
@@ -207,6 +218,22 @@ enum trep : uint32_t {
   BArrE     = BSArrE | BCArrE,
   BArrN     = BSArrN | BCArrN,   // may have value / data
   BArr      = BArrE | BArrN,
+  BSVec     = BSVecE | BSVecN,
+  BCVec     = BCVecE | BCVecN,
+  BVecE     = BSVecE | BCVecE,
+  BVecN     = BSVecN | BCVecN,
+  BVec      = BVecE | BVecN,
+  BSDict    = BSDictE | BSDictN,
+  BCDict    = BCDictE | BCDictN,
+  BDictE    = BSDictE | BCDictE,
+  BDictN    = BSDictN | BCDictN,
+  BDict     = BDictE | BDictN,
+  BSKeyset  = BSKeysetE | BSKeysetN,
+  BCKeyset  = BCKeysetE | BCKeysetN,
+  BKeysetE  = BSKeysetE | BCKeysetE,
+  BKeysetN  = BSKeysetN | BCKeysetN,
+  BKeyset   = BKeysetE | BKeysetN,
+
 
   // Nullable types.
   BOptTrue     = BInitNull | BTrue,
@@ -229,12 +256,40 @@ enum trep : uint32_t {
   BOptArr      = BInitNull | BArr,       // may have value / data
   BOptObj      = BInitNull | BObj,       // may have data
   BOptRes      = BInitNull | BRes,
+  BOptSVecE    = BInitNull | BSVecE,
+  BOptCVecE    = BInitNull | BCVecE,
+  BOptSVecN    = BInitNull | BSVecN,
+  BOptCVecN    = BInitNull | BCVecN,
+  BOptSVec     = BInitNull | BSVec,
+  BOptCVec     = BInitNull | BCVec,
+  BOptVecE     = BInitNull | BVecE,
+  BOptVecN     = BInitNull | BVecN,
+  BOptVec      = BInitNull | BVec,
+  BOptSDictE   = BInitNull | BSDictE,
+  BOptCDictE   = BInitNull | BCDictE,
+  BOptSDictN   = BInitNull | BSDictN,
+  BOptCDictN   = BInitNull | BCDictN,
+  BOptSDict    = BInitNull | BSDict,
+  BOptCDict    = BInitNull | BCDict,
+  BOptDictE    = BInitNull | BDictE,
+  BOptDictN    = BInitNull | BDictN,
+  BOptDict     = BInitNull | BDict,
+  BOptSKeysetE = BInitNull | BSKeysetE,
+  BOptCKeysetE = BInitNull | BCKeysetE,
+  BOptSKeysetN = BInitNull | BSKeysetN,
+  BOptCKeysetN = BInitNull | BCKeysetN,
+  BOptSKeyset  = BInitNull | BSKeyset,
+  BOptCKeyset  = BInitNull | BCKeyset,
+  BOptKeysetE  = BInitNull | BKeysetE,
+  BOptKeysetN  = BInitNull | BKeysetN,
+  BOptKeyset   = BInitNull | BKeyset,
 
   BInitPrim = BInitNull | BBool | BNum,
   BPrim     = BInitPrim | BUninit,
-  BInitUnc  = BInitPrim | BSStr | BSArr,
+  BInitUnc  = BInitPrim | BSStr | BSArr | BSVec | BSDict | BSKeyset,
   BUnc      = BInitUnc | BUninit,
-  BInitCell = BInitNull | BBool | BInt | BDbl | BStr | BArr | BObj | BRes,
+  BInitCell = BInitNull | BBool | BInt | BDbl | BStr | BArr | BObj | BRes |
+              BVec | BDict | BKeyset,
   BCell     = BUninit | BInitCell,
   BInitGen  = BInitCell | BRef,
   BGen      = BUninit | BInitGen,
@@ -256,6 +311,12 @@ enum class DataTag : uint8_t {
   ArrPackedN,
   ArrStruct,
   ArrMapN,
+  VecVal,
+  Vec,
+  DictVal,
+  Dict,
+  KeysetVal,
+  Keyset,
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -294,6 +355,9 @@ struct DArrPackedN;
 struct DArrStruct;
 struct DArrMapN;
 using StructMap = boost::container::flat_map<SString,Type>;
+struct DVec;
+struct DDict;
+struct DKeyset;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -386,7 +450,7 @@ private:
   friend bool is_opt(Type);
   friend folly::Optional<Cell> tv(Type);
   friend std::string show(Type);
-  friend struct ArrKey disect_key(const Type&);
+  friend struct ArrKey disect_array_key(const Type&);
   friend Type array_elem(const Type&, const Type&);
   friend Type arrayN_set(Type, const Type&, const Type&);
   friend Type array_set(Type, const Type&, const Type&);
@@ -395,6 +459,35 @@ private:
   friend std::pair<Type,Type> iter_types(const Type&);
   friend RepoAuthType make_repo_type_arr(ArrayTypeTable::Builder&,
     const Type&);
+
+  friend struct VecKey disect_vec_key(const Type&);
+  friend struct StrictKey disect_strict_key(const Type&);
+
+  friend std::pair<Type, bool> vec_elem(const Type&, const Type&);
+  friend std::pair<Type, bool> vec_set(Type, const Type&, const Type&);
+  friend Type vec_newelem(Type, const Type&);
+  friend std::pair<Type, bool> dict_elem(const Type&, const Type&);
+  friend std::pair<Type, bool> dict_set(Type, const Type&, const Type&);
+  friend Type dict_newelem(Type, const Type&);
+  friend std::pair<Type, bool> keyset_elem(const Type&, const Type&);
+  friend std::pair<Type, bool> keyset_set(Type, const Type&, const Type&);
+  friend Type keyset_newelem(Type, const Type&);
+
+  friend Type spec_vec_union(Type, Type);
+  friend Type spec_dict_union(Type, Type);
+  friend Type spec_keyset_union(Type, Type);
+  friend bool is_specialized_vec(const Type&);
+  friend bool is_specialized_dict(const Type&);
+  friend bool is_specialized_keyset(const Type&);
+  friend Type toDVecType(Type);
+  friend Type toDDictType(Type);
+  friend Type toDKeysetType(Type);
+  friend Type vec_val(SArray);
+  friend Type dict_val(SArray);
+  friend Type keyset_val(SArray);
+  template<trep t> friend Type dict_n_impl(Type, Type);
+  template<trep t> friend Type vec_n_impl(Type, folly::Optional<int64_t>);
+  template<trep t> friend Type keyset_n_impl(Type);
 
 private:
   union Data {
@@ -412,6 +505,9 @@ private:
     copy_ptr<DArrPackedN> apackedn;
     copy_ptr<DArrStruct> astruct;
     copy_ptr<DArrMapN> amapn;
+    copy_ptr<DVec> vec;
+    copy_ptr<DDict> dict;
+    copy_ptr<DKeyset> keyset;
   };
 
   template<class Ret, class T, class Function>
@@ -470,6 +566,31 @@ struct DArrMapN {
   Type val;
 };
 
+struct DVec {
+  explicit DVec(Type t, folly::Optional<int64_t> s)
+    : val(std::move(t))
+    , len(std::move(s))
+  {}
+
+  Type val;
+  folly::Optional<int64_t> len;
+};
+
+struct DDict {
+  explicit DDict(Type k, Type v)
+    : key(std::move(k))
+    , val(std::move(v))
+  {}
+
+  Type key;
+  Type val;
+};
+
+struct DKeyset {
+  explicit DKeyset(Type kv) : keyval(std::move(kv)) {}
+  Type keyval;
+};
+
 //////////////////////////////////////////////////////////////////////
 
 #define X(y) const Type T##y = Type(B##y);
@@ -492,6 +613,18 @@ X(Obj)
 X(Res)
 X(Cls)
 X(Ref)
+X(SVecE)
+X(CVecE)
+X(SVecN)
+X(CVecN)
+X(SDictE)
+X(CDictE)
+X(SDictN)
+X(CDictN)
+X(SKeysetE)
+X(CKeysetE)
+X(SKeysetN)
+X(CKeysetN)
 
 X(Null)
 X(Bool)
@@ -502,6 +635,22 @@ X(CArr)
 X(ArrE)
 X(ArrN)
 X(Arr)
+X(SVec)
+X(CVec)
+X(VecE)
+X(VecN)
+X(Vec)
+X(SDict)
+X(CDict)
+X(DictE)
+X(DictN)
+X(Dict)
+X(SKeyset)
+X(CKeyset)
+X(KeysetE)
+X(KeysetN)
+X(Keyset)
+
 X(InitPrim)
 X(Prim)
 X(InitUnc)
@@ -527,6 +676,33 @@ X(OptArrN)
 X(OptArr)
 X(OptObj)
 X(OptRes)
+X(OptSVecE)
+X(OptCVecE)
+X(OptSVecN)
+X(OptCVecN)
+X(OptSVec)
+X(OptCVec)
+X(OptVecE)
+X(OptVecN)
+X(OptVec)
+X(OptSDictE)
+X(OptCDictE)
+X(OptSDictN)
+X(OptCDictN)
+X(OptSDict)
+X(OptCDict)
+X(OptDictE)
+X(OptDictN)
+X(OptDict)
+X(OptSKeysetE)
+X(OptCKeysetE)
+X(OptSKeysetN)
+X(OptCKeysetN)
+X(OptSKeyset)
+X(OptCKeyset)
+X(OptKeysetE)
+X(OptKeysetN)
+X(OptKeyset)
 
 X(InitCell)
 X(Cell)
@@ -558,22 +734,34 @@ Type sval(SString);
 Type ival(int64_t);
 Type dval(double);
 Type aval(SArray);
+Type vec_val(SArray);
+Type dict_val(SArray);
+Type keyset_val(SArray);
 
 /*
  * Create static empty array or string types.
  */
 Type sempty();
 Type aempty();
+Type vec_empty();
+Type dict_empty();
+Type keyset_empty();
 
 /*
- * Create a reference counted empty array.
+ * Create a reference counted empty array/vec/dict.
  */
 Type counted_aempty();
+Type counted_vec_empty();
+Type counted_dict_empty();
+Type counted_keyset_empty();
 
 /*
- * Create an any-countedness empty array type.
+ * Create an any-countedness empty array/vec/dict type.
  */
 Type some_aempty();
+Type some_vec_empty();
+Type some_dict_empty();
+Type some_keyset_empty();
 
 /*
  * Create types for objects or classes with some known constraint on
@@ -617,6 +805,27 @@ Type carr_struct(StructMap m);
 Type arr_mapn(Type k, Type v);
 Type sarr_mapn(Type k, Type v);
 Type carr_mapn(Type k, Type v);
+
+/*
+ * Vec type of optionally known size.
+ */
+Type vec_n(Type, folly::Optional<int64_t>);
+Type cvec_n(Type, folly::Optional<int64_t>);
+Type svec_n(Type, folly::Optional<int64_t>);
+
+/*
+ * Dict with key/value types.
+ */
+Type dict_n(Type, Type);
+Type cdict_n(Type, Type);
+Type sdict_n(Type, Type);
+
+/*
+ * Keyset with key (same as value) type.
+ */
+Type keyset_n(Type);
+Type ckeyset_n(Type);
+Type skeyset_n(Type);
 
 /*
  * Create the optional version of the Type t.
@@ -712,7 +921,7 @@ DCls dcls_of(Type t);
 Type from_cell(Cell tv);
 
 /*
- * Create a Type from a DataType.  KindOfString and KindOfStaticString
+ * Create a Type from a DataType. KindOfString and KindOfPersistentString
  * are both treated as TStr.
  *
  * Pre: dt is one of the DataTypes that actually represent php values
@@ -835,6 +1044,34 @@ Type array_newelem(const Type& arr, const Type& val);
  * key that was added.  (This is either TInt or a subtype of it.)
  */
 std::pair<Type,Type> array_newelem_key(const Type& arr, const Type& val);
+
+/*
+ * Returns the best known type for a hack array inner element given a type for
+ * the key. The type returned will be TBottom if the operation will always
+ * throw, and the bool will be true if the operation will never throw.
+ */
+std::pair<Type, bool> vec_elem(const Type& vec, const Type& key);
+std::pair<Type, bool> dict_elem(const Type& dict, const Type& key);
+std::pair<Type, bool> keyset_elem(const Type& keyset, const Type& key);
+
+/*
+ * Perform a set operation on a hack array. Returns a type that represents the
+ * effects of $a[key] = val, for a hack array $a.
+ *
+ * The returned type will be TBottom if the operation will always throw, and
+ * the bool will be true if the operation can never throw.
+ */
+std::pair<Type, bool> vec_set(Type vec, const Type& key, const Type& val);
+std::pair<Type, bool> dict_set(Type dict, const Type& key, const Type& val);
+std::pair<Type, bool> keyset_set(Type keyset, const Type& key, const Type& val);
+
+/*
+ * Perform a newelem operation on a hack array type. Returns a new type which
+ * represents the result of this operation.
+ */
+Type vec_newelem(Type vec, const Type& val);
+Type dict_newelem(Type dict, const Type& val);
+Type keyset_newelem(Type keyset, const Type& val);
 
 /*
  * Return the best known key and value type for iteration of the

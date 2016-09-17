@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,11 +18,16 @@
 #ifndef incl_HPHP_EXT_MISC_H_
 #define incl_HPHP_EXT_MISC_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/std/ext_std.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+constexpr int64_t k_PHP_INT_MIN = std::numeric_limits<int64_t>::lowest();
+constexpr int64_t k_PHP_INT_MAX = std::numeric_limits<int64_t>::max();
+
+StaticString get_PHP_VERSION();
 
 int64_t HHVM_FUNCTION(connection_aborted);
 int64_t HHVM_FUNCTION(connection_status);
@@ -32,7 +37,7 @@ bool HHVM_FUNCTION(define, const String& name, const Variant& value,
                    bool case_insensitive = false);
 bool HHVM_FUNCTION(defined, const String& name, bool autoload = true);
 int64_t HHVM_FUNCTION(ignore_user_abort, bool setting = false);
-TypedValue* HHVM_FUNCTION(pack, ActRec* ar);
+Variant HHVM_FUNCTION(pack, const String& format, const Array& argv);
 int64_t HHVM_FUNCTION(sleep, int seconds);
 void HHVM_FUNCTION(usleep, int micro_seconds);
 Variant HHVM_FUNCTION(time_nanosleep, int seconds, int nanoseconds);
@@ -44,6 +49,8 @@ Array HHVM_FUNCTION(sys_getloadavg);
 Array HHVM_FUNCTION(token_get_all, const String& source);
 String HHVM_FUNCTION(token_name, int64_t token);
 String HHVM_FUNCTION(hphp_to_string, const Variant& v);
+Variant HHVM_FUNCTION(SystemLib_max2, const Variant& arg1, const Variant& arg2);
+Variant HHVM_FUNCTION(SystemLib_min2, const Variant& arg1, const Variant& arg2);
 extern const double k_INF;
 extern const double k_NAN;
 

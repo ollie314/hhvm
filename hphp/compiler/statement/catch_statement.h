@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,8 +26,7 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(CatchStatement);
 
-class CatchStatement : public Statement, public StaticClassName {
-public:
+struct CatchStatement : Statement, StaticClassName {
   CatchStatement(STATEMENT_CONSTRUCTOR_PARAMETERS,
                  const std::string &className, const std::string &variable,
                  StatementPtr stmt);
@@ -37,14 +36,14 @@ public:
                  StatementPtr stmt, StatementPtr finallyStmt);
 
   DECLARE_STATEMENT_VIRTUAL_FUNCTIONS;
-  virtual bool hasDecl() const { return m_stmt && m_stmt->hasDecl(); }
-  virtual bool hasRetExp() const { return m_stmt && m_stmt->hasRetExp(); }
-  virtual int getRecursiveCount() const {
-    return (m_stmt ? m_stmt->getRecursiveCount() : 0) 
-           + (m_finallyStmt ? m_finallyStmt->getRecursiveCount() : 0); 
+  bool hasDecl() const override { return m_stmt && m_stmt->hasDecl(); }
+  bool hasRetExp() const override { return m_stmt && m_stmt->hasRetExp(); }
+  int getRecursiveCount() const override {
+    return (m_stmt ? m_stmt->getRecursiveCount() : 0)
+           + (m_finallyStmt ? m_finallyStmt->getRecursiveCount() : 0);
   }
   const std::string &getVariableName() const { return m_variable->getName(); }
-  const std::string &getClassName() const { return m_className; }
+  const std::string &getClassName(void*) const { return m_origClassName; }
   SimpleVariablePtr getVariable() const { return m_variable; }
   StatementPtr getStmt() const { return m_stmt; }
   StatementPtr getFinally() const { return m_finallyStmt; }

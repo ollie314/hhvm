@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,22 +22,20 @@
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdInternalTesting : public DebuggerCommand {
-public:
-  CmdInternalTesting() : DebuggerCommand(KindOfInternalTesting),
-                         m_unused(false) {}
+struct CmdInternalTesting : DebuggerCommand {
+  CmdInternalTesting() : DebuggerCommand(KindOfInternalTesting) {}
 
-  virtual void help(DebuggerClient &client);
-  virtual bool onServer(DebuggerProxy &proxy);
-  virtual void onClient(DebuggerClient &client);
+  void help(DebuggerClient&) override;
+  bool onServer(DebuggerProxy&) override;
+  void onClient(DebuggerClient&) override;
 
 protected:
-  virtual void sendImpl(DebuggerThriftBuffer &thrift);
-  virtual void recvImpl(DebuggerThriftBuffer &thrift);
+  void sendImpl(DebuggerThriftBuffer&) override;
+  void recvImpl(DebuggerThriftBuffer&) override;
 
 private:
   std::string m_arg;
-  bool m_unused;
+  bool m_unused{false};
 };
 
 ///////////////////////////////////////////////////////////////////////////////

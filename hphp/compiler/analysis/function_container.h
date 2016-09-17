@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,7 +23,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CodeGenerator;
+struct CodeGenerator;
 DECLARE_BOOST_TYPES(AnalysisResult);
 DECLARE_EXTENDED_BOOST_TYPES(FunctionScope);
 DECLARE_BOOST_TYPES(ClassScope);
@@ -32,22 +32,19 @@ DECLARE_BOOST_TYPES(FunctionContainer);
 /**
  * Base class of both FileScope and ClassScope that can contain functions.
  */
-class FunctionContainer {
-public:
+struct FunctionContainer {
   FunctionContainer();
 
   /**
    * Functions this container has.
    */
   int getFunctionCount() const { return m_functions.size(); }
-  void countReturnTypes(std::map<std::string, int> &counts,
-                        const StringToFunctionScopePtrVecMap *redec);
 
-  const StringToFunctionScopePtrMap &getFunctions() const {
+  const StringToFunctionScopePtrMap& getFunctions() const {
     return m_functions;
   }
-  void getFunctionsFlattened(const StringToFunctionScopePtrVecMap *redec,
-                             FunctionScopePtrVec &funcs,
+  void getFunctionsFlattened(const StringToFunctionScopePtrVecMap* redec,
+                             std::vector<FunctionScopePtr>& funcs,
                              bool excludePseudoMains = false) const;
 
 protected:

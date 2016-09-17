@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,19 +14,21 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef incl_HPHP_RUNTIME_VM_JIT_FRAME_STATE_H_
-#define incl_HPHP_RUNTIME_VM_JIT_FRAME_STATE_H_
+#ifndef incl_HPHP_JIT_FRAME_STATE_H_
+#define incl_HPHP_JIT_FRAME_STATE_H_
 
-#include <boost/dynamic_bitset.hpp>
-#include <memory>
-#include <vector>
-
-#include <folly/Optional.h>
-
+#include "hphp/runtime/vm/jit/alias-class.h"
 #include "hphp/runtime/vm/jit/cfg.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/state-vector.h"
 #include "hphp/runtime/vm/jit/type-source.h"
-#include "hphp/runtime/vm/jit/local-effects.h"
+
+#include <boost/dynamic_bitset.hpp>
+#include <folly/Optional.h>
+
+#include <memory>
+#include <vector>
 
 namespace HPHP {
 
@@ -34,106 +36,102 @@ struct Func;
 
 namespace jit {
 
+struct BlocksWithIds;
 struct IRInstruction;
 struct SSATmp;
 
-//////////////////////////////////////////////////////////////////////
+namespace irgen {
 
-struct EvalStack {
-  explicit EvalStack() {}
+///////////////////////////////////////////////////////////////////////////////
 
-  void push(SSATmp* tmp) {
-    m_vector.push_back(tmp);
-  }
-
-  SSATmp* pop() {
-    if (m_vector.size() == 0) {
-      return nullptr;
-    }
-    SSATmp* tmp = m_vector.back();
-    m_vector.pop_back();
-    return tmp;
-  }
-
-  SSATmp* top(uint32_t offset = 0) const {
-    if (offset >= m_vector.size()) {
-      return nullptr;
-    }
-    uint32_t index = m_vector.size() - 1 - offset;
-    return m_vector[index];
-  }
-
-  void replace(uint32_t offset, SSATmp* tmp) {
-    assert(offset < m_vector.size());
-    uint32_t index = m_vector.size() - 1 - offset;
-    m_vector[index] = tmp;
-  }
-
-  uint32_t numCells() const {
-    uint32_t ret = 0;
-    for (auto& t : m_vector) {
-      ret += t->type() == Type::ActRec ? kNumActRecCells : 1;
-    }
-    return ret;
-  }
-
-  bool empty() const { return m_vector.empty(); }
-  int  size()  const { return m_vector.size(); }
-  void clear()       { m_vector.clear(); }
-
-  void swap(jit::vector<SSATmp*>& vector) {
-    m_vector.swap(vector);
-  }
-
-private:
-  jit::vector<SSATmp*> m_vector;
+struct FPIInfo {
+  SSATmp* returnSP;
+  FPInvOffset returnSPOff; // return's logical sp offset; stkptr might differ
+  Type ctxType; // tracked separately as a union of observed ctx types
+  SSATmp* ctx;
+  Op fpushOpc; // bytecode for FPush*
+  const Func* func;
+  bool interp;
+  bool spansCall;
 };
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
- * LocalState stores information about a local variable in the current
- * function.
+ * Information about a Location in the current function; used by FrameState.
  */
-struct LocalState {
+template<LTag tag>
+struct LocationState {
+  static_assert(tag == LTag::Stack ||
+                tag == LTag::Local ||
+                false,
+                "invalid LTag for LocationState");
+
+  static constexpr Type default_type() {
+    return tag == LTag::Stack ? TStkElem :
+        /* tag == LTag::Local */ TGen;
+  }
+
   /*
-   * The current value of the local.
+   * The current value at the location.
    */
   SSATmp* value{nullptr};
 
   /*
-   * The current type of the local.  We may have a tracked type even if we
-   * don't have an available value.  This happens across PHP-level calls, for
-   * example, or at some joint points where we couldn't find the same available
-   * value for all incoming edges.
+   * The current type of the value at the location.
+   *
+   * We may have a tracked type even if we don't have an available value.  This
+   * happens across PHP-level calls, for example, or at some joint points where
+   * we couldn't find the same available value for all incoming edges.
+   * However, whenever we have a value, the type of the SSATmp must match this
+   * `type' field.
    */
-  Type type{Type::Gen};
+  Type type{LocationState::default_type()};
 
   /*
-   * Prediction for the type of a local, if it's boxed or if we're in a
+   * Prediction for the type at the location, if it's boxed or if we're in a
    * pseudomain.  Otherwise it will be the same as `type'.
    *
-   * Invariants:
-   *   always a subtype of `type'
+   * @requires: predictedType <= type
    */
-  Type predictedType{Type::Gen};
+  Type predictedType{LocationState::default_type()};
 
   /*
-   * The sources of the currently known type. They may be values. If the value
-   * is unavailable, we won't hold onto it in the value field, but we'll keep
-   * it around in typeSrcs for guard relaxation.
+   * The sources of the currently known type, which may be values.
+   *
+   * If the value is unavailable, we won't hold onto it in the value field, but
+   * we'll keep it around in typeSrcs for guard relaxation.
    */
-  TypeSourceSet typeSrcs;
+  TypeSourceSet typeSrcs{};
+
+  /*
+   * Whether or not the location may have changed since the entry of the unit.
+   *
+   * This is only used for post-conditions.
+   */
+  bool maybeChanged{false};
 };
 
-inline bool operator==(const LocalState& a, const LocalState& b) {
-  return a.value         == b.value &&
-         a.type          == b.type &&
-         a.predictedType == b.predictedType &&
-         a.typeSrcs      == b.typeSrcs;
-}
+using LocalState = LocationState<LTag::Local>;
+using StackState = LocationState<LTag::Stack>;
 
-//////////////////////////////////////////////////////////////////////
+struct MBaseState {
+  SSATmp* value{nullptr};
+};
+
+/*
+ * MBRState tracks the value and type of the member base register pointer.
+ *
+ * These are used for some gen-time load elimination to preserve important
+ * information about the base.
+ */
+struct MBRState {
+  SSATmp* ptr{nullptr};
+  AliasClass pointee{AUnknownTV};
+  Type ptrType{TPtrToGen};
+};
+
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * State related to a particular frame.  These state structures are stored in a
@@ -145,31 +143,64 @@ struct FrameState {
    * fp, and bytecode position.
    */
   const Func* curFunc;
-  SSATmp* spValue{nullptr};
   SSATmp* fpValue{nullptr};
-  int32_t spOffset;
 
   /*
-   * m_thisAvailable tracks whether the current frame is known to have a
+   * Tracking of in-memory state of the evaluation stack.
+   */
+  SSATmp* spValue{nullptr};
+  FPInvOffset irSPOff;  // delta from vmfp to `spValue'
+
+  /*
+   * Depth of the in-memory eval stack.
+   */
+  FPInvOffset bcSPOff{0};
+
+  /*
+   * Tracks whether we will need to ratchet tvRef and tvRef2 after emitting an
+   * intermediate member instruction.
+   */
+  bool needRatchet{false};
+
+  /*
+   * thisAvailable tracks whether the current frame is known to have a
    * non-null $this pointer.
    */
   bool thisAvailable{false};
 
   /*
-   * Tracking of the state of the virtual execution stack:
-   *
-   *   During HhbcTranslator's run over the bytecode, these stacks
-   *   contain SSATmp values representing the execution stack state
-   *   since the last SpillStack.
-   *
-   *   The EvalStack contains cells and ActRecs that need to be
-   *   spilled in order to materialize the stack.
-   *
-   *   m_stackDeficit represents the number of cells we've popped off
-   *   the virtual stack since the last sync.
+   * ctx tracks the current ActRec's this/ctx field
    */
-  uint32_t stackDeficit{0};
-  EvalStack evalStack;
+  SSATmp* ctx{nullptr};
+
+  /*
+   * frameMaySpan is true iff a Call instruction has been seen on any path
+   * since the definition of the current frame pointer.
+   */
+  bool frameMaySpanCall{false};
+
+  /*
+   * stackModified is reset to false by exceptionStackBoundary() and set to
+   * true by anything that modifies the eval stack. It's used to verify that
+   * the stack is not modified between the beginning of a bytecode's
+   * translation and creation of any catch traces, unless
+   * exceptionStackBoundary() is explicitly called.
+   */
+  bool stackModified{false};
+
+  /*
+   * The FPI stack is used for inlining---when we start inlining at an FCall,
+   * we look in here to find a definition of the StkPtr,offset that can be used
+   * after the inlined callee "returns".
+   */
+  jit::vector<FPIInfo> fpiStack;
+
+  /*
+   * The values in the eval stack in memory, either above or below the current
+   * spValue pointer.  These are indexed relative to the base of the eval stack
+   * for the whole function.
+   */
+  jit::vector<StackState> stack;
 
   /*
    * Vector of local variable inforation; sized for numLocals on the curFunc
@@ -178,24 +209,20 @@ struct FrameState {
   jit::vector<LocalState> locals;
 
   /*
-   * frameMaySpan is true iff a Call instruction has been seen on any path
-   * since the definition of the current frame pointer.
+   * Values and types of the member base register and its pointee.
    */
-  bool frameMaySpanCall{false};
+  MBRState mbr;
+  MBaseState mbase;
+
+  /*
+   * Predicted types for values that lived in a local or stack slot at one
+   * point. Used to preserve predictions for values that move between different
+   * slots.
+   */
+  jit::hash_map<SSATmp*, Type> predictedTypes;
 };
 
-inline bool operator==(const FrameState& a, const FrameState& b) {
-  return
-    a.spValue          == b.spValue &&
-    a.fpValue          == b.fpValue &&
-    a.curFunc          == b.curFunc &&
-    a.spOffset         == b.spOffset &&
-    a.thisAvailable    == b.thisAvailable &&
-    a.locals           == b.locals &&
-    a.frameMaySpanCall == b.frameMaySpanCall;
-}
-
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * FrameStateMgr tracks state about the VM stack frame in the function currently
@@ -217,8 +244,8 @@ inline bool operator==(const FrameState& a, const FrameState& b) {
  *
  *   - current function and bytecode offset
  */
-struct FrameStateMgr final : private LocalStateHook {
-  explicit FrameStateMgr(const IRUnit&, BCMarker);
+struct FrameStateMgr final {
+  explicit FrameStateMgr(BCMarker);
 
   FrameStateMgr(const FrameStateMgr&) = delete;
   FrameStateMgr(FrameStateMgr&&) = default;
@@ -226,24 +253,12 @@ struct FrameStateMgr final : private LocalStateHook {
   FrameStateMgr& operator=(FrameStateMgr&&) = default;
 
   /*
-   * Put the FrameStateMgr in building mode.  This function must be called
-   * after constructing a FrameStateMgr before you start updating it, unless
-   * you're using it for fixed point mode.
-   */
-  void setBuilding() { m_status = Status::Building; }
-
-  /*
-   * Tell the FrameStateMgr we're doing reoptimize without being aware of all
-   * types of control flow.
-   */
-  void setLegacyReoptimize() { m_status = Status::LegacyReoptimize; }
-
-  /*
    * Update state by computing the effects of an instruction.
-   *
-   * Returns true iff the state for the instruction's taken edge is changed.
    */
-  bool update(const IRInstruction*);
+  void update(const IRInstruction*);
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Per-block state.
 
   /*
    * Whether we have state saved for the given block.
@@ -251,28 +266,30 @@ struct FrameStateMgr final : private LocalStateHook {
   bool hasStateFor(Block*) const;
 
   /*
-   * Return an unprocessed predecessor of the given block, or nullptr if none
-   * exists.
-   */
-  Block* findUnprocessedPred(Block*) const;
-
-  /*
-   * Starts tracking state for a block and reloads any previously saved
-   * state. Can set local values to null if hitting a block with an
-   * unprocessed predecessor, so we pass in an optional LocalStateHook. The
-   * isLoopHeader parameter is used during initial IR generation to indicate
-   * that the given block has a predecessor in the region that might not yet
-   * be linked into the IR cfg.
-   */
-  void startBlock(Block* b, BCMarker marker, bool isLoopHeader = false);
-
-  /*
-   * Finish tracking state for a block and save the current state to
-   * any successors.
+   * Start tracking state for a block and reloads any previously saved state.
    *
-   * Returns true iff the out-state for the block has changed.
+   * `hasUnprocessedPred' is set to indicate that the given block has a
+   * predecessor in the region that might not yet be linked into the IR CFG.
+   *
+   * `pred' is the logical predecessor of `b' to be used in the event that `b'
+   * is unreachable.
    */
-  bool finishBlock(Block*);
+  void startBlock(Block* b, bool hasUnprocessedPred,
+                  Block* pred = nullptr);
+
+  /*
+   * Finish tracking state for `b' and save the current state to b->next()
+   * (b->taken() is handled in update()).  Also save the out-state if
+   * setSaveOutState() was called on `b'.
+   *
+   * Returns true iff the in-state for the next block has changed.
+   */
+  bool finishBlock(Block* b);
+
+  /*
+   * Mark that `b' should save its out-state when finishBlock() is called.
+   */
+  void setSaveOutState(Block* b);
 
   /*
    * Save current state of a block so we can resume processing it after working
@@ -285,147 +302,176 @@ struct FrameStateMgr final : private LocalStateHook {
   void pauseBlock(Block*);
 
   /*
-   * Resumes processing a block that was stopped by pauseBlock.
+   * Resume processing a block that was stopped by pauseBlock.
    */
   void unpauseBlock(Block*);
 
   /*
-   * Clear state associated with the given block.
+   * Return the post-conditions associated with `exitBlock'.
    */
-  void clearBlock(Block*);
+  const PostConditions& postConds(Block* exitBlock) const;
 
   /*
-   * Iterates through a control-flow graph, until a fixed-point is
-   * reached. Must be called before this FrameStateMgr has any state.
+   * Set an override for the next FPI region's fpushOp.
    */
-  void computeFixedPoint(const BlocksWithIds&);
+  void setFPushOverride(Op op)  { m_fpushOverride = op; }
+  bool hasFPushOverride() const { return m_fpushOverride.hasValue(); }
+
+  /////////////////////////////////////////////////////////////////////////////
 
   /*
-   * Loads the in-state for a block. Requires that the block has already been
-   * processed. Intended to be used after computing the fixed-point of a CFG.
-   */
-  void loadBlock(Block*);
-
-  const Func* func() const { return cur().curFunc; }
-  Offset spOffset() const { return cur().spOffset; }
-  SSATmp* sp() const { return cur().spValue; }
-  SSATmp* fp() const { return cur().fpValue; }
-  bool thisAvailable() const { return cur().thisAvailable; }
-  void setThisAvailable() { cur().thisAvailable = true; }
-  bool frameMaySpanCall() const { return cur().frameMaySpanCall; }
-  unsigned inlineDepth() const { return m_stack.size() - 1; }
-  uint32_t stackDeficit() const { return cur().stackDeficit; }
-  void incStackDeficit() { cur().stackDeficit++; }
-  void clearStackDeficit() { cur().stackDeficit = 0; }
-  EvalStack& evalStack() { return cur().evalStack; }
-
-  Type localType(uint32_t id) const;
-  Type predictedLocalType(uint32_t id) const;
-  SSATmp* localValue(uint32_t id) const;
-  TypeSourceSet localTypeSources(uint32_t id) const;
-
-  /*
-   * Info about state leaving a block. The block must have already been
-   * processed.
+   * FrameState accessors.
    *
-   * TODO(#5428663, #4810319): this function returns incorrect state for blocks
-   * that end with CheckStk.  It's only used for insertSPPhi, which will be
-   * removed when StkPtrs aren't threaded around anymore; but do not add new
-   * uses.
+   * In the presence of inlining, these return state for the most-inlined
+   * frame.
    */
-  SSATmp* spLeavingBlock(Block*) const;
+  const Func* func()              const { return cur().curFunc; }
+  SSATmp*     fp()                const { return cur().fpValue; }
+  SSATmp*     sp()                const { return cur().spValue; }
+  SSATmp*     ctx()               const { return cur().ctx; }
+  FPInvOffset irSPOff()           const { return cur().irSPOff; }
+  FPInvOffset bcSPOff()           const { return cur().bcSPOff; }
+  SSATmp*     memberBaseValue()   const { return cur().mbase.value; }
+  bool        needRatchet()       const { return cur().needRatchet; }
+  bool        thisAvailable()     const { return cur().thisAvailable; }
+  bool        frameMaySpanCall()  const { return cur().frameMaySpanCall; }
+  bool        stackModified()     const { return cur().stackModified; }
+  const jit::vector<FPIInfo>& fpiStack() const { return cur().fpiStack; }
 
   /*
-   * Marks a block as visited in the current iteration.
-   * FrameStateMgr::startBlock does this automatically.
+   * FrameState modifiers.
+   *
+   * In the presence of inlining, these modify state for the most-inlined
+   * frame.
    */
-  void markVisited(const Block*);
+  void setMemberBaseValue(SSATmp* base) { cur().mbase.value = base; }
+  void setNeedRatchet(bool b)           { cur().needRatchet = b; }
+  void setThisAvailable()               { cur().thisAvailable = true; }
+  void resetStackModified()             { cur().stackModified = false; }
+  void setBCSPOff(FPInvOffset o)        { cur().bcSPOff = o; }
+  void incBCSPDepth(int32_t n = 1)      { cur().bcSPOff += n; }
+  void decBCSPDepth(int32_t n = 1)      { cur().bcSPOff -= n; }
 
   /*
-   * Call a function with const access to the LocalState& for each local we're
-   * tracking.
+   * Current inlining depth (not including the toplevel frame).
    */
-  void walkAllInlinedLocals(
-    const std::function<void (uint32_t, unsigned, const LocalState&)>& body,
-    bool skipThisFrame) const;
+  unsigned inlineDepth() const { return m_stack.size() - 1; }
 
   /*
-   * Call `func' with all non-null tracked local values, including callers if
-   * this is an inlined frame.
+   * Return the LocationState for local `id' or stack element at `off' in the
+   * most-inlined frame.
    */
-  void forEachLocalValue(const std::function<void (SSATmp*)>& func) const;
+  const LocalState& local(uint32_t id) const;
+  const StackState& stack(IRSPRelOffset off) const;
+  const StackState& stack(FPInvOffset off) const;
 
-private:
-  struct BlockState {
-    jit::vector<FrameState> in;
-    jit::vector<FrameState> out;
-  };
+  /*
+   * Generic accessors for LocationState members.
+   */
+  SSATmp* valueOf(Location l) const;
+  Type typeOf(Location l) const;
+  Type predictedTypeOf(Location l) const;
+  const TypeSourceSet& typeSrcsOf(Location l) const;
 
-  enum class Status : uint8_t {
-    /*
-     * Status we have after initially being created.
-     */
-    None,
+  /*
+   * Return tracked state for the member base register.
+   */
+  const MBRState& mbr()     const { return cur().mbr; }
 
-    /*
-     * Changes when we propagate state to taken blocks.  This status is used
-     * during IR generation time.
-     */
-    Building,
+  /*
+   * Update the predicted type for `l'.
+   */
+  void refinePredictedType(Location l, Type type);
 
-    /*
-     * Changes how we handle predecessors we haven't visited yet.  This state
-     * means we're doing computeFixedPoint() still.
-     */
-    RunningFixedPoint,
-
-    /*
-     * Stops us from merging new state to blocks.  The computeFixedPoint call
-     * has finished, and blocks may be inspected with that information, but we
-     * don't need to propagate anything anywhere anymore.
-     */
-    FinishedFixedPoint,
-
-    /*
-     * We're doing a reoptimize that's not based on a fixed-point computation.
-     */
-    LegacyReoptimize,
-  };
-
-private:
-  bool checkInvariants() const;
-  bool save(Block*);
-  bool isVisited(const Block*) const;
-  jit::vector<LocalState>& locals(unsigned inlineIdx);
-  void trackDefInlineFP(const IRInstruction* inst);
-  void trackInlineReturn();
-  void loopHeaderClear(BCMarker);
+  /////////////////////////////////////////////////////////////////////////////
 
 private:
   FrameState& cur() {
-    assert(!m_stack.empty());
+    assertx(!m_stack.empty());
     return m_stack.back();
   }
   const FrameState& cur() const {
     return const_cast<FrameStateMgr*>(this)->cur();
   }
 
-private: // LocalStateHook overrides
-  void setLocalValue(uint32_t id, SSATmp* value) override;
-  void refineLocalValues(SSATmp* oldVal, SSATmp* newVal) override;
-  void dropLocalRefsInnerTypes() override;
-  void killLocalsForCall(bool) override;
-  void refineLocalType(uint32_t id, Type type, TypeSource typeSrc) override;
-  void predictLocalType(uint32_t id, Type type) override;
-  void setLocalType(uint32_t id, Type type) override;
-  void setBoxedLocalPrediction(uint32_t id, Type type) override;
-  void updateLocalRefPredictions(SSATmp*, SSATmp*) override;
-  void setLocalTypeSource(uint32_t id, TypeSource typeSrc) override;
-  void clearLocals() override;
+  /*
+   * LocationState access helpers.
+   */
+  Location loc(uint32_t) const;
+  Location stk(IRSPRelOffset) const;
+  LocalState& localState(uint32_t);
+  LocalState& localState(Location l); // @requires: l.tag() == LTag::Local
+  StackState& stackState(IRSPRelOffset);
+  StackState& stackState(FPInvOffset);
+  StackState& stackState(Location l); // @requires: l.tag() == LTag::Stack
+
+  /*
+   * Helpers for update().
+   */
+  bool checkInvariants() const;
+  void updateMInstr(const IRInstruction*);
+  void trackDefInlineFP(const IRInstruction* inst);
+  void trackInlineReturn();
+  void trackCall(bool destroyLocals);
+
+  /*
+   * Per-block state helpers.
+   */
+  bool save(Block* b, Block* pred = nullptr);
+  void clearForUnprocessedPred();
+  void collectPostConds(Block* exitBlock);
+
+  /*
+   * LocationState update helpers.
+   */
+  void setValue(Location l, SSATmp* value);
+  void setType(Location l, Type type);
+  void widenType(Location l, Type type);
+  void refineType(Location l, Type type, TypeSource typeSrc);
+  void setBoxedPrediction(Location l, Type type);
+  void refinePredictedTmpType(SSATmp*, Type);
+
+  template<LTag tag>
+  void refineValue(LocationState<tag>& state, SSATmp* oldVal, SSATmp* newVal);
+
+  template<LTag tag>
+  void setValueImpl(Location l, LocationState<tag>& state, SSATmp* value,
+                    folly::Optional<Type> predicted = folly::none);
+  template<LTag tag>
+  void refinePredictedTypeImpl(LocationState<tag>& state, Type type);
+
+  template<LTag tag> void syncPrediction(LocationState<tag>&);
+
+  /*
+   * Local state update helpers.
+   */
+  void setLocalPredictedType(uint32_t id, Type type);
+  void updateLocalRefPredictions(SSATmp*, SSATmp*);
+  void killLocalsForCall(bool);
+  void dropLocalRefsInnerTypes();
+  void clearLocals();
+
+  /*
+   * Stack state update helpers.
+   */
+  void spillFrameStack(IRSPRelOffset, FPInvOffset, const IRInstruction*);
+  void clearStackForCall();
 
 private:
-  Status m_status{Status::None};
+  struct BlockState {
+    // Mandatory in-state computed from predecessors.
+    jit::vector<FrameState> in;
+    // Optionally-saved out-state.  Non-none but empty indicates that out-state
+    // should be saved.
+    folly::Optional<jit::vector<FrameState>> out;
+    // Paused state, used by IRBuilder::{push,pop}Block().
+    folly::Optional<jit::vector<FrameState>> paused;
+  };
 
+  /////////////////////////////////////////////////////////////////////////////
+  // Data members.
+
+private:
   /*
    * Stack of states.  We push and pop frames as we enter and leave inlined
    * calls.
@@ -438,20 +484,26 @@ private:
   jit::hash_map<Block*,BlockState> m_states;
 
   /*
-   * Set of visited blocks during the traversal of the unit.
+   * Post-conditions for exit blocks.
    */
-  boost::dynamic_bitset<> m_visited;
+  jit::hash_map<Block*,PostConditions> m_exitPostConds;
+
+  /*
+   * Override for the current fpush* bytecode so we can convert bytecodes
+   * to php calls.
+   */
+  folly::Optional<Op> m_fpushOverride;
 };
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * Debug stringification.
  */
 std::string show(const FrameStateMgr&);
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
-} }
+}}}
 
 #endif

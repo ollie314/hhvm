@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -13,7 +13,6 @@
 (* The local heap
  *)
 (*****************************************************************************)
-open Utils
 
 type t = string list
 
@@ -29,15 +28,15 @@ let (local_h: (string, string) Hashtbl.t) = Hashtbl.create 7
 let find_unsafe x =
   Hashtbl.find local_h x
 
-let get x = 
+let get x =
   try Some (find_unsafe x) with Not_found -> None
-    
+
 let mem x = get x <> None
 
-let add x data = 
+let add x data =
   Hashtbl.replace local_h x data
 
-let remove x = 
+let remove x =
   Hashtbl.remove local_h x
 
 let remove_batch x =
@@ -47,14 +46,15 @@ let remove_batch x =
 
 (*****************************************************************************)
 (* The signature of what we are actually going to expose to the user *)
-(*****************************************************************************)        
-module type S = sig
+(*****************************************************************************)
+module type NoCache = sig
   type t
   type key
   module KeySet : Set.S
-  module KeyMap : MapSig
+  module KeyMap : MyMap.S
 
   val add: key -> t -> unit
+  val write_through: key -> t -> unit
   val get: key -> t option
   val get_old: key -> t option
   val find_unsafe: key -> t
@@ -78,21 +78,21 @@ end
 
 (*****************************************************************************)
 (* NoCache means no caching, read and write directly *)
-(*****************************************************************************)        
+(*****************************************************************************)
 module type NoCache_type =
   functor (UserKeyType : UserKeyType) ->
   functor (Value : Value.Type) ->
-  S with type t = Value.t
+  NoCache with type t = Value.t
     and type key = UserKeyType.t
     and module KeySet = Set.Make (UserKeyType)
-    and module KeyMap = MyMap (UserKeyType)
+    and module KeyMap = MyMap.Make (UserKeyType)
 
 module NoCache: NoCache_type =
   functor (UserKeyType : UserKeyType) ->
   functor (Value : Value.Type) -> struct
 
   module KeySet = Set.Make (UserKeyType)
-  module KeyMap = MyMap (UserKeyType)
+  module KeyMap = MyMap.Make (UserKeyType)
 
   type key = UserKeyType.t
   type t = Value.t
@@ -100,6 +100,8 @@ module NoCache: NoCache_type =
   let add x y =
     let x = Prefix.make_key Value.prefix (UserKeyType.to_string x) in
     add x (Obj.magic y)
+
+  let write_through = add
 
   let find_unsafe x =
     let x = Prefix.make_key Value.prefix (UserKeyType.to_string x) in
@@ -120,7 +122,7 @@ module NoCache: NoCache_type =
     KeySet.fold begin fun x acc ->
       SSet.add (Prefix.make_key Value.prefix (UserKeyType.to_string x)) acc
     end xs SSet.empty
-    
+
   let remove_batch xs = remove_batch (make_key_set xs)
 
   let get_batch xs =
@@ -143,5 +145,20 @@ end
 
 (*****************************************************************************)
 (* Same thing but with 4 layers of cache ... Useful for type-checking        *)
-(*****************************************************************************)        
+(*****************************************************************************)
 module WithCache = NoCache
+
+module LocalCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
+
+  type key = UserKeyType.t
+  type value = Value.t
+
+  let add _x _y = ()
+
+  let get _x = None
+
+  let remove _x = ()
+
+  let clear () = ()
+
+end

@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_RSRC_BUNDLE_H
 #define incl_HPHP_ICU_RSRC_BUNDLE_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/ures.h>
@@ -11,8 +11,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_ResourceBundle;
 
-class ResourceBundle : public IntlError {
-public:
+struct ResourceBundle : IntlError {
   ResourceBundle() {}
   ResourceBundle(const ResourceBundle&) = delete;
   ResourceBundle& operator=(const ResourceBundle& src) {
@@ -36,7 +35,7 @@ public:
       c_ResourceBundle = Unit::lookupClass(s_ResourceBundle.get());
       assert(c_ResourceBundle);
     }
-    auto obj = ObjectData::newInstance(c_ResourceBundle);
+    Object obj{c_ResourceBundle};
     auto data = Native::data<ResourceBundle>(obj);
     data->setResource(bundle);
     return obj;

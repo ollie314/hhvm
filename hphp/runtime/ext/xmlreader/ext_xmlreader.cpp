@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -22,6 +22,7 @@
 #include "hphp/util/functional.h"
 #include "hphp/util/hash-map-typedefs.h"
 #include "hphp/system/systemlib.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/vm-regs.h"
 
@@ -29,32 +30,6 @@ namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 // constants
-
-const StaticString s_XMLReader("XMLReader");
-
-const int64_t q_XMLReader$$NONE = XML_READER_TYPE_NONE;
-const int64_t q_XMLReader$$ELEMENT = XML_READER_TYPE_ELEMENT;
-const int64_t q_XMLReader$$ATTRIBUTE = XML_READER_TYPE_ATTRIBUTE;
-const int64_t q_XMLReader$$TEXT = XML_READER_TYPE_TEXT;
-const int64_t q_XMLReader$$CDATA = XML_READER_TYPE_CDATA;
-const int64_t q_XMLReader$$ENTITY_REF = XML_READER_TYPE_ENTITY_REFERENCE;
-const int64_t q_XMLReader$$ENTITY = XML_READER_TYPE_ENTITY;
-const int64_t q_XMLReader$$PI = XML_READER_TYPE_PROCESSING_INSTRUCTION;
-const int64_t q_XMLReader$$COMMENT = XML_READER_TYPE_COMMENT;
-const int64_t q_XMLReader$$DOC = XML_READER_TYPE_DOCUMENT;
-const int64_t q_XMLReader$$DOC_TYPE = XML_READER_TYPE_DOCUMENT_TYPE;
-const int64_t q_XMLReader$$DOC_FRAGMENT = XML_READER_TYPE_DOCUMENT_FRAGMENT;
-const int64_t q_XMLReader$$NOTATION = XML_READER_TYPE_NOTATION;
-const int64_t q_XMLReader$$WHITESPACE = XML_READER_TYPE_WHITESPACE;
-const int64_t q_XMLReader$$SIGNIFICANT_WHITESPACE =
-  XML_READER_TYPE_SIGNIFICANT_WHITESPACE;
-const int64_t q_XMLReader$$END_ELEMENT = XML_READER_TYPE_END_ELEMENT;
-const int64_t q_XMLReader$$END_ENTITY = XML_READER_TYPE_END_ENTITY;
-const int64_t q_XMLReader$$XML_DECLARATION = XML_READER_TYPE_XML_DECLARATION;
-const int64_t q_XMLReader$$LOADDTD = XML_PARSER_LOADDTD;
-const int64_t q_XMLReader$$DEFAULTATTRS = XML_PARSER_DEFAULTATTRS;
-const int64_t q_XMLReader$$VALIDATE = XML_PARSER_VALIDATE;
-const int64_t q_XMLReader$$SUBST_ENTITIES = XML_PARSER_SUBST_ENTITIES;
 
 #define XMLREADER_LOAD_STRING 0
 #define XMLREADER_LOAD_FILE 1
@@ -110,8 +85,15 @@ XMLReader::~XMLReader() {
   close();
 }
 
+void XMLReader::sweep() {
+  close();
+}
+
 void XMLReader::close() {
   SYNC_VM_REGS_SCOPED();
+  if (m_stream) {
+    m_stream->close();
+  }
   if (m_ptr) {
     xmlFreeTextReader(m_ptr);
     m_ptr = nullptr;
@@ -126,7 +108,7 @@ void XMLReader::close() {
   }
 }
 
-bool HHVM_METHOD(XMLReader, open,
+Variant HHVM_METHOD(XMLReader, open,
                  const String& uri,
                  const Variant& encoding /*= null_variant*/,
                  int64_t options /*= 0*/) {
@@ -142,6 +124,8 @@ bool HHVM_METHOD(XMLReader, open,
   if (uri.empty()) {
     raise_warning("Empty string supplied as input");
     return false;
+  } else if (!FileUtil::checkPathAndWarn(uri, "XMLReader::open", 1)) {
+    return init_null();
   }
 
   String valid_file = libxml_get_valid_file_path(uri.c_str());
@@ -149,16 +133,18 @@ bool HHVM_METHOD(XMLReader, open,
 
   if (!valid_file.empty()) {
     // Manually create the IO context to support custom stream wrappers.
-    auto stream = File::Open(valid_file, "rb");
-    if (!stream.isInvalid()) {
+    data->m_stream = File::Open(valid_file, "rb");
+    if (data->m_stream != nullptr && !data->m_stream->isInvalid()) {
+      // The XML context is owned by the native data attached to 'this_'.
+      // The File is also owned by the native data so it does not need
+      // to be cleaned up by an XML callback.  The libxml_streams_IO_nop_close
+      // callback does nothing.
       reader = xmlReaderForIO(libxml_streams_IO_read,
-                              libxml_streams_IO_close,
-                              stream.get(),
+                              libxml_streams_IO_nop_close,
+                              &data->m_stream,
                               valid_file.data(),
                               str_encoding.data(),
                               options);
-      // The xmlTextReaderPtr owns a reference to stream.
-      if (reader) stream.get()->incRefCount();
     }
   }
 
@@ -238,7 +224,7 @@ bool HHVM_METHOD(XMLReader, read) {
   if (data->m_ptr) {
     int ret = xmlTextReaderRead(data->m_ptr);
     if (ret == -1) {
-      raise_warning("An Error Occured while reading");
+      raise_warning("An Error Occurred while reading");
       return false;
     } else {
       return ret;
@@ -265,7 +251,7 @@ bool HHVM_METHOD(XMLReader, next,
       ret = xmlTextReaderNext(data->m_ptr);
     }
     if (ret == -1) {
-      raise_warning("An Error Occured while reading");
+      raise_warning("An Error Occurred while reading");
       return false;
     } else {
       return ret;
@@ -545,8 +531,12 @@ bool XMLReader::set_relaxng_schema(String source, int type) {
   return false;
 }
 
-bool HHVM_METHOD(XMLReader, setRelaxNGSchema,
+Variant HHVM_METHOD(XMLReader, setRelaxNGSchema,
                  const String& filename) {
+  if (!FileUtil::checkPathAndWarn(filename, "XMLReader::setRelaxNGSchema", 1)) {
+    return init_null();
+  }
+
   auto* data = Native::data<XMLReader>(this_);
   return data->set_relaxng_schema(filename, XMLREADER_LOAD_FILE);
 }
@@ -566,9 +556,9 @@ struct XMLPropertyAccessor {
   int return_type;
 };
 
-class XMLPropertyAccessorMap :
-      private hphp_const_char_map<XMLPropertyAccessor*> {
-public:
+struct XMLPropertyAccessorMap
+  : private hphp_const_char_map<XMLPropertyAccessor*>
+{
   explicit XMLPropertyAccessorMap(XMLPropertyAccessor* props,
                                   XMLPropertyAccessorMap *base = nullptr) {
     if (base) {
@@ -626,7 +616,7 @@ static XMLPropertyAccessorMap xmlreader_properties_map
 ((XMLPropertyAccessor*)xmlreader_properties);
 
 Variant HHVM_METHOD(XMLReader, __get,
-                    Variant name) {
+                    const Variant& name) {
   auto* data = Native::data<XMLReader>(this_);
   const xmlChar *retchar = nullptr;
   int retint = 0;
@@ -645,7 +635,7 @@ Variant HHVM_METHOD(XMLReader, __get,
     }
   }
 
-  switch (propertyMap->return_type) {
+  switch (DataType(propertyMap->return_type)) {
     case KindOfBoolean:
       return retint ? true : false;
     case KindOfInt64:
@@ -659,8 +649,15 @@ Variant HHVM_METHOD(XMLReader, __get,
     case KindOfUninit:
     case KindOfNull:
     case KindOfDouble:
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfArray:
+    case KindOfPersistentArray:
+    case KindOfVec:
+    case KindOfPersistentVec:
+    case KindOfDict:
+    case KindOfPersistentDict:
+    case KindOfKeyset:
+    case KindOfPersistentKeyset:
     case KindOfObject:
     case KindOfResource:
     case KindOfRef:
@@ -675,20 +672,18 @@ Variant HHVM_METHOD(XMLReader, __get,
 Variant HHVM_METHOD(XMLReader, expand,
                     const Variant& basenode /* = null */) {
   auto* data = Native::data<XMLReader>(this_);
-  Object doc;
+  req::ptr<XMLDocumentData> doc;
   xmlDocPtr docp = nullptr;
   SYNC_VM_REGS_SCOPED();
 
   if (!basenode.isNull()) {
-    DOMNode *dombasenode = toDOMNode(basenode.toObject().get());
+    auto dombasenode = Native::data<DOMNode>(basenode.toObject());
     doc = dombasenode->doc();
-    docp = (xmlDocPtr) toDOMNode(doc.get())->m_node;
+    docp = doc->docp();
     if (docp == nullptr) {
       raise_warning("Invalid State Error");
       return false;
     }
-  } else {
-    doc = DOMDocument::newInstance();
   }
 
   if (data->m_ptr) {
@@ -702,7 +697,7 @@ Variant HHVM_METHOD(XMLReader, expand,
         raise_notice("Cannot expand this node type");
         return false;
       } else {
-        return php_dom_create_object(nodec, doc, false);
+        return php_dom_create_object(nodec, doc);
       }
     }
   }
@@ -713,37 +708,33 @@ Variant HHVM_METHOD(XMLReader, expand,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define REGISTER_XML_READER_CONSTANT(name)                                     \
-  Native::registerClassConstant<KindOfInt64>(s_XMLReader.get(),                \
-                                             makeStaticString(#name),          \
-                                             q_XMLReader$$##name)              \
-
-static class XMLReaderExtension : public Extension {
-public:
+const StaticString s_XMLReader("XMLReader");
+static struct XMLReaderExtension final : Extension {
   XMLReaderExtension() : Extension("xmlreader", "0.1") {}
-  virtual void moduleInit() {
-    REGISTER_XML_READER_CONSTANT(NONE);
-    REGISTER_XML_READER_CONSTANT(ELEMENT);
-    REGISTER_XML_READER_CONSTANT(ATTRIBUTE);
-    REGISTER_XML_READER_CONSTANT(TEXT);
-    REGISTER_XML_READER_CONSTANT(CDATA);
-    REGISTER_XML_READER_CONSTANT(ENTITY_REF);
-    REGISTER_XML_READER_CONSTANT(ENTITY);
-    REGISTER_XML_READER_CONSTANT(PI);
-    REGISTER_XML_READER_CONSTANT(COMMENT);
-    REGISTER_XML_READER_CONSTANT(DOC);
-    REGISTER_XML_READER_CONSTANT(DOC_TYPE);
-    REGISTER_XML_READER_CONSTANT(DOC_FRAGMENT);
-    REGISTER_XML_READER_CONSTANT(NOTATION);
-    REGISTER_XML_READER_CONSTANT(WHITESPACE);
-    REGISTER_XML_READER_CONSTANT(SIGNIFICANT_WHITESPACE);
-    REGISTER_XML_READER_CONSTANT(END_ELEMENT);
-    REGISTER_XML_READER_CONSTANT(END_ENTITY);
-    REGISTER_XML_READER_CONSTANT(XML_DECLARATION);
-    REGISTER_XML_READER_CONSTANT(LOADDTD);
-    REGISTER_XML_READER_CONSTANT(DEFAULTATTRS);
-    REGISTER_XML_READER_CONSTANT(VALIDATE);
-    REGISTER_XML_READER_CONSTANT(SUBST_ENTITIES);
+  void moduleInit() override {
+    HHVM_RCC_INT(XMLReader, NONE, XML_READER_TYPE_NONE);
+    HHVM_RCC_INT(XMLReader, ELEMENT, XML_READER_TYPE_ELEMENT);
+    HHVM_RCC_INT(XMLReader, ATTRIBUTE, XML_READER_TYPE_ATTRIBUTE);
+    HHVM_RCC_INT(XMLReader, TEXT, XML_READER_TYPE_TEXT);
+    HHVM_RCC_INT(XMLReader, CDATA, XML_READER_TYPE_CDATA);
+    HHVM_RCC_INT(XMLReader, ENTITY_REF, XML_READER_TYPE_ENTITY_REFERENCE);
+    HHVM_RCC_INT(XMLReader, ENTITY, XML_READER_TYPE_ENTITY);
+    HHVM_RCC_INT(XMLReader, PI, XML_READER_TYPE_PROCESSING_INSTRUCTION);
+    HHVM_RCC_INT(XMLReader, COMMENT, XML_READER_TYPE_COMMENT);
+    HHVM_RCC_INT(XMLReader, DOC, XML_READER_TYPE_DOCUMENT);
+    HHVM_RCC_INT(XMLReader, DOC_TYPE, XML_READER_TYPE_DOCUMENT_TYPE);
+    HHVM_RCC_INT(XMLReader, DOC_FRAGMENT, XML_READER_TYPE_DOCUMENT_FRAGMENT);
+    HHVM_RCC_INT(XMLReader, NOTATION, XML_READER_TYPE_NOTATION);
+    HHVM_RCC_INT(XMLReader, WHITESPACE, XML_READER_TYPE_WHITESPACE);
+    HHVM_RCC_INT(XMLReader, SIGNIFICANT_WHITESPACE,
+                 XML_READER_TYPE_SIGNIFICANT_WHITESPACE);
+    HHVM_RCC_INT(XMLReader, END_ELEMENT, XML_READER_TYPE_END_ELEMENT);
+    HHVM_RCC_INT(XMLReader, END_ENTITY, XML_READER_TYPE_END_ENTITY);
+    HHVM_RCC_INT(XMLReader, XML_DECLARATION, XML_READER_TYPE_XML_DECLARATION);
+    HHVM_RCC_INT(XMLReader, LOADDTD, XML_PARSER_LOADDTD);
+    HHVM_RCC_INT(XMLReader, DEFAULTATTRS, XML_PARSER_DEFAULTATTRS);
+    HHVM_RCC_INT(XMLReader, VALIDATE, XML_PARSER_VALIDATE);
+    HHVM_RCC_INT(XMLReader, SUBST_ENTITIES, XML_PARSER_SUBST_ENTITIES);
 
     HHVM_ME(XMLReader, open);
     HHVM_ME(XMLReader, XML);

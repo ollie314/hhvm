@@ -34,17 +34,13 @@
 #define __file_h__
 
 #include "compat.h"
-#include "config.h"
 
-#ifdef PHP_WIN32
-  #ifdef _WIN64
-    #define SIZE_T_FORMAT "I64"
-  #else
-    #define SIZE_T_FORMAT ""
-  #endif
+#include "hphp/util/hphp-config.h"
+
+#define SIZE_T_FORMAT "z"
+#ifdef _MSC_VER
   #define INT64_T_FORMAT "I64"
 #else
-  #define SIZE_T_FORMAT "z"
   #define INT64_T_FORMAT "ll"
 #endif
 
@@ -57,9 +53,7 @@
 #endif
 
 #include <sys/types.h>
-#ifdef PHP_WIN32
-#include "win32/param.h"
-#else
+#ifndef _MSC_VER
 #include <sys/param.h>
 #endif
 /* Do this here and now, because struct stat gets re-defined on solaris */
@@ -72,7 +66,7 @@
 #define MAGIC "/etc/magic"
 #endif
 
-#if defined(__EMX__) || defined(PHP_WIN32)
+#if defined(__EMX__) || defined(_MSC_VER)
 #define PATHSEP  ';'
 #else
 #define PATHSEP  ':'
@@ -317,14 +311,14 @@ struct magic {
 #define PSTRING_LEN  \
     (PSTRING_1_BE|PSTRING_2_LE|PSTRING_2_BE|PSTRING_4_LE|PSTRING_4_BE)
 #define PSTRING_LENGTH_INCLUDES_ITSELF    BIT(12)
-#define  HHVM_FN(trim)        BIT(13)
+#define STRING_TRIM        BIT(13)
 #define CHAR_COMPACT_WHITESPACE      'W'
 #define CHAR_COMPACT_OPTIONAL_WHITESPACE  'w'
 #define CHAR_IGNORE_LOWERCASE      'c'
 #define CHAR_IGNORE_UPPERCASE      'C'
 #define CHAR_REGEX_OFFSET_START      's'
 #define CHAR_TEXTTEST        't'
-#define  CHAR_TRIM        'T'
+#define CHAR_TRIM        'T'
 #define CHAR_BINTEST        'b'
 #define CHAR_PSTRING_1_BE      'B'
 #define CHAR_PSTRING_1_LE      'B'

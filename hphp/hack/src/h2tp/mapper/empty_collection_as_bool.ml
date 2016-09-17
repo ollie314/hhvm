@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -25,8 +25,6 @@ module M = Map_ast
 module CE = Common_exns
 open Ast
 open Ast_ext
-open Utils
-
 
 let cast_known_collection p expr_ =
   call_inst_func p (p, expr_) "isEmpty" [] |> negate

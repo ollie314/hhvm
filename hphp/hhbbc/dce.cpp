@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -252,7 +252,7 @@ struct DceState {
    * removed, however, they must all be removed, because of the need
    * to keep eval stack consumers and producers balanced.
    */
-  boost::dynamic_bitset<> markedDead;
+  boost::dynamic_bitset<> markedDead{};
 
   /*
    * The set of locals that were ever live in this block.  (This
@@ -282,12 +282,12 @@ std::string show(const InstrIdSet& set) {
     ;
 }
 
-std::string show(const UseInfo& ui) {
+std::string DEBUG_ONLY show(const UseInfo& ui) {
   return folly::format("{}@{}", show(ui.first), show(ui.second)).str();
 }
 
-std::string bits_string(borrowed_ptr<const php::Func> func,
-                        std::bitset<kMaxTrackedLocals> locs) {
+std::string DEBUG_ONLY bits_string(borrowed_ptr<const php::Func> func,
+                                   std::bitset<kMaxTrackedLocals> locs) {
   std::ostringstream out;
   if (func->locals.size() < kMaxTrackedLocals) {
     for (auto i = func->locals.size(); i-- > 0;) {
@@ -482,6 +482,9 @@ void dce(Env& env, const bc::PopA&)       { discard(env); }
 void dce(Env& env, const bc::Int&)        { pushRemovable(env); }
 void dce(Env& env, const bc::String&)     { pushRemovable(env); }
 void dce(Env& env, const bc::Array&)      { pushRemovable(env); }
+void dce(Env& env, const bc::Dict&)       { pushRemovable(env); }
+void dce(Env& env, const bc::Vec&)        { pushRemovable(env); }
+void dce(Env& env, const bc::Keyset&)     { pushRemovable(env); }
 void dce(Env& env, const bc::Double&)     { pushRemovable(env); }
 void dce(Env& env, const bc::True&)       { pushRemovable(env); }
 void dce(Env& env, const bc::False&)      { pushRemovable(env); }
@@ -526,24 +529,40 @@ void dce(Env& env, const bc::Dup&) {
 }
 
 void dce(Env& env, const bc::CGetL& op) {
+  auto const ty = locRaw(env, op.loc1);
   addGen(env, op.loc1->id);
-  pushRemovable(env);
+  if (readCouldHaveSideEffects(ty)) {
+    push(env);
+  } else {
+    pushRemovable(env);
+  }
 }
 
 void dce(Env& env, const bc::CGetL2& op) {
+  auto const ty = locRaw(env, op.loc1);
   addGen(env, op.loc1->id);
   auto const u1 = push(env);
   auto const u2 = push(env);
-  popCond(env, u1, u2);
+  if (readCouldHaveSideEffects(ty)) {
+    pop(env);
+  } else {
+    popCond(env, u1, u2);
+  }
 }
 
 void dce(Env& env, const bc::CGetL3& op) {
+  auto const ty = locRaw(env, op.loc1);
   addGen(env, op.loc1->id);
   auto const u1 = push(env);
   auto const u2 = push(env);
   auto const u3 = push(env);
-  popCond(env, u1, u2, u3);
-  popCond(env, u1, u2, u3);
+  if (readCouldHaveSideEffects(ty)) {
+    pop(env);
+    pop(env);
+  } else {
+    popCond(env, u1, u2, u3);
+    popCond(env, u1, u2, u3);
+  }
 }
 
 void dce(Env& env, const bc::RetC&)  { pop(env); readDtorLocs(env); }
@@ -974,10 +993,12 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
 //////////////////////////////////////////////////////////////////////
 
 void remove_unreachable_blocks(const Index& index, const FuncAnalysis& ainfo) {
-  boost::dynamic_bitset<> reachable(ainfo.ctx.func->nextBlockId);
+  auto reachable = [&](php::Block& b) {
+    return ainfo.bdata[b.id].stateIn.initialized;
+  };
+
   for (auto& blk : ainfo.rpoBlocks) {
-    reachable[blk->id] = ainfo.bdata[blk->id].stateIn.initialized;
-    if (reachable[blk->id]) continue;
+    if (reachable(*blk)) continue;
     auto const srcLoc = blk->hhbcs.front().srcLoc;
     blk->hhbcs = {
       bc_with_loc(srcLoc, bc::String { s_unreachable.get() }),
@@ -991,8 +1012,8 @@ void remove_unreachable_blocks(const Index& index, const FuncAnalysis& ainfo) {
   for (auto& blk : ainfo.rpoBlocks) {
     auto reachableTargets = false;
     forEachTakenEdge(blk->hhbcs.back(), [&] (php::Block& target) {
-      if (reachable[target.id]) reachableTargets = true;
-    });
+        if (reachable(target)) reachableTargets = true;
+      });
     if (reachableTargets) continue;
     switch (blk->hhbcs.back().op) {
     case Op::JmpNZ:
@@ -1003,6 +1024,88 @@ void remove_unreachable_blocks(const Index& index, const FuncAnalysis& ainfo) {
       break;
     }
   }
+}
+
+bool merge_blocks(const FuncAnalysis& ainfo) {
+  auto& func = *ainfo.ctx.func;
+  FTRACE(2, "merge_blocks: {}\n", func.name);
+
+  boost::dynamic_bitset<> hasPred(func.nextBlockId);
+  boost::dynamic_bitset<> multiplePreds(func.nextBlockId);
+  boost::dynamic_bitset<> multipleSuccs(func.nextBlockId);
+  boost::dynamic_bitset<> removed(func.nextBlockId);
+  auto reachable = [&](php::Block& b) {
+    auto const& state = ainfo.bdata[b.id].stateIn;
+    return state.initialized && !state.unreachable;
+  };
+  // find all the blocks with multiple preds; they can't be merged
+  // into their predecessors
+  for (auto& blk : func.blocks) {
+    int numSucc = 0;
+    if (!reachable(*blk)) multiplePreds[blk->id] = true;
+    forEachSuccessor(*blk, [&](php::Block& succ) {
+        if (hasPred[succ.id]) {
+          multiplePreds[succ.id] = true;
+        } else {
+          hasPred[succ.id] = true;
+        }
+        numSucc++;
+      });
+    if (numSucc > 1) multipleSuccs[blk->id] = true;
+  }
+  multiplePreds[func.mainEntry->id] = true;
+  for (auto& blk: func.dvEntries) {
+    if (blk) {
+      multiplePreds[blk->id] = true;
+    }
+  }
+
+  bool removedAny = false;
+  for (auto& blk : func.blocks) {
+    while (auto nxt = blk->fallthrough) {
+      if (multipleSuccs[blk->id] ||
+          multiplePreds[nxt->id] ||
+          blk->exnNode != nxt->exnNode ||
+          blk->section != nxt->section) {
+        break;
+      }
+
+      FTRACE(1, "merging: {} into {}\n", (void*)nxt, (void*)blk.get());
+      multipleSuccs[blk->id] = multipleSuccs[nxt->id];
+      blk->fallthrough = nxt->fallthrough;
+      blk->fallthroughNS = nxt->fallthroughNS;
+      if (nxt->factoredExits.size()) {
+        if (blk->factoredExits.size()) {
+          std::set<borrowed_ptr<php::Block>> exitSet;
+          std::copy(begin(blk->factoredExits), end(blk->factoredExits),
+                    std::inserter(exitSet, begin(exitSet)));
+          std::copy(nxt->factoredExits.begin(), nxt->factoredExits.end(),
+                    std::inserter(exitSet, begin(exitSet)));
+          blk->factoredExits.clear();
+          std::copy(begin(exitSet), end(exitSet),
+                    std::back_inserter(blk->factoredExits));
+        } else {
+          blk->factoredExits = std::move(nxt->factoredExits);
+        }
+      }
+      std::copy(nxt->hhbcs.begin(), nxt->hhbcs.end(),
+                std::back_inserter(blk->hhbcs));
+      nxt->fallthrough = nullptr;
+      removed[nxt->id] = removedAny = true;
+    }
+  }
+
+  if (!removedAny) return false;
+
+  func.blocks.erase(std::remove_if(func.blocks.begin(), func.blocks.end(),
+                                   [&](std::unique_ptr<php::Block>& blk) {
+                                     return removed[blk->id];
+                                   }), func.blocks.end());
+  func.nextBlockId = 0;
+  for (auto& blk : func.blocks) {
+    blk->id = func.nextBlockId++;
+  }
+  return true;
 }
 
 //////////////////////////////////////////////////////////////////////

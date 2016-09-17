@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -52,7 +52,7 @@ namespace HPHP {
  * to outlast the lifetime of the GlobalsArray.  (The wrapper is
  * refcounted, as required by ArrayData, but the table pointed to is not.)
  */
-struct GlobalsArray : private ArrayData {
+struct GlobalsArray final : ArrayData, type_scan::MarkCountable<GlobalsArray> {
   explicit GlobalsArray(NameValueTable* tab);
   ~GlobalsArray() {}
 
@@ -75,12 +75,17 @@ public:
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
 
   static const TypedValue* NvGetInt(const ArrayData*, int64_t k);
+  static constexpr auto NvTryGetInt = &NvGetInt;
   static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
+  static constexpr auto NvTryGetStr = &NvGetStr;
 
   static ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& ret, bool copy);
+  static constexpr auto LvalIntRef = &LvalInt;
   static ArrayData* LvalStr(ArrayData*, StringData* k, Variant*& ret,
                             bool copy);
+  static constexpr auto LvalStrRef = &LvalStr;
   static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
+  static constexpr auto LvalNewRef = &LvalNew;
 
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
@@ -92,13 +97,13 @@ public:
   static ArrayData* RemoveInt(ArrayData*, int64_t k, bool copy);
   static ArrayData* RemoveStr(ArrayData*, const StringData* k, bool copy);
 
-  static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Append(ArrayData*, Cell v, bool copy);
   static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
   static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
 
   static ArrayData* PlusEq(ArrayData*, const ArrayData* elems);
   static ArrayData* Merge(ArrayData*, const ArrayData* elems);
-  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Prepend(ArrayData*, Cell v, bool copy);
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
 
   static ssize_t IterBegin(const ArrayData*);
@@ -110,13 +115,13 @@ public:
   static bool ValidMArrayIter(const ArrayData*, const MArrayIter & fp);
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter&);
   static bool IsVectorData(const ArrayData*);
-  static ArrayData* NonSmartCopy(const ArrayData*);
+  static ArrayData* CopyStatic(const ArrayData*);
   static constexpr auto Pop = &ArrayCommon::Pop;
   static constexpr auto Dequeue = &ArrayCommon::Dequeue;
   static void Renumber(ArrayData*);
   static void OnSetEvalScalar(ArrayData*);
 
-  static ArrayData* EscalateForSort(ArrayData*);
+  static ArrayData* EscalateForSort(ArrayData*, SortFunction sf);
   static void Ksort(ArrayData*, int sort_flags, bool ascending);
   static void Sort(ArrayData*, int sort_flags, bool ascending);
   static void Asort(ArrayData*, int sort_flags, bool ascending);
@@ -128,15 +133,32 @@ public:
     return const_cast<ArrayData*>(ad);
   }
 
+  static ArrayData* ToPHPArray(ArrayData* ad, bool) {
+    return ad;
+  }
+  static constexpr auto ToVec = &ArrayCommon::ToVec;
+  static constexpr auto ToDict = &ArrayCommon::ToDict;
+  static constexpr auto ToKeyset = &ArrayCommon::ToKeyset;
+
 private:
   static GlobalsArray* asGlobals(ArrayData* ad);
   static const GlobalsArray* asGlobals(const ArrayData* ad);
+
+public:
+  template<class F> void scan(F& mark) const {
+    mark(m_tab);
+  }
 
 private:
   NameValueTable* const m_tab;
 };
 
 //////////////////////////////////////////////////////////////////////
+
+/*
+ * Gets our request-local global variables array.
+ */
+GlobalsArray* get_global_variables();
 
 }
 

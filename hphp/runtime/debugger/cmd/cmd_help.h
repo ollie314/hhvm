@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,20 +22,18 @@
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdHelp : public DebuggerCommand {
-public:
-  static void HelpAll(DebuggerClient &client);
-  static void HelpStarted(DebuggerClient &client);
+struct CmdHelp : DebuggerCommand {
+  static void HelpAll(DebuggerClient&);
+  static void HelpStarted(DebuggerClient&);
 
-public:
   CmdHelp() : DebuggerCommand(KindOfHelp) {}
 
-  virtual void list(DebuggerClient &client);
-  virtual void help(DebuggerClient &client);
-  virtual void onClient(DebuggerClient &client);
+  void list(DebuggerClient&) override;
+  void help(DebuggerClient&) override;
+  void onClient(DebuggerClient&) override;
 
 private:
-  bool processTutorial(DebuggerClient &client);
+  bool processTutorial(DebuggerClient&);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

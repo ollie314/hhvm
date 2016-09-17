@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,9 +8,24 @@
  *
  *)
 
-val type_check: ServerEnv.genv -> ServerEnv.env -> ServerEnv.env
+ type check_kind =
+   | Lazy_check
+   | Full_check
+
+val type_check: ServerEnv.genv -> ServerEnv.env -> check_kind ->
+  ServerEnv.env * int * int
 
 (* just add also some debugging information on stdout *)
-val check: ServerEnv.genv -> ServerEnv.env -> ServerEnv.env
+val check: ServerEnv.genv -> ServerEnv.env -> check_kind ->
+  ServerEnv.env * int * int
 
-val hook_after_parsing: (ServerEnv.genv -> ServerEnv.env -> unit) ref
+val hook_after_parsing: (ServerEnv.genv ->
+    (* new *) ServerEnv.env -> unit) option ref
+
+(****************************************************************************)
+(* Debugging: Declared here to stop ocamlc yelling at us for unused defs *)
+(****************************************************************************)
+
+val print_defs: string -> ('a * string) list -> unit
+val print_fast_pos: (('a * string) list * ('b * string) list) SMap.t -> unit
+val print_fast: (SSet.t * SSet.t) SMap.t -> unit

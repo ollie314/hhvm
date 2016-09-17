@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,28 +17,29 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_CMD_GLOBAL_H_
 #define incl_HPHP_EVAL_DEBUGGER_CMD_GLOBAL_H_
 
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/req-root.h"
 #include "hphp/runtime/debugger/debugger_command.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdGlobal : public DebuggerCommand {
-public:
+struct CmdGlobal : DebuggerCommand {
   CmdGlobal() : DebuggerCommand(KindOfGlobal) {
     m_version = 1;
   }
 
-  virtual void help(DebuggerClient &client);
+  void help(DebuggerClient&) override;
 
-  virtual bool onServer(DebuggerProxy &proxy);
-  virtual void onClient(DebuggerClient &client);
+  bool onServer(DebuggerProxy&) override;
+  void onClient(DebuggerClient&) override;
 
 protected:
-  virtual void sendImpl(DebuggerThriftBuffer &thrift);
-  virtual void recvImpl(DebuggerThriftBuffer &thrift);
+  void sendImpl(DebuggerThriftBuffer&) override;
+  void recvImpl(DebuggerThriftBuffer&) override;
 
 private:
-  Array m_globals;
+  req::root<Array> m_globals;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

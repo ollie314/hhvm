@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,6 @@
 */
 
 #include "hphp/runtime/base/output-file.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/runtime-error.h"
 
@@ -30,9 +29,9 @@ const StaticString s_output("Output");
 
 OutputFile::OutputFile(const String& filename): File(true, s_php, s_output) {
   if (filename != s_php_output) {
-    throw FatalErrorException("not a php://output file ");
+    raise_fatal_error("not a php://output file ");
   }
-  m_isLocal = true;
+  setIsLocal(true);
 }
 
 OutputFile::~OutputFile() {
@@ -45,7 +44,7 @@ void OutputFile::sweep() {
 }
 
 bool OutputFile::open(const String& filename, const String& mode) {
-  throw FatalErrorException("cannot open a php://output file ");
+  raise_fatal_error("cannot open a php://output file ");
 }
 
 bool OutputFile::close() {
@@ -55,8 +54,8 @@ bool OutputFile::close() {
 
 bool OutputFile::closeImpl() {
   s_pcloseRet = 0;
-  if (!m_closed) {
-    m_closed = true;
+  if (!isClosed()) {
+    setIsClosed(true);
     return true;
   }
   return false;
@@ -77,7 +76,7 @@ int OutputFile::getc() {
 
 int64_t OutputFile::writeImpl(const char *buffer, int64_t length) {
   assert(length > 0);
-  if (m_closed) return 0;
+  if (isClosed()) return 0;
   g_context->write(buffer, length);
   return length;
 }
@@ -102,7 +101,7 @@ bool OutputFile::rewind() {
 }
 
 bool OutputFile::flush() {
-  if (!m_closed) {
+  if (!isClosed()) {
     g_context->flush();
     return true;
   }

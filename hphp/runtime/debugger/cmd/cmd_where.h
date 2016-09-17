@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,14 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_WHERE_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include "hphp/runtime/base/req-root.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdWhere : public DebuggerCommand {
-public:
-  CmdWhere() : DebuggerCommand(KindOfWhere), m_stackArgs(true) {}
-  explicit CmdWhere(Type type) : DebuggerCommand(type), m_stackArgs(true) {}
+struct CmdWhere : DebuggerCommand {
+  CmdWhere() : DebuggerCommand(KindOfWhere) {}
+  explicit CmdWhere(Type type) : DebuggerCommand(type) {}
 
   virtual void help(DebuggerClient &client);
 
@@ -39,8 +39,8 @@ protected:
   virtual void recvImpl(DebuggerThriftBuffer &thrift);
 
 private:
-  Array m_stacktrace;
-  bool m_stackArgs;
+  req::root<Array> m_stacktrace;
+  bool m_stackArgs{true};
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -1,7 +1,10 @@
 <?hh
 
 function block() { // simulates blocking I/O
-  return RescheduleWaitHandle::create(1,1);
+  return RescheduleWaitHandle::create(
+    RescheduleWaitHandle::QUEUE_NO_PENDING_IO,
+    1,
+  );
 };
 
 class CWithClosures {
@@ -35,14 +38,14 @@ function main() {
   $f = async function (...$args) {
     var_dump($args);
   };
-  $f('a', 'b')->join();
+  HH\Asio\join($f('a', 'b'));
 
   echo 'blocking async closure', "\n";
   $f = async function (...$args) {
     await block();
     var_dump($args);
   };
-  $f('a', 'b')->join();
+  HH\Asio\join($f('a', 'b'));
 
   $c = new CWithClosures('prop-a');
   $c->test('a');

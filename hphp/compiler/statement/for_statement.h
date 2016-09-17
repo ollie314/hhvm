@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,8 +24,7 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(ForStatement);
 
-class ForStatement : public LoopStatement {
-public:
+struct ForStatement : LoopStatement {
   ForStatement(STATEMENT_CONSTRUCTOR_PARAMETERS,
                ExpressionPtr exp1, ExpressionPtr exp2, ExpressionPtr exp3,
                StatementPtr stmt);
@@ -36,12 +35,12 @@ public:
   ExpressionPtr getCondExp() const { return m_exp2; }
   ExpressionPtr getIncExp() const { return m_exp3; }
   StatementPtr getBody() const { return m_stmt; }
-  virtual bool hasDecl() const { return m_stmt && m_stmt->hasDecl(); }
-  virtual bool hasRetExp() const { return m_stmt && m_stmt->hasRetExp(); }
-  virtual int getRecursiveCount() const {
+  bool hasDecl() const override { return m_stmt && m_stmt->hasDecl(); }
+  bool hasRetExp() const override { return m_stmt && m_stmt->hasRetExp(); }
+  int getRecursiveCount() const override {
     return 1 + (m_stmt ? m_stmt->getRecursiveCount() : 0);
   }
-  virtual bool kidUnused(int i) const { return i == 0 || i == 3; }
+  bool kidUnused(int i) const override { return i == 0 || i == 3; }
 private:
   ExpressionPtr m_exp1;
   ExpressionPtr m_exp2;

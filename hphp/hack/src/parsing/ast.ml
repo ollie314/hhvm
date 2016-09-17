@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,22 +7,6 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
-
-open Utils
-
-(*****************************************************************************)
-(* Parsing modes *)
-(*****************************************************************************)
-
-type file_type =
-  | PhpFile
-  | HhFile
-
-type mode =
-  | Mdecl    (* just declare signatures, don't check anything *)
-  | Mstrict  (* check everthing! *)
-  | Mpartial (* Don't fail if you see a function/class you don't know *)
- (* with tarzan *)
 
 (*****************************************************************************)
 (* Constants *)
@@ -46,6 +30,11 @@ type variance =
   | Contravariant
   | Invariant
 
+type ns_kind =
+  | NSClass
+  | NSFun
+  | NSConst
+
 type program = def list
 
 and def =
@@ -55,27 +44,32 @@ and def =
   | Typedef of typedef
   | Constant of gconst
   | Namespace of id * program
-  | NamespaceUse of (id * id) list
+  | NamespaceUse of (ns_kind * id * id) list
 
 and typedef = {
-    t_id: id;
-    t_tparams: tparam list;
-    t_constraint: tconstraint;
-    t_kind: typedef_kind;
-    t_namespace: Namespace_env.env;
-    t_mode: mode;
+  t_id: id;
+  t_tparams: tparam list;
+  t_constraint: tconstraint;
+  t_kind: typedef_kind;
+  t_user_attributes: user_attribute list;
+  t_namespace: Namespace_env.env;
+  t_mode: FileInfo.mode;
 }
 
 and gconst = {
-    cst_mode: mode;
-    cst_kind: cst_kind;
-    cst_name: id;
-    cst_type: hint option;
-    cst_value: expr;
-    cst_namespace: Namespace_env.env;
-  }
+  cst_mode: FileInfo.mode;
+  cst_kind: cst_kind;
+  cst_name: id;
+  cst_type: hint option;
+  cst_value: expr;
+  cst_namespace: Namespace_env.env;
+}
 
-and tparam = variance * id * hint option
+and constraint_kind =
+  | Constraint_as
+  | Constraint_super
+
+and tparam = variance * id * (constraint_kind * hint) list
 
 and tconstraint = hint option
 
@@ -84,8 +78,8 @@ and typedef_kind =
   | NewType of hint
 
 and class_ = {
-  c_mode: mode;
-  c_user_attributes: user_attribute SMap.t;
+  c_mode: FileInfo.mode;
+  c_user_attributes: user_attribute list;
   c_final: bool;
   c_kind: class_kind;
   c_is_xhp: bool;
@@ -96,6 +90,7 @@ and class_ = {
   c_body: class_elt list;
   c_namespace: Namespace_env.env;
   c_enum: enum_ option;
+  c_span: Pos.t;
 }
 
 and enum_ = {
@@ -103,8 +98,10 @@ and enum_ = {
   e_constraint : hint option;
 }
 
-and user_attribute =
-  expr list (* user attributes are restricted to scalar values *)
+and user_attribute = {
+  ua_name: id;
+  ua_params: expr list (* user attributes are restricted to scalar values *)
+}
 
 and class_kind =
   | Cabstract
@@ -119,11 +116,17 @@ and trait_req_kind =
 
 and class_elt =
   | Const of hint option * (id * expr) list
+  | AbsConst of hint option * id
   | Attributes of class_attr list
+  | TypeConst of typeconst
   | ClassUse of hint
+  | XhpAttrUse of hint
   | ClassTraitRequire of trait_req_kind * hint
   | ClassVars of kind list * hint option * class_var list
+  | XhpAttr of hint option * class_var * bool *
+               ((Pos.t * expr list) option)
   | Method of method_
+  | XhpCategory of pstring list
 
 and class_attr =
   | CA_name of id
@@ -152,8 +155,50 @@ and og_null_flavor =
   | OG_nullthrows
   | OG_nullsafe
 
-(* id without $ *)
-and class_var = id * expr option
+(* id is stored without the $ *)
+(* Pos is the span of the the variable definition. What does it mean exactly?
+ * At first, one might think that in a definition like:
+ *
+ *   public ?string $foo = "aaaa";
+ *
+ * span of "foo" is entire line from the start of "public" to the semicolon
+ * (excluded). This is not true though - what here is a single '$foo = "aaaa"'
+ * is in fact a list, and "public string" applies to all of it's elements.
+ * So it could be as well:
+ *
+ *  public ?string
+ *    $foo = "aaaa",
+ *    $bar = "cccc",
+ *    $i_have_no_initializer;
+ *
+ * which makes it hard to include visibility and type into span of $bar
+ * (since span is a single continuos range).
+ * To make things more complicated, there are also XHP properties, with syntax:
+ *
+ *  attributes
+ *    string xhp_prop = "aaa" @required,
+ *    int other_xhp_prop;
+ *
+ * where each type and "@required" applies only to one property and could be
+ * part of span.
+ *
+ * Moreover, there is also the case of implicit properties defined in
+ * constructor:
+ *
+ *  public function __construct(
+ *    public string $property,
+ *  )
+ *
+ * The visibility, type and possible initializer are "per property", but
+ * capturing their whole span is annoying from implementation point of view
+ * - constructor is just a regular method in AST with special name, so we would
+ * have to store additional data for every method argument just to use it in
+ * this single case.
+ *
+ * The "lowest common denominator" of all those cases is to treat the property
+ * extent as span of name + initializer, if present.
+ *)
+and class_var = Pos.t * id * expr option
 
 and method_ = {
   m_kind: kind list ;
@@ -161,10 +206,19 @@ and method_ = {
   m_name: id;
   m_params: fun_param list;
   m_body: block;
-  m_user_attributes : user_attribute SMap.t;
+  m_user_attributes : user_attribute list;
   m_ret: hint option;
   m_ret_by_ref: bool;
   m_fun_kind: fun_kind;
+  m_span: Pos.t
+}
+
+and typeconst = {
+  tconst_abstract: bool;
+  tconst_name: id;
+  tconst_constraint: hint option;
+  tconst_type: hint option;
+  tconst_span: Pos.t;
 }
 
 and is_reference = bool
@@ -181,26 +235,32 @@ and fun_param = {
    * can be only Public or Protected or Private.
    *)
   param_modifier: kind option;
-  param_user_attributes: user_attribute SMap.t;
+  param_user_attributes: user_attribute list;
 }
 
 and fun_ = {
-  f_mode            : mode;
+  f_mode            : FileInfo.mode;
   f_tparams         : tparam list;
   f_ret             : hint option;
   f_ret_by_ref      : bool;
   f_name            : id;
   f_params          : fun_param list;
   f_body            : block;
-  f_user_attributes : user_attribute SMap.t;
-  f_mtime           : float;
+  f_user_attributes : user_attribute list;
   f_fun_kind        : fun_kind;
   f_namespace       : Namespace_env.env;
+  f_span         : Pos.t;
 }
 
+and fun_decl_kind =
+  | FDeclAsync
+  | FDeclSync
+
 and fun_kind =
-  | FAsync
   | FSync
+  | FAsync
+  | FGenerator
+  | FAsyncGenerator
 
 and hint = Pos.t * hint_
 and hint_ =
@@ -209,6 +269,20 @@ and hint_ =
   | Htuple of hint list
   | Happly of id * hint list
   | Hshape of shape_field list
+ (* This represents the use of a type const. Type consts are accessed like
+  * regular consts in Hack, i.e.
+  *
+  * Class::TypeConst
+  *
+  * Type const access can be chained such as
+  *
+  * Class::TC1::TC2::TC3
+  *
+  * This will result in the following representation
+  *
+  * Haccess ("Class", "TC1", ["TC2", "TC3"])
+  *)
+  | Haccess of id * id * id list
 
 and shape_field_name =
   | SFlit of pstring
@@ -251,6 +325,15 @@ and expr_ =
   | False
   | Id of id
   | Lvar of id
+  (**
+   * PHP's Variable variable. The int is number of variable indirections
+   * (i.e. number of extra $ signs.)
+   *
+   * Example:
+     * $$$sample has int = 2.
+   * *)
+  | Lvarvar of int * id
+  | Dollardollar
   | Clone of expr
   | Obj_get of expr * expr * og_null_flavor
   | Array_get of expr * expr option
@@ -260,7 +343,7 @@ and expr_ =
   | Int of pstring
   | Float of pstring
   | String of pstring
-  | String2 of expr list * pstring
+  | String2 of expr list
   | Yield of afield
   | Yield_break
   | Await of expr
@@ -269,7 +352,9 @@ and expr_ =
   | Cast of hint * expr
   | Unop of uop * expr
   | Binop of bop * expr * expr
+  | Pipe of expr * expr
   | Eif of expr * expr option * expr
+  | NullCoalesce of expr * expr
   | InstanceOf of expr * expr
   | New of expr * expr list * expr list
   (* Traditional PHP-style closure with a use list. Each use element is
@@ -283,7 +368,6 @@ and expr_ =
   | Xml of id * (id * expr) list * expr list
   | Unsafeexpr of expr
   | Import of import_flavor * expr
-  | Ref of expr
 
 and import_flavor =
   | Include
@@ -291,6 +375,7 @@ and import_flavor =
   | IncludeOnce
   | RequireOnce
 
+(** "array" field. Fields of array, map, dict, and shape literals. *)
 and afield =
   | AFvalue of expr
   | AFkvalue of expr * expr
@@ -307,6 +392,7 @@ and uop =
 | Utild
 | Unot | Uplus | Uminus | Uincr
 | Udecr | Upincr | Updecr
+| Uref
 
 and case =
 | Default of block

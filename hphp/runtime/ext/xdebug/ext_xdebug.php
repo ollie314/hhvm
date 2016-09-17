@@ -274,8 +274,8 @@ function xdebug_stop_trace(): mixed;
 <<__Native>>
 function xdebug_time_index(): float;
 
-<<__Native("ActRec")>>
-function xdebug_var_dump(mixed $var, ...): void;
+<<__Native>>
+function xdebug_var_dump(mixed $var, ...$argv): void;
 
 /**
  * Should only be needed when request parameters are being manipulated, such
@@ -284,6 +284,18 @@ function xdebug_var_dump(mixed $var, ...): void;
  */
 <<__Native>>
 function _xdebug_check_trigger_vars(): void;
+
+namespace HH {
+
+/**
+ * Returns whether there is a remote debugger attached to the current request.
+ *
+ * @return bool - If a debugger is attached.
+ */
+<<__Native>>
+function xdebug_remote_attached(): bool;
+
+}
 
 namespace __SystemLib {
   /**

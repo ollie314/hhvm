@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,22 +26,22 @@
 namespace HPHP { namespace jit {
 
 TEST(PredictionOpts, basic) {
-  UNUSED BCMarker marker = BCMarker::Dummy();
+  UNUSED auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
   IRUnit unit{test_context};
 
   Block* entry = unit.entry();
   Block* taken = unit.defBlock();
   Block* end = unit.defBlock();
 
-  auto ptr = unit.gen(Conjure, marker, Type::PtrToGen);
-  auto ldm = unit.gen(LdMem, marker, Type::Gen, ptr->dst(), unit.cns(0));
-  auto inc = unit.gen(IncRef, marker, ldm->dst());
-  auto ckt = unit.gen(CheckType, marker, Type::Int, taken, ldm->dst());
+  auto ptr = unit.gen(Conjure, bcctx, TPtrToGen);
+  auto ldm = unit.gen(LdMem, bcctx, TGen, ptr->dst());
+  auto inc = unit.gen(IncRef, bcctx, ldm->dst());
+  auto ckt = unit.gen(CheckType, bcctx, TInt, taken, ldm->dst());
   ckt->setNext(end);
   entry->push_back({ptr, ldm, inc, ckt});
 
-  taken->push_back(unit.gen(Halt, marker));
-  end->push_back(unit.gen(Halt, marker));
+  taken->push_back(unit.gen(Halt, bcctx));
+  end->push_back(unit.gen(Halt, bcctx));
 
   optimizePredictions(unit);
 
@@ -49,7 +49,7 @@ TEST(PredictionOpts, basic) {
   // narrowed type on the fallthrough block.
   {
     ASSERT_EQ(2, entry->instrs().size());
-    EXPECT_MATCH(entry->back(), CheckTypeMem, Type::Int, taken);
+    EXPECT_MATCH(entry->back(), CheckTypeMem, TInt, taken);
     EXPECT_EQ(end, entry->back().next());
   }
 
@@ -58,7 +58,7 @@ TEST(PredictionOpts, basic) {
     auto takenIt = taken->begin();
     auto& ldmem = *takenIt;
     auto& incref = *(++takenIt);
-    EXPECT_MATCH(ldmem, LdMem, Type::Gen, ptr->dst());
+    EXPECT_MATCH(ldmem, LdMem, TGen, ptr->dst());
     EXPECT_MATCH(incref, IncRef, ldmem.dst());
   }
 
@@ -68,7 +68,7 @@ TEST(PredictionOpts, basic) {
     auto& ldmem = *endIt;
     auto& incref = *(++endIt);
     auto& mov = *(++endIt);
-    EXPECT_MATCH(ldmem, LdMem, Type::Int, ptr->dst());
+    EXPECT_MATCH(ldmem, LdMem, TInt, ptr->dst());
     EXPECT_MATCH(incref, IncRef, ldmem.dst());
     EXPECT_MATCH(mov, Mov, ldmem.dst());
     EXPECT_EQ(ckt->dst(), mov.dst());

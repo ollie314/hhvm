@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_PREG_H_
 #define incl_HPHP_PREG_H_
 
-#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/base/req-containers.h"
 #include "hphp/runtime/base/type-string.h"
 
 #include <cstdint>
@@ -48,37 +48,32 @@ enum {
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Array;
+struct Array;
 struct Variant;
 
-class pcre_cache_entry {
-  pcre_cache_entry(const pcre_cache_entry&);
-  pcre_cache_entry& operator=(const pcre_cache_entry&);
-
-public:
-  pcre_cache_entry() : subpat_names(nullptr) {}
+struct pcre_cache_entry {
+  pcre_cache_entry() = default;
   ~pcre_cache_entry();
 
-  pcre *re;
-  pcre_extra *extra; // Holds results of studying
+  pcre_cache_entry(const pcre_cache_entry&) = delete;
+  pcre_cache_entry& operator=(const pcre_cache_entry&) = delete;
+
+  pcre* re;
+  pcre_extra* extra; // Holds results of studying
   int preg_options:1;
   int compile_options:31;
   int num_subpats;
-  mutable std::atomic<char**> subpat_names;
+  mutable std::atomic<char**> subpat_names{nullptr};
 };
 
-class PCREglobals {
-public:
+struct PCREglobals {
   PCREglobals();
   ~PCREglobals();
-  void cleanupOnRequestEnd(const pcre_cache_entry* ent);
-  void onSessionExit();
+
   // pcre ini_settings
-  int64_t m_preg_backtrace_limit;
-  int64_t m_preg_recursion_limit;
-  pcre_jit_stack *m_jit_stack;
-private:
-  smart::vector<const pcre_cache_entry*> m_overflow;
+  int64_t preg_backtrace_limit;
+  int64_t preg_recursion_limit;
+  pcre_jit_stack* jit_stack;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -110,23 +105,15 @@ void pcre_dump_cache(const std::string& filename);
 Variant preg_grep(const String& pattern, const Array& input, int flags = 0);
 
 Variant preg_match(const String& pattern, const String& subject,
-                   Variant& matches,
+                   Variant* matches = nullptr,
                    int flags = 0, int offset = 0);
 
-Variant preg_match(const String& pattern,
-                   const String& subject,
-                   int flags = 0,
-                   int offset = 0);
-
 Variant preg_match_all(const String& pattern, const String& subject,
-                       Variant& matches,
-                       int flags = 0, int offset = 0);
-
-Variant preg_match_all(const String& pattern, const String& subject,
+                       Variant* matches = nullptr,
                        int flags = 0, int offset = 0);
 
 Variant preg_replace_impl(const Variant& pattern, const Variant& replacement,
-                          const Variant& subject, int limit, Variant& count,
+                          const Variant& subject, int limit, Variant* count,
                           bool is_callable, bool is_filter);
 int preg_replace(Variant& result,
                  const Variant& pattern,

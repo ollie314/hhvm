@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -58,11 +58,15 @@ int main(int argc, char **argv) {
     IniSetting::Map ini = IniSetting::Map::object;
     Hdf empty;
     RuntimeOption::Load(ini, empty);
+    // This one's default value changed recently
+    RuntimeOption::AlwaysPopulateRawPostData = true;
   }
 
   // Initialize compiler state
   compile_file(0, 0, MD5(), 0);
   hphp_process_init();
   Test test;
-  return test.RunTests(suite, which, set) ? 0 : -1;
+  auto ret = test.RunTests(suite, which, set) ? 0 : -1;
+  hphp_process_exit();
+  return ret;
 }

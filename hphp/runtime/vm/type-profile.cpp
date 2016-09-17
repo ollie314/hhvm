@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,153 +16,36 @@
 
 #include "hphp/runtime/vm/type-profile.h"
 
-#include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include <atomic>
+#include <cstdint>
+#include <queue>
+#include <utility>
 
 #include <tbb/concurrent_hash_map.h>
 
-#include <folly/String.h>
-
-#include "hphp/util/atomic-vector.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/trace.h"
 
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/ext/server/ext_server.h"
+#include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/jit/write-lease.h"
 #include "hphp/runtime/vm/treadmill.h"
+#include "hphp/runtime/vm/jit/relocation.h"
+#include "hphp/runtime/vm/jit/tc.h"
+
+#include "hphp/util/atomic-vector.h"
+#include "hphp/util/boot_timer.h"
+#include "hphp/util/struct-log.h"
 
 namespace HPHP {
 
 TRACE_SET_MOD(typeProfile);
 
 //////////////////////////////////////////////////////////////////////
-
-/*
- * It is useful at translation time to have a hunch as to the types a given
- * instruction is likely to produce. This is a probabilistic data structure
- * that tries to balance: cost of reading and writing; memory overhead;
- * prediction recall (percentage of time we make a prediction); prediction
- * accuracy (fidelity relative to reality); and prediction precision
- * (fidelity relative to ourselves).
- */
-
-typedef uint16_t Counter;
-static const Counter kMaxCounter = USHRT_MAX;
-
-namespace {
-
-struct ValueProfile {
-  uint32_t m_tag;
-  // All of these saturate at 255.
-  Counter m_totalSamples;
-  Counter m_samples[kNumDataTypes];
-  void dump() {
-    for (int i = 0; i < kNumDataTypes; i++) {
-      TRACE(0, "t%3d: %4d\n", i, m_samples[getDataTypeValue(i)]);
-    }
-  }
-};
-
-}
-
-/*
- * Magic tunables.
- */
-
-/*
- * kNumEntries
- *
- * Tradeoff: size vs. accuracy.
- *
- * ~256K entries.
- *
- * Size: (sizeof(ValueProfile) == 16) B -> 4MB
- *
- * Accuracy: If we collide further than kLineSize, we toss out perfectly
- * good evidence. www seems to use about 12000 method names at this
- * writing, so we have a decent pad for collisions.
- */
-
-static const int kNumEntries = 1 << 18;
-static const int kLineSizeLog2 = 2;
-static const int kLineSize = 1 << kLineSizeLog2;
-static const int kNumLines = kNumEntries / kLineSize;
-static const int kNumLinesMask = kNumLines - 1;
-
-/*
- * kMinInstances
- *
- * Tradeoff: recall vs. accuracy. This is the minimum number of examples
- * before we'll report any information at all.
- *
- * Recall: If we set this too high, we'll never be able to predict
- * anything.
- *
- * Accuracy: If we set this too low, we'll be "jumpy", eagerly predicting
- * types on the basis of weak evidence.
- */
-static const double kMinInstances = 99.0;
-
-typedef ValueProfile ValueProfileLine[kLineSize];
-static ValueProfileLine* profiles;
-
-static ValueProfileLine*
-profileInitMmap() {
-  const std::string& path = RuntimeOption::EvalJitProfilePath;
-  if (path.empty()) {
-    return nullptr;
-  }
-
-  TRACE(1, "profileInit: path %s\n", path.c_str());
-  int fd = open(path.c_str(), O_RDWR | O_CREAT, 0600);
-  if (fd < 0) {
-    TRACE(0, "profileInit: open %s failed: %s\n", path.c_str(),
-          folly::errnoStr(errno).c_str());
-    perror("open");
-    return nullptr;
-  }
-
-  size_t len = sizeof(ValueProfileLine) * kNumLines;
-  int retval = ftruncate(fd, len);
-  if (retval < 0) {
-    perror("truncate");
-    TRACE(0, "profileInit: truncate %s failed: %s\n", path.c_str(),
-          folly::errnoStr(errno).c_str());
-    return nullptr;
-  }
-
-  int flags = PROT_READ |
-    (RuntimeOption::EvalJitProfileRecord ? PROT_WRITE : 0);
-  void* mmapRet = mmap(0, len, flags, MAP_SHARED, // Yes, shared.
-                       fd, 0);
-  if (mmapRet == MAP_FAILED) {
-    perror("mmap");
-    TRACE(0, "profileInit: mmap %s failed: %s\n", path.c_str(),
-          folly::errnoStr(errno).c_str());
-    return nullptr;
-  }
-  return (ValueProfileLine*)mmapRet;
-}
-
-void
-profileInit() {
-  if (!profiles) {
-    profiles = profileInitMmap();
-    if (!profiles) {
-      TRACE(1, "profileInit: anonymous memory.\n");
-      profiles = (ValueProfileLine*)calloc(sizeof(ValueProfileLine), kNumLines);
-      assert(profiles);
-    }
-  }
-}
 
 /*
  * Warmup/profiling.
@@ -172,18 +55,47 @@ profileInit() {
  * In server mode, we exclude warmup document requests from profiling, then
  * record samples for EvalJitProfileInterpRequests standard requests.
  */
-bool __thread profileOn = false;
-static bool warmingUp;
-static int64_t numRequests;
+
+RequestKind __thread requestKind = RequestKind::Warmup;
 bool __thread standardRequest = true;
-static std::atomic<bool> singleJitLock;
-static std::atomic<int> singleJitRequests;
 
 namespace {
 
-using FuncProfileCounters = tbb::concurrent_hash_map<FuncId,uint32_t>;
-FuncProfileCounters s_func_counters;
+bool warmingUp;
+std::atomic<int64_t> numRequests;
+std::atomic<bool> singleJitLock;
+__thread bool acquiredSingleJit = false;
+std::atomic<int> singleJitConcurrentCount;
+__thread bool acquiredSingleJitConcurrent = false;
+std::atomic<int> singleJitRequests;
+std::atomic<int> relocateRequests;
 
+/*
+ * RFH, or "requests served in first hour" is used as a performance metric that
+ * is affected by warmup speed as well as steady-state performance. For every
+ * element n in this list, we log a point along the RFH curve, which is the
+ * total number of requests served when server uptime hits n seconds.
+ */
+const std::vector<int64_t> rfhBuckets = {
+  30, 60, 90, 120, 150, 180, 210, 240, 270, 300,             // every 30s, to 5m
+  360, 420, 480, 540, 600,                                   // every 1m, to 10m
+  900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3300, 3600, // every 5m, to 1h
+  4500, 5400, 6300, 7200,                                    // every 15m, to 2h
+  3 * 3600, 4 * 3600, 5 * 3600, 6 * 3600,                    // every 1h, to 6h
+};
+std::atomic<size_t> nextRFH{0};
+
+}
+
+void setRelocateRequests(int32_t n) {
+  relocateRequests.store(n);
+}
+
+namespace {
+AtomicVector<uint32_t> s_func_counters{0, 0};
+AtomicVectorInit s_func_counters_init{
+  s_func_counters, RuntimeOption::EvalFuncCountHint
+};
 }
 
 void profileWarmupStart() {
@@ -204,9 +116,9 @@ static bool comp(const FuncHotness& a, const FuncHotness& b) {
  * set AttrHot to the top Eval.HotFuncCount functions.
  */
 static Mutex syncLock;
-static void setHotFuncAttr() {
+void profileSetHotFuncAttr() {
   static bool synced = false;
-  if (synced) return;
+  if (LIKELY(synced)) return;
 
   Lock lock(syncLock);
   if (synced) return;
@@ -230,9 +142,9 @@ static void setHotFuncAttr() {
     Func::getFuncVec().foreach([&](const Func* f) {
       if (!f) return;
       auto const profCounter = [&]() -> uint32_t {
-        FuncProfileCounters::const_accessor acc;
-        if (s_func_counters.find(acc, f->getFuncId())) {
-          return acc->second;
+        auto const id = f->getFuncId();
+        if (id < s_func_counters.size()) {
+          return s_func_counters[id].load(std::memory_order_relaxed);
         }
         return 0;
       }();
@@ -247,7 +159,7 @@ static void setHotFuncAttr() {
     while (queue.size()) {
       auto f = queue.top().first;
       queue.pop();
-      const_cast<Func*>(f)->setHot();
+      const_cast<Func*>(f)->setAttrs(f->attrs() | AttrHot);
     }
   }
 
@@ -255,54 +167,70 @@ static void setHotFuncAttr() {
   // that still thought they were profiling, so we need to clear it on the
   // treadmill.
   Treadmill::enqueue([&] {
-    FuncProfileCounters newMap(0);
-    swap(s_func_counters, newMap);
+    s_func_counters.~AtomicVector<uint32_t>();
+    new (&s_func_counters) AtomicVector<uint32_t>{0, 0};
   });
 
   synced = true;
 }
 
 void profileIncrementFuncCounter(const Func* f) {
-  FuncProfileCounters::accessor acc;
-  auto const value = FuncProfileCounters::value_type(f->getFuncId(), 0);
-  if (!s_func_counters.insert(acc, value)) {
-    __sync_fetch_and_add(&acc->second, 1);
-  }
+  s_func_counters.ensureSize(f->getFuncId() + 1);
+  s_func_counters[f->getFuncId()].fetch_add(1, std::memory_order_relaxed);
 }
 
 int64_t requestCount() {
-  return numRequests;
+  return numRequests.load(std::memory_order_relaxed);
+}
+
+int singleJitRequestCount() {
+  return singleJitRequests.load(std::memory_order_relaxed);
 }
 
 static inline bool doneProfiling() {
-  return (numRequests >= RuntimeOption::EvalJitProfileInterpRequests) ||
+  return requestCount() >= RuntimeOption::EvalJitProfileInterpRequests ||
     (RuntimeOption::ClientExecutionMode() &&
      !RuntimeOption::EvalJitProfileRecord);
 }
 
-static inline bool profileThisRequest() {
-  if (warmingUp) return false;
-  if (doneProfiling()) return false;
-  if (RuntimeOption::ServerExecutionMode()) return true;
-  return RuntimeOption::EvalJitProfileRecord;
+static inline RequestKind getRequestKind() {
+  if (warmingUp) return RequestKind::Warmup;
+  if (doneProfiling()) return RequestKind::Standard;
+  if (RuntimeOption::ServerExecutionMode() ||
+      RuntimeOption::EvalJitProfileRecord) return RequestKind::Profile;
+  return RequestKind::Standard;
 }
 
 void profileRequestStart() {
-  bool p = profileThisRequest();
-  if (profileOn && !p) {
-    // If we are turning off profiling, set AttrHot on
-    // functions that are "hot".
-    setHotFuncAttr();
-  }
-  profileOn = p;
+  requestKind = getRequestKind();
 
-  bool okToJit = !warmingUp && !p;
+  bool okToJit = requestKind == RequestKind::Standard;
   if (okToJit) {
     jit::Lease::mayLock(true);
+    jit::Lease::mayLockConcurrent(true);
+    assertx(!acquiredSingleJit);
+    assertx(!acquiredSingleJitConcurrent);
+
     if (singleJitRequests < RuntimeOption::EvalNumSingleJitRequests) {
-      bool flag = false;
-      if (!singleJitLock.compare_exchange_strong(flag, true)) {
+      if (!singleJitLock.exchange(true, std::memory_order_relaxed)) {
+        acquiredSingleJit = true;
+      } else {
         jit::Lease::mayLock(false);
+      }
+
+      if (RuntimeOption::EvalJitConcurrently > 0) {
+        // The single jit lock is treated separately for translations that
+        // happen concurrently: we still give threads permission to jit one
+        // request at a time, but we allow up to Eval.JitThreads to have this
+        // permission at once.
+        auto threads = singleJitConcurrentCount.load(std::memory_order_relaxed);
+        if (threads < RuntimeOption::EvalJitThreads &&
+            singleJitConcurrentCount.compare_exchange_strong(
+              threads, threads + 1, std::memory_order_relaxed)) {
+          acquiredSingleJitConcurrent = true;
+        } else {
+          jit::Lease::mayLockConcurrent(false);
+        }
       }
     }
   }
@@ -312,138 +240,63 @@ void profileRequestStart() {
       ThreadInfo::s_threadInfo->m_reqInjectionData.updateJit();
     }
   }
+
+  if (standardRequest && relocateRequests > 0 && !--relocateRequests) {
+    jit::tc::liveRelocate(true);
+  }
+}
+
+static void checkRFH(int64_t finished) {
+  auto i = nextRFH.load(std::memory_order_relaxed);
+  if (i == rfhBuckets.size() || !StructuredLog::enabled()) {
+    return;
+  }
+
+  auto const uptime = f_server_uptime();
+  if (uptime == -1) return;
+  assertx(uptime >= 0);
+
+  while (i < rfhBuckets.size() && uptime >= rfhBuckets[i]) {
+    assertx(i == 0 || rfhBuckets[i - 1] < rfhBuckets[i]);
+    if (!nextRFH.compare_exchange_strong(i, i + 1, std::memory_order_relaxed)) {
+      // Someone else reported the sample at i. Try again with the current
+      // value of nextRFH.
+      continue;
+    }
+
+    // "bucket" and "uptime" will always be the same as long as the server
+    // retires at least one request in each second of wall time.
+    StructuredLogEntry cols;
+    cols.setInt("requests", finished);
+    cols.setInt("bucket", rfhBuckets[i]);
+    cols.setInt("uptime", uptime);
+    StructuredLog::log("hhvm_rfh", cols);
+
+    ++i;
+  }
 }
 
 void profileRequestEnd() {
   if (warmingUp) return;
-  numRequests++; // racy RMW; ok to miss a rare few.
-  if (standardRequest &&
-      singleJitRequests < RuntimeOption::EvalNumSingleJitRequests &&
-      jit::Lease::mayLock(true)) {
-    assert(singleJitLock);
+  auto const finished = numRequests.fetch_add(1, std::memory_order_relaxed) + 1;
+  checkRFH(finished);
+
+  if (acquiredSingleJit || acquiredSingleJitConcurrent) {
     ++singleJitRequests;
-    singleJitLock = false;
+
+    if (acquiredSingleJit) {
+      singleJitLock = false;
+      acquiredSingleJit = false;
+    }
+    if (acquiredSingleJitConcurrent) {
+      --singleJitConcurrentCount;
+      acquiredSingleJitConcurrent = false;
+    }
+
     if (RuntimeOption::ServerExecutionMode()) {
       Logger::Warning("Finished singleJitRequest %d", singleJitRequests.load());
     }
   }
 }
-
-enum class KeyToVPMode {
-  Read, Write
-};
-
-uint64_t
-TypeProfileKey::hash() const {
-  return hash_int64_pair(m_kind, m_name->hash());
-}
-
-static inline ValueProfile*
-keyToVP(TypeProfileKey key, KeyToVPMode mode) {
-  assert(profiles);
-  uint64_t h = key.hash();
-  // Use the low-order kLineSizeLog2 bits to as tag bits to distinguish
-  // within the line, rather than to choose a line. Without the shift, all
-  // the tags in the line would have the same low-order bits, making
-  // collisions kLineSize times more likely.
-  int hidx = (h >> kLineSizeLog2) & kNumLinesMask;
-  ValueProfileLine& l = profiles[hidx];
-  int replaceCandidate = 0;
-  int minCount = 255;
-  for (int i = 0; i < kLineSize; i++) {
-    if (l[i].m_tag == uint32_t(h)) {
-      TRACE(2, "Found %d for %s -> %d\n",
-            l[i].m_tag, key.m_name->data(), uint32_t(h));
-      return &l[i];
-    }
-    if (mode == KeyToVPMode::Write && l[i].m_totalSamples < minCount) {
-      replaceCandidate = i;
-      minCount = l[i].m_totalSamples;
-    }
-  }
-  if (mode == KeyToVPMode::Write) {
-    assert(replaceCandidate >= 0 && replaceCandidate < kLineSize);
-    ValueProfile& vp = l[replaceCandidate];
-    Stats::inc(Stats::TypePred_Evict, vp.m_totalSamples != 0);
-    Stats::inc(Stats::TypePred_Insert);
-    TRACE(1, "Killing %d in favor of %s -> %d\n",
-          vp.m_tag, key.m_name ? key.m_name->data() : "NULL", uint32_t(h));
-    vp.m_totalSamples = 0;
-    memset(&vp.m_samples, 0, sizeof(vp.m_samples));
-    // Zero first, then claim. It seems safer to temporarily zero out some
-    // other function's values than to have this new function using the
-    // possibly-non-trivial prediction from an unrelated function.
-    compiler_membar();
-    vp.m_tag = uint32_t(h);
-    return &l[replaceCandidate];
-  }
-  return nullptr;
-}
-
-void recordType(TypeProfileKey key, DataType dt) {
-  if (!profiles) return;
-  if (!isProfileRequest()) return;
-  assert(dt != KindOfUninit);
-  // Normalize strings to KindOfString.
-  if (dt == KindOfStaticString) dt = KindOfString;
-  TRACE(1, "recordType lookup: %s -> %d\n", key.m_name->data(), dt);
-  ValueProfile *prof = keyToVP(key, KeyToVPMode::Write);
-  if (prof->m_totalSamples != kMaxCounter) {
-    prof->m_totalSamples++;
-    // NB: we can't quite assert that we have fewer than kMaxCounter samples,
-    // because other threads are updating this structure without locks.
-    int dtIndex = getDataTypeIndex(dt);
-    if (prof->m_samples[dtIndex] < kMaxCounter) {
-      prof->m_samples[dtIndex]++;
-    }
-  }
-  ONTRACE(2, prof->dump());
-}
-
-/*
- * Pair of (predicted type, confidence).
- *
- * A folly::none prediction means mixed/unknown.
- */
-typedef std::pair<MaybeDataType, double> PredVal;
-
-PredVal predictType(TypeProfileKey key) {
-  PredVal kNullPred = std::make_pair(KindOfUninit, 0.0);
-  if (!profiles) return kNullPred;
-  const ValueProfile *prof = keyToVP(key, KeyToVPMode::Read);
-  if (!prof) {
-    TRACE(2, "predictType lookup: %s -> MISS\n", key.m_name->data());
-    Stats::inc(Stats::TypePred_Miss);
-    return kNullPred;
-  }
-  double total = prof->m_totalSamples;
-  if (total < kMinInstances) {
-    Stats::inc(Stats::TypePred_MissTooFew);
-    TRACE(2, "TypePred: hit %s but too few samples numSamples %d\n",
-          key.m_name->data(), prof->m_totalSamples);
-    return kNullPred;
-  }
-  double maxProb = 0.0;
-  DataType pred = KindOfUninit;
-  // If we have fewer than kMinInstances predictions, consider it too
-  // little data to be actionable.
-  for (int i = 0; i < kNumDataTypes; ++i) {
-    double prob = (1.0 * prof->m_samples[i]) / total;
-    if (prob > maxProb) {
-      maxProb = prob;
-      pred = getDataTypeValue(i);
-    }
-    if (prob >= 1.0) break;
-  }
-  Stats::inc(Stats::TypePred_Hit, maxProb >= 1.0);
-  Stats::inc(Stats::TypePred_MissTooWeak, maxProb < 1.0);
-  TRACE(2, "TypePred: hit %s numSamples %d pred %d prob %g\n",
-        key.m_name->data(), prof->m_totalSamples, pred, maxProb);
-  // Probabilities over 1.0 are possible due to racy updates.
-  if (maxProb > 1.0) maxProb = 1.0;
-  return std::make_pair(pred, maxProb);
-}
-
-//////////////////////////////////////////////////////////////////////
 
 }

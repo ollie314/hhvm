@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,18 +22,18 @@
 #include <set>
 #include <deque>
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/server/transport.h"
 #include "hphp/runtime/server/server-task-event.h"
+#include "hphp/util/synchronizable.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class PageletTransport;
-class PageletServerTaskEvent;
+struct PageletTransport;
+struct PageletServerTaskEvent;
 
-class PageletServer {
-public:
+struct PageletServer {
   static bool Enabled();
   static void Restart();
   static void Stop();
@@ -78,8 +78,7 @@ public:
   static int GetQueuedJobs();
 };
 
-class PageletTransport : public Transport, public Synchronizable {
-public:
+struct PageletTransport final : Transport, Synchronizable {
   PageletTransport(
     const String& url, const Array& headers, const String& postData,
     const String& remoteHost,
@@ -89,20 +88,20 @@ public:
   /**
    * Implementing Transport...
    */
-  virtual const char *getUrl();
-  virtual const char *getRemoteHost();
-  virtual uint16_t getRemotePort();
-  virtual const void *getPostData(int &size);
-  virtual Method getMethod();
-  virtual std::string getHeader(const char *name);
-  virtual void getHeaders(HeaderMap &headers);
-  virtual void addHeaderImpl(const char *name, const char *value);
-  virtual void removeHeaderImpl(const char *name);
-  virtual void sendImpl(const void *data, int size, int code,
-                        bool chunked);
-  virtual void onSendEndImpl();
-  virtual bool isUploadedFile(const String& filename);
-  virtual bool getFiles(std::string &files);
+  const char *getUrl() override;
+  const char *getRemoteHost() override;
+  uint16_t getRemotePort() override;
+  const void *getPostData(size_t &size) override;
+  Method getMethod() override;
+  std::string getHeader(const char *name) override;
+  void getHeaders(HeaderMap &headers) override;
+  void addHeaderImpl(const char *name, const char *value) override;
+  void removeHeaderImpl(const char *name) override;
+  void sendImpl(const void *data, int size, int code, bool chunked, bool eom)
+       override;
+  void onSendEndImpl() override;
+  bool isUploadedFile(const String& filename) override;
+  bool getFiles(std::string &files) override;
 
   // task interface
   bool isDone();
@@ -119,6 +118,7 @@ public:
 
   bool getResults(
     Array &results,
+    int &code,
     PageletServerTaskEvent* next_event
   );
 
@@ -150,11 +150,11 @@ private:
   std::set<std::string> m_rfc1867UploadedFiles;
   std::string m_files; // serialized to use as $_FILES
 
+  // points to an event with an attached waithandle from a different request
   PageletServerTaskEvent *m_event;
 };
 
-class PageletServerTaskEvent final : public AsioExternalThreadEvent {
-public:
+struct PageletServerTaskEvent final : AsioExternalThreadEvent {
 
   ~PageletServerTaskEvent() {
     if (m_job) m_job->decRefCount();
@@ -178,8 +178,9 @@ protected:
     // Create an event for the next results that might be used.
     PageletServerTaskEvent *event = new PageletServerTaskEvent();
 
+    int code = 0;
     // Fetch all results from the transport that are currently available.
-    bool done = m_job->getResults(responses, event);
+    bool done = m_job->getResults(responses, code, event);
 
     // Returned tuple/array.
     Array ret = Array::Create();
@@ -191,8 +192,9 @@ protected:
       ret.append(init_null_variant);
     } else {
       // The event was added to the job to be triggered next.
-      ret.append(event->getWaitHandle());
+      ret.append(Variant{event->getWaitHandle()});
     }
+    ret.append(Variant{code});
 
     cellDup(*(Variant(ret)).asCell(), result);
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,31 +18,98 @@
 #include <string>
 #include <vector>
 
-#include "hphp/runtime/base/program-functions.h"
-#include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/util/timer.h"
-#include "hphp/runtime/server/static-content-cache.h"
-#include "hphp/runtime/server/dynamic-content-cache.h"
-#include "hphp/runtime/server/server-stats.h"
-#include "hphp/util/network.h"
-#include "hphp/runtime/base/preg.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/server/access-log.h"
-#include "hphp/runtime/server/source-root-info.h"
-#include "hphp/runtime/server/request-uri.h"
-#include "hphp/runtime/server/http-protocol.h"
-#include "hphp/runtime/server/files-match.h"
 #include "hphp/runtime/base/datetime.h"
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/hhprof.h"
+#include "hphp/runtime/base/init-fini-node.h"
+#include "hphp/runtime/base/preg.h"
+#include "hphp/runtime/base/program-functions.h"
+#include "hphp/runtime/base/resource-data.h"
+#include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/ext/extension-registry.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
+#include "hphp/runtime/ext/xdebug/status.h"
+#include "hphp/runtime/server/access-log.h"
+#include "hphp/runtime/server/files-match.h"
+#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/server/request-uri.h"
+#include "hphp/runtime/server/server-stats.h"
+#include "hphp/runtime/server/source-root-info.h"
+#include "hphp/runtime/server/static-content-cache.h"
 #include "hphp/runtime/vm/debugger-hook.h"
+
 #include "hphp/util/alloc.h"
+#include "hphp/util/lock.h"
+#include "hphp/util/mutex.h"
+#include "hphp/util/network.h"
 #include "hphp/util/service-data.h"
+#include "hphp/util/stack-trace.h"
+#include "hphp/util/timer.h"
 
 namespace HPHP {
 
 using std::string;
 using std::vector;
+
+///////////////////////////////////////////////////////////////////////////////
+
+static ReadWriteMutex s_proxyMutex;
+static __thread unsigned int s_randState = 0xfaceb00c;
+
+static bool matchAnyPattern(const std::string &path,
+                            const std::vector<std::string> &patterns) {
+  String spath(path.c_str(), path.size(), CopyString);
+  for (unsigned int i = 0; i < patterns.size(); i++) {
+    Variant ret = preg_match(String(patterns[i].c_str(), patterns[i].size(),
+                                    CopyString),
+                             spath);
+    if (ret.toInt64() > 0) return true;
+  }
+  return false;
+}
+
+/*
+ * Returns true iff a request to the given path should be delegated to the
+ * proxy origin.
+ */
+static bool shouldProxyPath(const std::string& path) {
+  ReadLock lock(s_proxyMutex);
+
+  if (RuntimeOption::ProxyOriginRaw.empty()) return false;
+
+  if (RuntimeOption::UseServeURLs && RuntimeOption::ServeURLs.count(path)) {
+    return true;
+  }
+
+  if (RuntimeOption::UseProxyURLs) {
+    if (RuntimeOption::ProxyURLs.count(path)) return true;
+    if (matchAnyPattern(path, RuntimeOption::ProxyPatterns)) return true;
+  }
+
+  if (RuntimeOption::ProxyPercentageRaw > 0) {
+    if ((abs(rand_r(&s_randState)) % 100) < RuntimeOption::ProxyPercentageRaw) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static std::string getProxyPath(const char* origPath) {
+  ReadLock lock(s_proxyMutex);
+
+  return RuntimeOption::ProxyOriginRaw + origPath;
+}
+
+void setProxyOriginPercentage(const std::string& origin, int percentage) {
+  WriteLock lock(s_proxyMutex);
+
+  RuntimeOption::ProxyOriginRaw = origin;
+  RuntimeOption::ProxyPercentageRaw = percentage;
+  Logger::Warning("Updated proxy origin to `%s' and percentage to %d\n",
+                  origin.c_str(), percentage);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -92,12 +159,14 @@ void HttpRequestHandler::sendStaticContent(Transport *transport,
     snprintf(age, sizeof(age), "max-age=%d", RuntimeOption::ExpiresDefault);
     transport->addHeader("Cache-Control", age);
     transport->addHeader("Expires",
-      DateTime(exp, true).toString(DateTime::DateFormat::HttpHeader).c_str());
+      req::make<DateTime>(exp, true)->toString(
+        DateTime::DateFormat::HttpHeader).c_str());
   }
 
   if (mtime) {
     transport->addHeader("Last-Modified",
-      DateTime(mtime, true).toString(DateTime::DateFormat::HttpHeader).c_str());
+      req::make<DateTime>(mtime, true)->toString(
+        DateTime::DateFormat::HttpHeader).c_str());
   }
   transport->addHeader("Accept-Ranges", "bytes");
 
@@ -116,6 +185,7 @@ void HttpRequestHandler::sendStaticContent(Transport *transport,
   transport->disableCompression();
 
   transport->sendRaw((void*)data, len, 200, compressed);
+  transport->onSendEnd();
 }
 
 void HttpRequestHandler::logToAccessLog(Transport* transport) {
@@ -125,6 +195,7 @@ void HttpRequestHandler::logToAccessLog(Transport* transport) {
 
 void HttpRequestHandler::setupRequest(Transport* transport) {
   MemoryManager::requestInit();
+  HHProf::Request::Setup(transport);
 
   g_context.getCheck();
   GetAccessLog().onNewRequest();
@@ -153,6 +224,7 @@ void HttpRequestHandler::teardownRequest(Transport* transport) noexcept {
   }
 
   MemoryManager::requestShutdown();
+  HHProf::Request::Teardown();
 }
 
 void HttpRequestHandler::handleRequest(Transport *transport) {
@@ -232,11 +304,6 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
     return;
   }
 
-  bool cachableDynamicContent =
-    (!RuntimeOption::StaticFileGenerators.empty() &&
-     RuntimeOption::StaticFileGenerators.find(path) !=
-     RuntimeOption::StaticFileGenerators.end());
-
   // Determine which extensions should be treated as php
   // source code. If the execution engine doesn't understand
   // the source, the content will be spit out verbatim.
@@ -246,7 +313,7 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
        (RuntimeOption::PhpFileExtensions.empty() ||
         !RuntimeOption::PhpFileExtensions.count(ext));
 
-  // If this is not a php file, check the static and dynamic content caches
+  // If this is not a php file, check the static content cache
   if (treatAsContent) {
     bool original = compressed;
     // check against static content cache
@@ -259,7 +326,7 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
       if (!original && compressed) {
         data = gzdecode(data, len);
         if (data == nullptr) {
-          throw FatalErrorException("cannot unzip compressed data");
+          raise_fatal_error("cannot unzip compressed data");
         }
         decompressed_data = const_cast<char*>(data);
         compressed = false;
@@ -284,30 +351,10 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
         }
       }
     }
-
-    // check static contents that were generated by dynamic pages
-    if (cachableDynamicContent) {
-      // check against dynamic content cache
-      assert(transport->getUrl());
-      string key = path + transport->getUrl();
-      if (DynamicContentCache::TheCache.find(key, data, len, compressed)) {
-        sendStaticContent(transport, data, len, 0, compressed, path, ext);
-        ServerStats::LogPage(path, 200);
-        return;
-      }
-    }
   }
 
   // proxy any URLs that not specified in ServeURLs
-  if (!RuntimeOption::ProxyOrigin.empty() &&
-      ((RuntimeOption::UseServeURLs &&
-        RuntimeOption::ServeURLs.find(path) ==
-        RuntimeOption::ServeURLs.end()) ||
-       (RuntimeOption::UseProxyURLs &&
-        (RuntimeOption::ProxyURLs.find(path) !=
-         RuntimeOption::ProxyURLs.end() ||
-         MatchAnyPattern(path, RuntimeOption::ProxyPatterns) ||
-         (abs(rand()) % 100) < RuntimeOption::ProxyPercentage)))) {
+  if (shouldProxyPath(path)) {
     for (int i = 0; i < RuntimeOption::ProxyRetry; i++) {
       bool force = (i == RuntimeOption::ProxyRetry - 1); // last one
       if (handleProxyRequest(transport, force)) break;
@@ -325,8 +372,7 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
 
   bool ret = false;
   try {
-    ret = executePHPRequest(transport, reqURI, m_sourceRootInfo.value(),
-                            cachableDynamicContent);
+    ret = executePHPRequest(transport, reqURI, m_sourceRootInfo.value());
   } catch (...) {
     string emsg;
     string response;
@@ -334,6 +380,9 @@ void HttpRequestHandler::handleRequest(Transport *transport) {
     try {
       throw;
     } catch (const Eval::DebuggerException &e) {
+      code = 200;
+      response = e.what();
+    } catch (const XDebugExitExn& e) {
       code = 200;
       response = e.what();
     } catch (Object &e) {
@@ -367,9 +416,14 @@ void HttpRequestHandler::abortRequest(Transport* transport) {
 
 bool HttpRequestHandler::executePHPRequest(Transport *transport,
                                            RequestURI &reqURI,
-                                           SourceRootInfo &sourceRootInfo,
-                                           bool cachableDynamicContent) {
+                                           SourceRootInfo &sourceRootInfo) {
   ExecutionContext *context = hphp_context_init();
+  OBFlags obFlags = OBFlags::Default;
+  if (transport->getHTTPVersion() != "1.1") {
+    obFlags |= OBFlags::OutputDisabled;
+  }
+  context->obStart(uninit_null(), 0, obFlags);
+  context->obProtect(true);
   if (RuntimeOption::ImplicitFlush) {
     context->obSetImplicitFlush(true);
   }
@@ -381,12 +435,13 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
     }
   }
   context->setTransport(transport);
+  InitFiniNode::RequestStart();
 
   string file = reqURI.absolutePath().c_str();
   {
     ServerStatsHelper ssh("input");
     HttpProtocol::PrepareSystemVariables(transport, reqURI, sourceRootInfo);
-    Extension::RequestInitModules();
+    InitFiniNode::GlobalsInit();
 
     if (RuntimeOption::EnableDebugger) {
       Eval::DSandboxInfo sInfo = sourceRootInfo.getSandboxInfo();
@@ -419,12 +474,6 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
 
   if (ret) {
     String content = context->obDetachContents();
-    if (cachableDynamicContent && !content.empty()) {
-      assert(transport->getUrl());
-      string key = file + transport->getUrl();
-      DynamicContentCache::TheCache.store(key, content.data(),
-                                          content.size());
-    }
     transport->sendRaw((void*)content.data(), content.size());
     code = transport->getResponseCode();
   } else if (error) {
@@ -465,7 +514,7 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
     }
   } else {
     code = 404;
-    transport->sendString("Not Found", 404);
+    transport->sendString("RequestInitDocument Not Found", 404);
   }
 
   if (RuntimeOption::EnableDebugger) {
@@ -492,7 +541,7 @@ bool HttpRequestHandler::executePHPRequest(Transport *transport,
 }
 
 bool HttpRequestHandler::handleProxyRequest(Transport *transport, bool force) {
-  string url = RuntimeOption::ProxyOrigin + transport->getServerObject();
+  auto const url = getProxyPath(transport->getServerObject());
 
   int code = 0;
   std::string error;
@@ -512,18 +561,6 @@ bool HttpRequestHandler::handleProxyRequest(Transport *transport, bool force) {
   }
   transport->sendRaw((void*)respData, response.size(), code);
   return true;
-}
-
-bool HttpRequestHandler::MatchAnyPattern
-(const std::string &path, const std::vector<std::string> &patterns) {
-  String spath(path.c_str(), path.size(), CopyString);
-  for (unsigned int i = 0; i < patterns.size(); i++) {
-    Variant ret = preg_match(String(patterns[i].c_str(), patterns[i].size(),
-                                    CopyString),
-                             spath);
-    if (ret.toInt64() > 0) return true;
-  }
-  return false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

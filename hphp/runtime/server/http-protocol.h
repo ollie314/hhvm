@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,16 +17,17 @@
 #ifndef incl_HPHP_HTTP_PROTOCOL_H_
 #define incl_HPHP_HTTP_PROTOCOL_H_
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/server/transport.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class RequestURI;
-class SourceRootInfo;
-class VirtualHost;
-class StringBuffer;
+struct Array;
+struct RequestURI;
+struct SourceRootInfo;
+struct StringBuffer;
+struct Variant;
+struct VirtualHost;
 
 struct HttpProtocol {
   static const VirtualHost *GetVirtualHost(Transport *transport);
@@ -36,17 +37,15 @@ struct HttpProtocol {
   static void PrepareRequestVariables(Array& request,
                                       Array& get,
                                       Array& post,
-                                      Variant& raw_post,
-                                      Array& files,
                                       Array& cookie,
-                                      Transport *transport,
-                                      const RequestURI &r);
+                                      const std::string& requestOrder);
   static void PrepareGetVariable(Array& get,
                                  const RequestURI &r);
   static void PreparePostVariables(Array& post,
                                    Variant& raw_post,
                                    Array& files,
-                                   Transport *transport);
+                                   Transport* transport,
+                                   const RequestURI& r);
   static bool PrepareCookieVariable(Array& cookie,
                                     Transport *transport);
   static void PrepareServerVariable(Array& server,
@@ -65,14 +64,14 @@ struct HttpProtocol {
 
   static void DecodeParameters(Array& variables,
                                const char *data,
-                               int size,
+                               size_t size,
                                bool post = false);
   static void DecodeRfc1867(Transport* transport,
                             Array& post,
                             Array& files,
-                            int contentLength,
+                            size_t contentLength,
                             const void*& data,
-                            int& size,
+                            size_t& size,
                             std::string boundary);
   static void DecodeCookies(Array& variables, char *data);
   static bool IsRfc1867(std::string contentType, std::string &boundary);

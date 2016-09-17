@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,8 @@
 #ifndef incl_HPHP_EXT_STREAM_USER_FILTERS_H_
 #define incl_HPHP_EXT_STREAM_USER_FILTERS_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/base/req-containers.h"
 
 namespace HPHP {
 
@@ -29,12 +30,14 @@ const int64_t k_STREAM_FILTER_ALL   = k_STREAM_FILTER_READ |
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class BucketBrigade : public ResourceData {
-public:
+struct File;
+
+struct BucketBrigade : ResourceData {
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(BucketBrigade);
   CLASSNAME_IS("bucket brigade");
-  // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override {
+    return classnameof();
+  }
 
   BucketBrigade() { };
   explicit BucketBrigade(const String& data);
@@ -45,27 +48,29 @@ public:
 
   String createString();
 private:
-  smart::list<Object> m_buckets;
+  req::list<Object> m_buckets;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class StreamFilter : public ResourceData {
-public:
+struct StreamFilter : ResourceData {
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(StreamFilter);
   CLASSNAME_IS("stream filter");
-  // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override {
+    return classnameof();
+  }
 
-  explicit StreamFilter(const Object& filter, const Resource& stream):
+  explicit StreamFilter(const Object& filter, const req::ptr<File>& stream):
       m_filter(filter), m_stream(stream) { }
 
-  int64_t invokeFilter(Resource in, Resource out, bool closing);
+  int64_t invokeFilter(const req::ptr<BucketBrigade>& in,
+                       const req::ptr<BucketBrigade>& out,
+                       bool closing);
   void invokeOnClose();
   bool remove();
 private:
   Object m_filter;
-  Resource m_stream;
+  req::ptr<File> m_stream;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

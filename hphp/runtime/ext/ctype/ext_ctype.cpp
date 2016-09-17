@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,7 +15,7 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 
@@ -100,10 +100,9 @@ bool HHVM_FUNCTION(ctype_xdigit, const Variant& text) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class CtypeExtension : public Extension {
- public:
+struct CtypeExtension final : Extension {
   CtypeExtension() : Extension("ctype") {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     HHVM_FE(ctype_alnum);
     HHVM_FE(ctype_alpha);
     HHVM_FE(ctype_cntrl);

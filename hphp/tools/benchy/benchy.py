@@ -38,27 +38,12 @@ def _unique_id():
 _unique_id.next_id = 1
 
 
-def verbose():
-    """Returns the current verbosity level.
-
-    """
-    return verbose.level
-verbose.level = 0
-
-
-def set_verbose_level(level):
-    """Sets the verbosity level for debugging.
-
-    """
-    verbose.level = level
-
-
 class Branch(object):
     """A branch within a repository, i.e. the basic unit of comparison."""
-    def __init__(self, name, env='', vm_path=None):
+    def __init__(self, name, opts='', vm_path=None):
         self.name = name
         self.uid = _unique_id()
-        self.env = env
+        self.opts = opts
         self.vm_path = vm_path
 
     def can_build(self):
@@ -87,8 +72,8 @@ class Branch(object):
         return "{0.name}.{0.uid}".format(self)
 
     def format(self):
-        if len(self.env) > 0:
-            return "{0.name}:{0.env}:{1}".format(self, self.root_dir())
+        if len(self.opts) > 0:
+            return "{0.name}:{0.opts}:{1}".format(self, self.root_dir())
         else:
             return "{0.name}:{1}".format(self, self.root_dir())
 Branch.pattern = r'([^:]+)((?::[^:]+)+)?'
@@ -108,16 +93,17 @@ def parse_branches(raw_branches):
             branches.append(Branch(name))
             continue
 
-        env_and_path = result.group(2)[1:]  # Get rid of the leading colon.
-        pieces = env_and_path.split(':')
-        if '=' in pieces[-1]:
-            # The last segment looks like an environment setting.
-            branches.append(Branch(name, env_and_path))
+        opts_and_path = result.group(2)[1:]  # Get rid of the leading colon.
+        pieces = opts_and_path.split(':')
+        if '=' in pieces[-1] or pieces[-1].startswith('-'):
+            # The last segment looks like an environment setting or cli
+            # argument.
+            branches.append(Branch(name, opts_and_path))
         else:
             # The last segment looks like a path.
-            env = ':'.join(pieces[:-1])
+            opts = ':'.join(pieces[:-1])
             path = os.path.expanduser(pieces[-1])
-            branches.append(Branch(name, env, path))
+            branches.append(Branch(name, opts, path))
     return branches
 
 
@@ -155,7 +141,14 @@ def build_branches(branches):
             sys.stdout = stdout
 
 
-def run_benchmarks(suites, benchmarks, run_perf, inner, outer, branches):
+def run_benchmarks(
+        suites,
+        benchmarks,
+        run_perf,
+        warmup,
+        inner,
+        outer,
+        branches):
     """Runs the benchmarks on the branches by invoking the harness script.
 
     """
@@ -164,18 +157,21 @@ def run_benchmarks(suites, benchmarks, run_perf, inner, outer, branches):
     suite_str = ' '.join(["--suite %s" % s for s in suites])
     benchmark_str = ' '.join(["--benchmark %s" % b for b in benchmarks])
     perf_str = '--perf' if run_perf else ''
+    warmup_str = '' if warmup is None else '--warmup {0}'.format(warmup)
     inner_str = '' if inner is None else '--inner {0}'.format(inner)
     outer_str = '' if outer is None else '--outer {0}'.format(outer)
     branch_str = ' '.join([b.format() for b in branches])
 
-    command = "{harness} {suites} {benchmarks} {perf} {inner} {outer} {branch}"
+    command = ("{harness} {suites} {benchmarks} {perf} "
+        "{warmup} {inner} {outer} {branch}")
     utils.run_command(command.format(harness=benchy_path,
                                suites=suite_str,
                                benchmarks=benchmark_str,
                                perf=perf_str,
+                               warmup=warmup_str,
                                inner=inner_str,
                                outer=outer_str,
-                               branch=branch_str), verbose=verbose() > 0)
+                               branch=branch_str))
 
 
 def process_results(branches, output_mode):
@@ -194,15 +190,14 @@ def process_results(branches, output_mode):
         with open(result_path, 'w') as result_file:
             cmd = "{anymean} --geomean {runlog}"
             utils.run_command(cmd.format(anymean=anymean, runlog=runlog),
-                        stdout=result_file, verbose=verbose() > 0)
+                        stdout=result_file)
         result_paths.append(result_path)
 
     cmd = "{significance} --{output_mode} {results}"
     utils.run_command(cmd.format(significance=significance,
                                  output_mode=output_mode,
                                  results=' '.join(result_paths)),
-                      stdout=sys.stdout,
-                      verbose=verbose() > 0)
+                      stdout=sys.stdout)
 
 
 def main():
@@ -218,6 +213,10 @@ def main():
     parser.add_argument('--benchmark', action='append', type=str,
                         help='Run any benchmark that matches the provided '
                              'regex')
+    parser.add_argument('--warmup', action='store', type=int,
+                        help='Number of inner iterations of the benchmark to '
+                             'run and discard before the normal number of '
+                             'inner iterations')
     parser.add_argument('--inner', action='store', type=int,
                         help='Number of iterations of the benchmark to run '
                              'for each VM instance')
@@ -228,9 +227,13 @@ def main():
                         metavar=r'BRANCH',
                         help='Branch to benchmark. Can also add a colon-'
                              'separated list of environment variables to set '
-                             'when benchmarking this branch. E.g. '
-                             'BRANCH:VAR1=VAL1:VAR2=VAL2. Can also add the '
-                             'location of an already-built branch at the end, '
+                             'and arguments to pass to hhvm_wraper.php when '
+                             'benchmarking this branch. E.g. '
+                             'BRANCH:VAR1=VAL1:--no-pgo:VAR2=VAL2. Any '
+                             'components starting with - are assumed to be '
+                             'arguments rather than environment variables. Can '
+                             'also add the location of an already-built branch '
+                             'at the end, '
                              'e.g. BRANCH:VAR1=VAL1:/path/to/build/root.')
     parser.add_argument('--remarkup', action='store_const', const=True,
                         default=False, help='Spit out the results as Remarkup')
@@ -254,7 +257,8 @@ def main():
     if included_benchmarks is None:
         included_benchmarks = []
 
-    set_verbose_level(args.verbose)
+    config.set_verbose_level(args.verbose)
+    warmup = args.warmup
     inner = args.inner
     outer = args.outer
     should_build = not (args.no_build or args.re_print)
@@ -275,7 +279,7 @@ def main():
     if should_run_benchmarks:
         run_benchmarks(included_suites,
                       included_benchmarks,
-                      run_perf, inner, outer, branches)
+                      run_perf, warmup, inner, outer, branches)
     process_results(branches, output_mode)
 
 

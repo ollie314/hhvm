@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -55,13 +55,13 @@ StatementPtr FunctionStatement::clone() {
 // parser functions
 
 void FunctionStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
+  checkParameters(scope);
   // Correctness checks are normally done before adding function to scope.
   if (m_params) {
     for (int i = 0; i < m_params->getCount(); i++) {
-      ParameterExpressionPtr param =
-        dynamic_pointer_cast<ParameterExpression>((*m_params)[i]);
+      auto param = dynamic_pointer_cast<ParameterExpression>((*m_params)[i]);
       if (param->hasTypeHint() && param->defaultValue()) {
-        param->compatibleDefault();
+        param->compatibleDefault(scope);
       }
     }
   }
@@ -70,7 +70,7 @@ void FunctionStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
   // as a function may be declared inside a class's method, yet this function
   // is a global function, not a class method.
   FunctionScopePtr fs = onInitialParse(ar, scope);
-  FunctionScope::RecordFunctionInfo(m_name, fs);
+  FunctionScope::RecordFunctionInfo(m_originalName, fs);
   if (!scope->addFunction(ar, fs)) {
     m_ignored = true;
     return;
@@ -78,16 +78,18 @@ void FunctionStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
 
   fs->setPersistent(false);
 
-  if (m_name == "__autoload") {
+  if (isNamed("__autoload")) {
     if (m_params && m_params->getCount() != 1) {
-      parseTimeFatal(Compiler::InvalidMagicMethod,
+      parseTimeFatal(scope,
+                     Compiler::InvalidMagicMethod,
                      "__autoload() must take exactly 1 argument");
     }
   }
 
   if (fs->isNative()) {
     if (getStmts()) {
-      parseTimeFatal(Compiler::InvalidAttribute,
+      parseTimeFatal(scope,
+                     Compiler::InvalidAttribute,
                      "Native functions must not have an implementation body");
     }
     if (m_params) {
@@ -97,19 +99,22 @@ void FunctionStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
         // since they'll be Arrays as far as HNI is concerned.
         auto param = dynamic_pointer_cast<ParameterExpression>((*m_params)[i]);
         if (!param->hasUserType() && !param->isVariadic()) {
-          parseTimeFatal(Compiler::InvalidAttribute,
+          parseTimeFatal(scope,
+                         Compiler::InvalidAttribute,
                          "Native function calls must have type hints "
                          "on all args");
         }
       }
     }
     if (getReturnTypeConstraint().empty()) {
-      parseTimeFatal(Compiler::InvalidAttribute,
+      parseTimeFatal(scope,
+                     Compiler::InvalidAttribute,
                      "Native function %s() must have a return type hint",
                      getOriginalName().c_str());
     }
   } else if (!getStmts()) {
-    parseTimeFatal(Compiler::InvalidAttribute,
+    parseTimeFatal(scope,
+                   Compiler::InvalidAttribute,
                    "Global function %s() must contain a body",
                     getOriginalName().c_str());
   }
@@ -119,26 +124,11 @@ void FunctionStatement::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
 // static analysis functions
 
 std::string FunctionStatement::getName() const {
-  return string("Function ") + getScope()->getName();
+  return std::string("Function ") + getOriginalName();
 }
 
 void FunctionStatement::analyzeProgram(AnalysisResultPtr ar) {
-  FunctionScopeRawPtr fs = getFunctionScope();
-  // redeclared functions are automatically volatile
-  if (fs->isVolatile()) {
-    FunctionScopeRawPtr func =
-      getScope()->getOuterScope()->getContainingFunction();
-    if (func) {
-      func->getVariables()->setAttribute(VariableTable::NeedGlobalPointer);
-    }
-  }
   MethodStatement::analyzeProgram(ar);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void FunctionStatement::outputCodeModel(CodeGenerator &cg) {
-  MethodStatement::outputCodeModel(cg);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -149,8 +139,8 @@ void FunctionStatement::outputPHPHeader(CodeGenerator &cg,
   m_modifiers->outputPHP(cg, ar);
   cg_printf("function ");
   if (m_ref) cg_printf("&");
-  if (!ParserBase::IsClosureName(m_name)) {
-    cg_printf("%s", m_name.c_str());
+  if (!ParserBase::IsClosureName(m_originalName)) {
+    cg_printf("%s", m_originalName.c_str());
   }
   cg_printf("(");
   if (m_params) m_params->outputPHP(cg, ar);

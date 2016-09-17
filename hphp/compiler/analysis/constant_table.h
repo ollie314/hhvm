@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,8 +36,7 @@ DECLARE_BOOST_TYPES(ClassScope);
  *   class { const T_STRING = static_scalar,...}
  *   define('NAME', static_scalar)
  */
-class ConstantTable : public SymbolTable {
-public:
+struct ConstantTable : SymbolTable {
   explicit ConstantTable(BlockScope &blockScope);
 
   /**
@@ -54,29 +53,19 @@ public:
   /**
    * Explicitly setting a constant to be dynamic, mainly for "Dynamic" note.
    */
-  void setDynamic(AnalysisResultConstPtr ar, const std::string &name,
-                  bool forceVariant);
+  void setDynamic(AnalysisResultConstPtr ar, const std::string &name);
 
   /**
    * Called when a constant is declared (l-value).
    */
-  TypePtr add(const std::string &name, TypePtr type, ExpressionPtr exp,
-              AnalysisResultConstPtr ar, ConstructPtr construct);
+  void add(const std::string &name, ExpressionPtr exp,
+           AnalysisResultConstPtr ar, ConstructPtr construct);
 
   /**
-   * Called after a constant is type-inferred
+   * Called after a constants value is determined
    */
   void setValue(AnalysisResultConstPtr ar, const std::string &name,
                 ExpressionPtr value);
-
-  /**
-   * Called when a constant is used or being evaluated (r-value).
-   */
-  TypePtr check(BlockScopeRawPtr context,
-                const std::string &name, TypePtr type, bool coerce,
-                AnalysisResultConstPtr ar, ConstructPtr construct,
-                const std::vector<std::string> &bases,
-                BlockScope *&defScope);
 
   /**
    * Generate all constant declarations for this symbol table.

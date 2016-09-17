@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,8 @@
 
 #include "hphp/runtime/base/datatype.h"
 
+#include "hphp/util/type-scan.h"
+
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
@@ -32,7 +34,7 @@ struct ArrayData;
 struct StringData;
 struct ObjectData;
 struct RefData;
-struct ResourceData;
+struct ResourceHdr;
 struct TypedValue;
 
 //////////////////////////////////////////////////////////////////////
@@ -45,21 +47,36 @@ struct TypedValue;
 union Value {
   int64_t       num;    // KindOfInt64, KindOfBool (must be zero-extended)
   double        dbl;    // KindOfDouble
-  StringData*   pstr;   // KindOfString, KindOfStaticString
-  ArrayData*    parr;   // KindOfArray
+  StringData*   pstr;   // KindOfString, KindOfPersistentString
+  ArrayData*    parr;   // KindOfArray, KindOfVec, KindOfDict, KindOfKeyset
   ObjectData*   pobj;   // KindOfObject
-  ResourceData* pres;   // KindOfResource
+  ResourceHdr*  pres;   // KindOfResource
   Class*        pcls;   // only in vm stack, no type tag.
   RefData*      pref;   // KindOfRef
 };
 
 enum VarNrFlag { NR_FLAG = 1<<29 };
 
+struct ConstModifiers {
+  bool m_isAbstract;
+  bool m_isType;
+};
+
 union AuxUnion {
-  int32_t u_hash;        // key type and hash for MixedArray and [Stable]Map
-  VarNrFlag u_varNrFlag; // magic number for asserts in VarNR
-  bool u_deepInit;       // used by Class::initPropsImpl for deep init
-  int32_t u_rdsHandle;   // used by unit.cpp to squirrel away rds handles TODO type
+  // Undiscriminated raw value.
+  uint32_t u_raw;
+  // True if we're suspending an FCallAwait.
+  uint32_t u_fcallAwaitFlag;
+  // Key type and hash for MixedArray.
+  int32_t u_hash;
+  // Magic number for asserts in VarNR.
+  VarNrFlag u_varNrFlag;
+  // Used by Class::initPropsImpl() for deep init.
+  bool u_deepInit;
+  // Used by unit.cpp to squirrel away RDS handles.
+  int32_t u_rdsHandle;
+  // Used by Class::Const.
+  ConstModifiers u_constModifiers;
 };
 
 /*
@@ -83,31 +100,38 @@ union AuxUnion {
  * of m_data.  m_aux is described above, and must only be read or written
  * in specialized contexts.
  */
-#ifdef PACKED_TV
-// This TypedValue layout is a subset of the full 7pack format.  Client
-// code should not mess with the _t0 or _tags padding fields.
-struct TypedValue {
-  union {
-    uint8_t _tags[8];
-    struct {
-      uint8_t _t0;
-      DataType m_type;
-      AuxUnion m_aux;
-    };
-  };
-  Value m_data;
-
-  std::string pretty() const;
-};
-#else
 struct TypedValue {
   Value m_data;
   DataType m_type;
   AuxUnion m_aux;
 
   std::string pretty() const; // debug formatting. see trace.h
+
+  TYPE_SCAN_CUSTOM() {
+    switch (m_type) {
+      case KindOfObject: scanner.enqueue(m_data.pobj); break;
+      case KindOfResource: scanner.enqueue(m_data.pres); break;
+      case KindOfString: scanner.enqueue(m_data.pstr); break;
+      case KindOfVec:
+      case KindOfDict:
+      case KindOfKeyset:
+      case KindOfArray: scanner.enqueue(m_data.parr); break;
+      case KindOfRef: scanner.enqueue(m_data.pref); break;
+      case KindOfUninit:
+      case KindOfNull:
+      case KindOfBoolean:
+      case KindOfInt64:
+      case KindOfDouble:
+      case KindOfPersistentString:
+      case KindOfPersistentArray:
+      case KindOfPersistentVec:
+      case KindOfPersistentDict:
+      case KindOfPersistentKeyset:
+      case KindOfClass:
+        break;
+    }
+  }
 };
-#endif
 
 // Check that TypedValue's size is a power of 2 (16bytes currently)
 static_assert((sizeof(TypedValue) & (sizeof(TypedValue)-1)) == 0,
@@ -119,19 +143,18 @@ constexpr size_t alignTypedValue(size_t sz) {
 
 /*
  * This TypedValue subclass exposes a 32-bit "aux" field somewhere inside it.
- * For now, access the m_aux field declared in TypedValue, but once we
- * rearrange TypedValue, the aux field can move down to this struct.
- * TODO: t1100154 phase this out completely.
  */
 struct TypedValueAux : TypedValue {
   static constexpr size_t auxOffset = offsetof(TypedValue, m_aux);
-  static const size_t auxSize = sizeof(m_aux);
+  static const size_t auxSize = sizeof(decltype(m_aux));
   int32_t& hash() { return m_aux.u_hash; }
   const int32_t& hash() const { return m_aux.u_hash; }
   int32_t& rdsHandle() { return m_aux.u_rdsHandle; }
   const int32_t& rdsHandle() const { return m_aux.u_rdsHandle; }
   bool& deepInit() { return m_aux.u_deepInit; }
   const bool& deepInit() const { return m_aux.u_deepInit; }
+  ConstModifiers& constModifiers() { return m_aux.u_constModifiers; }
+  const ConstModifiers& constModifiers() const { return m_aux.u_constModifiers; }
   VarNrFlag& varNrFlag() { return m_aux.u_varNrFlag; }
   const VarNrFlag& varNrFlag() const { return m_aux.u_varNrFlag; }
 
@@ -169,6 +192,16 @@ typedef TypedValue TypedNum;
 
 //////////////////////////////////////////////////////////////////////
 
+/*
+ * Assertions on Cells and TypedValues.  Should usually only happen
+ * inside an assert().
+ */
+bool tvIsPlausible(TypedValue);
+bool cellIsPlausible(Cell);
+bool refIsPlausible(Ref);
+
+/////////////////////////////////////////////////////////////////////
+
 template<DataType> struct DataTypeCPPType;
 #define X(dt, cpp) \
 template<> struct DataTypeCPPType<dt> { typedef cpp type; }
@@ -179,11 +212,18 @@ X(KindOfBoolean,      bool);
 X(KindOfInt64,        int64_t);
 X(KindOfDouble,       double);
 X(KindOfArray,        ArrayData*);
+X(KindOfPersistentArray,  const ArrayData*);
+X(KindOfVec,          ArrayData*);
+X(KindOfPersistentVec, const ArrayData*);
+X(KindOfDict,         ArrayData*);
+X(KindOfPersistentDict, const ArrayData*);
+X(KindOfKeyset,       ArrayData*);
+X(KindOfPersistentKeyset, const ArrayData*);
 X(KindOfObject,       ObjectData*);
-X(KindOfResource,     ResourceData*);
+X(KindOfResource,     ResourceHdr*);
 X(KindOfRef,          RefData*);
 X(KindOfString,       StringData*);
-X(KindOfStaticString, const StringData*);
+X(KindOfPersistentString, const StringData*);
 
 #undef X
 
@@ -224,6 +264,7 @@ typename std::enable_if<
   TypedValue ret;
   ret.m_data = make_value(val);
   ret.m_type = DType;
+  assert(tvIsPlausible(ret));
   return ret;
 }
 
@@ -234,6 +275,7 @@ typename std::enable_if<
 >::type make_tv() {
   TypedValue ret;
   ret.m_type = DType;
+  assert(tvIsPlausible(ret));
   return ret;
 }
 
@@ -248,6 +290,7 @@ typename std::enable_if<
   double
 >::type unpack_tv(TypedValue *tv) {
   assert(DType == tv->m_type);
+  assert(tvIsPlausible(*tv));
   return tv->m_data.dbl;
 }
 
@@ -257,6 +300,7 @@ typename std::enable_if<
   typename DataTypeCPPType<DType>::type
 >::type unpack_tv(TypedValue *tv) {
   assert(DType == tv->m_type);
+  assert(tvIsPlausible(*tv));
   return tv->m_data.num;
 }
 
@@ -266,7 +310,12 @@ typename std::enable_if<
   typename DataTypeCPPType<DType>::type
 >::type unpack_tv(TypedValue *tv) {
   assert((DType == tv->m_type) ||
-         (IS_STRING_TYPE(DType) && IS_STRING_TYPE(tv->m_type)));
+         (isStringType(DType) && isStringType(tv->m_type)) ||
+         (isArrayType(DType) && isArrayType(tv->m_type)) ||
+         (isVecType(DType) && isVecType(tv->m_type)) ||
+         (isDictType(DType) && isDictType(tv->m_type)) ||
+         (isKeysetType(DType) && isKeysetType(tv->m_type)));
+  assert(tvIsPlausible(*tv));
   return reinterpret_cast<typename DataTypeCPPType<DType>::type>
            (tv->m_data.pstr);
 }

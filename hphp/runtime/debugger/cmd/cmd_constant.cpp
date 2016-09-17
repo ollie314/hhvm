@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,8 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_constant.h"
-#include "hphp/runtime/base/class-info.h"
+
+#include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/ext/array/ext_array.h"
 
 namespace HPHP { namespace Eval {
@@ -69,15 +70,15 @@ void CmdConstant::onClient(DebuggerClient &client) {
     {
       Variant forSort(cmd->m_constants);
       HHVM_FN(ksort)(ref(forSort));
-      assert(forSort.is(KindOfArray));
+      assert(forSort.isArray());
       m_constants = forSort.asCell()->m_data.parr;
     }
 
     for (ArrayIter iter(m_constants); iter; ++iter) {
-      String name = iter.first().toString();
-      String value = DebuggerClient::FormatVariable(iter.second(), 200);
+      auto name = iter.first().toString();
+      auto value = DebuggerClient::FormatVariableWithLimit(iter.second(), 200);
       if (!text.empty()) {
-        String fullvalue = DebuggerClient::FormatVariable(iter.second(), -1);
+        auto fullvalue = DebuggerClient::FormatVariable(iter.second());
         if (name.find(text, 0, false) >= 0 ||
             fullvalue.find(text, 0, false) >= 0) {
           client.print("%s = %s", name.data(), value.data());

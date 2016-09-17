@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,12 +22,11 @@
 
 namespace HPHP { namespace jit {
 
-class IRInstruction;
-class IRUnit;
-class IRBuilder;
+struct IRInstruction;
+struct IRUnit;
+namespace irgen { struct IRBuilder; }
 
-class SSATmp {
-public:
+struct SSATmp {
   uint32_t          id() const { return m_id; }
   IRInstruction*    inst() const { return m_inst; }
   void              setInstruction(IRInstruction* i, int dstId = 0);
@@ -35,17 +34,17 @@ public:
   void              setType(Type t) { m_type = t; }
   std::string       toString() const;
 
-  // Convenience wrapper for type().isConst(...). See type.h for details.
+  // Convenience wrapper for type().hasConstVal(...). See type.h for details.
   template<typename... Args>
-  bool isConst(Args&&... args) const {
-    return type().isConst(std::forward<Args>(args)...);
+  bool hasConstVal(Args&&... args) const {
+    return type().hasConstVal(std::forward<Args>(args)...);
   }
 
   /*
    * For SSATmps with a compile-time constant value, the following
    * functions allow accessing it.
    *
-   * Pre: inst() && isConst()
+   * Pre: inst() && hasConstVal()
    */
   bool               boolVal() const      { return type().boolVal(); }
   int64_t            intVal() const       { return type().intVal(); }
@@ -53,21 +52,23 @@ public:
   double             dblVal() const       { return type().dblVal(); }
   const StringData*  strVal() const       { return type().strVal(); }
   const ArrayData*   arrVal() const       { return type().arrVal(); }
+  const ArrayData*   vecVal() const       { return type().vecVal(); }
+  const ArrayData*   dictVal() const      { return type().dictVal(); }
+  const ArrayData*   keysetVal() const    { return type().keysetVal(); }
   const Func*        funcVal() const      { return type().funcVal(); }
   const Class*       clsVal() const       { return type().clsVal(); }
   ConstCctx          cctxVal() const      { return type().cctxVal(); }
-  RDS::Handle        rdsHandleVal() const { return type().rdsHandleVal(); }
+  rds::Handle        rdsHandleVal() const { return type().rdsHandleVal(); }
   TCA                tcaVal() const       { return type().tcaVal(); }
   Variant            variantVal() const;
 
   /*
-   * Returns: Type::subtypeOf(type(), tag).
+   * @returns: type() <= tag
    *
-   * This should be used for most checks on the types of IRInstruction
-   * sources.
+   * This should be used for most checks on the types of IRInstruction sources.
    */
   bool isA(Type tag) const {
-    return type().subtypeOf(tag);
+    return type() <= tag;
   }
 
   /*
@@ -78,8 +79,8 @@ public:
   int numWords() const;
 
 private:
-  friend class IRUnit;
-  friend class IRBuilder;
+  friend struct IRUnit;
+  friend struct irgen::IRBuilder;
 
   // May only be created via IRUnit.  Note that this class is never
   // destructed, so don't add complex members.

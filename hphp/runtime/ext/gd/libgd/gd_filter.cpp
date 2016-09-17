@@ -1,8 +1,4 @@
-#if HAVE_GD_BUNDLED
-# include "gd.h"
-#else
-# include "gd.h"
-#endif
+#include "gd.h"
 
 #include "gd_intern.h"
 
@@ -10,7 +6,6 @@
  * by Pierre-Alain Joye (pierre@php.net)
  **/
 /* Begin filters function */
-#define GET_PIXEL_FUNCTION(src)(src->trueColor?gdImageGetTrueColorPixel:gdImageGetPixel)
 
 /* invert src image */
 int gdImageNegate(gdImagePtr src)
@@ -18,18 +13,14 @@ int gdImageNegate(gdImagePtr src)
 	int x, y;
 	int r,g,b,a;
 	int new_pxl, pxl;
-	typedef int (*FuncPtr)(gdImagePtr, int, int);
-	FuncPtr f;
 
 	if (src==NULL) {
 		return 0;
 	}
 
-	f = GET_PIXEL_FUNCTION(src);
-
 	for (y=0; y<src->sy; ++y) {
 		for (x=0; x<src->sx; ++x) {
-			pxl = f (src, x, y);
+			pxl = gdImageGetPixel(src, x, y);
 			r = gdImageRed(src, pxl);
 			g = gdImageGreen(src, pxl);
 			b = gdImageBlue(src, pxl);
@@ -51,9 +42,6 @@ int gdImageGrayScale(gdImagePtr src)
 	int x, y;
 	int r,g,b,a;
 	int new_pxl, pxl;
-	typedef int (*FuncPtr)(gdImagePtr, int, int);
-	FuncPtr f;
-	f = GET_PIXEL_FUNCTION(src);
 
 	if (src==NULL) {
 		return 0;
@@ -61,7 +49,7 @@ int gdImageGrayScale(gdImagePtr src)
 
 	for (y=0; y<src->sy; ++y) {
 		for (x=0; x<src->sx; ++x) {
-			pxl = f (src, x, y);
+			pxl = gdImageGetPixel(src, x, y);
 			r = gdImageRed(src, pxl);
 			g = gdImageGreen(src, pxl);
 			b = gdImageBlue(src, pxl);
@@ -84,9 +72,6 @@ int gdImageBrightness(gdImagePtr src, int brightness)
 	int x, y;
 	int r,g,b,a;
 	int new_pxl, pxl;
-	typedef int (*FuncPtr)(gdImagePtr, int, int);
-	FuncPtr f;
-	f = GET_PIXEL_FUNCTION(src);
 
 	if (src==NULL || (brightness < -255 || brightness>255)) {
 		return 0;
@@ -98,7 +83,7 @@ int gdImageBrightness(gdImagePtr src, int brightness)
 
 	for (y=0; y<src->sy; ++y) {
 		for (x=0; x<src->sx; ++x) {
-			pxl = f (src, x, y);
+			pxl = gdImageGetPixel(src, x, y);
 
 			r = gdImageRed(src, pxl);
 			g = gdImageGreen(src, pxl);
@@ -130,10 +115,6 @@ int gdImageContrast(gdImagePtr src, double contrast)
 	int r,g,b,a;
 	double rf,gf,bf;
 	int new_pxl, pxl;
-	typedef int (*FuncPtr)(gdImagePtr, int, int);
-
-	FuncPtr f;
-	f = GET_PIXEL_FUNCTION(src);
 
 	if (src==NULL) {
 		return 0;
@@ -144,7 +125,7 @@ int gdImageContrast(gdImagePtr src, double contrast)
 
 	for (y=0; y<src->sy; ++y) {
 		for (x=0; x<src->sx; ++x) {
-			pxl = f(src, x, y);
+			pxl = gdImageGetPixel(src, x, y);
 
 			r = gdImageRed(src, pxl);
 			g = gdImageGreen(src, pxl);
@@ -188,20 +169,16 @@ int gdImageColor(gdImagePtr src, const int red, const int green, const int blue,
 {
 	int x, y;
 	int new_pxl, pxl;
-	typedef int (*FuncPtr)(gdImagePtr, int, int);
-	FuncPtr f;
 
 	if (src == NULL) {
 		return 0;
 	}
 
-	f = GET_PIXEL_FUNCTION(src);
-
 	for (y=0; y<src->sy; ++y) {
 		for (x=0; x<src->sx; ++x) {
 			int r,g,b,a;
 
-			pxl = f(src, x, y);
+			pxl = gdImageGetPixel(src, x, y);
 			r = gdImageRed(src, pxl);
 			g = gdImageGreen(src, pxl);
 			b = gdImageBlue(src, pxl);
@@ -233,8 +210,6 @@ int gdImageConvolution(gdImagePtr src, float filter[3][3], float filter_div, flo
 	float       new_r, new_g, new_b;
 	int         new_pxl, pxl=0;
 	gdImagePtr  srcback;
-	typedef int (*FuncPtr)(gdImagePtr, int, int);
-	FuncPtr f;
 
 	if (src==NULL) {
 		return 0;
@@ -252,8 +227,6 @@ int gdImageConvolution(gdImagePtr src, float filter[3][3], float filter_div, flo
 
 	gdImageCopy(srcback, src,0,0,0,0,src->sx,src->sy);
 
-	f = GET_PIXEL_FUNCTION(src);
-
 	for ( y=0; y<src->sy; y++) {
 		for(x=0; x<src->sx; x++) {
 			new_r = new_g = new_b = 0;
@@ -262,7 +235,7 @@ int gdImageConvolution(gdImagePtr src, float filter[3][3], float filter_div, flo
 			for (j=0; j<3; j++) {
 				int yv = MIN(MAX(y - 1 + j, 0), src->sy - 1);
 				for (i=0; i<3; i++) {
-				        pxl = f(srcback, MIN(MAX(x - 1 + i, 0), src->sx - 1), yv);
+				        pxl = gdImageGetPixel(srcback, MIN(MAX(x - 1 + i, 0), src->sx - 1), yv);
 					new_r += (float)gdImageRed(srcback, pxl) * filter[j][i];
 					new_g += (float)gdImageGreen(srcback, pxl) * filter[j][i];
 					new_b += (float)gdImageBlue(srcback, pxl) * filter[j][i];
@@ -299,8 +272,6 @@ int gdImageSelectiveBlur( gdImagePtr src)
 	float flt_r_sum, flt_g_sum, flt_b_sum;
 
 	gdImagePtr srcback;
-	typedef int (*FuncPtr)(gdImagePtr, int, int);
-	FuncPtr f;
 
 	if (src==NULL) {
 		return 0;
@@ -313,19 +284,17 @@ int gdImageSelectiveBlur( gdImagePtr src)
 	}
 	gdImageCopy(srcback, src,0,0,0,0,src->sx,src->sy);
 
-	f = GET_PIXEL_FUNCTION(src);
-
 	for(y = 0; y<src->sy; y++) {
 		for (x=0; x<src->sx; x++) {
 		      flt_r_sum = flt_g_sum = flt_b_sum = 0.0;
-			cpxl = f(src, x, y);
+			cpxl = gdImageGetPixel(srcback, x, y);
 
 			for (j=0; j<3; j++) {
 				for (i=0; i<3; i++) {
 					if ((j == 1) && (i == 1)) {
 						flt_r[1][1] = flt_g[1][1] = flt_b[1][1] = 0.5;
 					} else {
-						pxl = f(src, x-(3>>1)+i, y-(3>>1)+j);
+						pxl = gdImageGetPixel(srcback, x-(3>>1)+i, y-(3>>1)+j);
 						new_a = gdImageAlpha(srcback, pxl);
 
 						new_r = ((float)gdImageRed(srcback, cpxl)) - ((float)gdImageRed (srcback, pxl));
@@ -386,7 +355,7 @@ int gdImageSelectiveBlur( gdImagePtr src)
 
 			for (j=0; j<3; j++) {
 				for (i=0; i<3; i++) {
-					pxl = f(src, x-(3>>1)+i, y-(3>>1)+j);
+					pxl = gdImageGetPixel(src, x-(3>>1)+i, y-(3>>1)+j);
 					new_r += (float)gdImageRed(srcback, pxl) * flt_r[j][i];
 					new_g += (float)gdImageGreen(srcback, pxl) * flt_g[j][i];
 					new_b += (float)gdImageBlue(srcback, pxl) * flt_b[j][i];

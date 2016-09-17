@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,13 +16,14 @@
 */
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/stream-wrapper.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
-#include "hphp/runtime/base/mem-file.h"
 #include "hphp/runtime/base/directory.h"
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -38,10 +39,9 @@ static const StaticString
   s_mode("mode"),
   s_opendir("opendir");
 
-static class PharStreamWrapper : public Stream::Wrapper {
- public:
-  virtual File* open(const String& filename, const String& mode,
-                     int options, const Variant& context) {
+static struct PharStreamWrapper final : Stream::Wrapper {
+  req::ptr<File> open(const String& filename, const String& mode, int options,
+                      const req::ptr<StreamContext>& context) override {
     static const char cz[] = "phar://";
     if (strncmp(filename.data(), cz, sizeof(cz) - 1)) {
       return nullptr;
@@ -57,13 +57,14 @@ static class PharStreamWrapper : public Stream::Wrapper {
       nullptr,
       SystemLib::s_PharClass
     );
-    String contents = ret.toString();
 
-    MemFile* file = newres<MemFile>(contents.data(), contents.size());
-    return file;
+    if (!ret.isResource()) {
+      return nullptr;
+    }
+    return dyn_cast_or_null<File>(ret.asResRef());
   }
 
-  virtual int access(const String& path, int mode) {
+  int access(const String& path, int mode) override {
     Variant ret = callStat(path);
     if (ret.isBoolean()) {
       assert(!ret.toBoolean());
@@ -72,7 +73,7 @@ static class PharStreamWrapper : public Stream::Wrapper {
     return 0;
   }
 
-  virtual int stat(const String& path, struct stat* buf) {
+  int stat(const String& path, struct stat* buf) override {
     Variant ret = callStat(path);
     if (ret.isBoolean()) {
       assert(!ret.toBoolean());
@@ -87,11 +88,11 @@ static class PharStreamWrapper : public Stream::Wrapper {
     return 0;
   }
 
-  virtual int lstat(const String& path, struct stat* buf) {
+  int lstat(const String& path, struct stat* buf) override {
     return stat(path, buf);
   }
 
-  virtual Directory* opendir(const String& path) {
+  req::ptr<Directory> opendir(const String& path) override {
     static Func* f = SystemLib::s_PharClass->lookupMethod(s_opendir.get());
     Variant ret;
     g_context->invokeFunc(
@@ -106,7 +107,7 @@ static class PharStreamWrapper : public Stream::Wrapper {
       raise_warning("No such file or directory");
       return nullptr;
     }
-    return newres<ArrayDirectory>(files);
+    return req::make<ArrayDirectory>(files);
   }
 
  private:
@@ -125,10 +126,9 @@ static class PharStreamWrapper : public Stream::Wrapper {
 
 } s_phar_stream_wrapper;
 
-class pharExtension : public Extension {
- public:
+struct pharExtension final : Extension {
   pharExtension() : Extension("phar") {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     s_phar_stream_wrapper.registerAs("phar");
   }
 } s_phar_extension;

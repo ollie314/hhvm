@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,8 +16,9 @@
 */
 
 #include "hphp/util/compression.h"
-#include "hphp/util/logger.h"
+
 #include "hphp/util/exception.h"
+#include "hphp/util/logger.h"
 
 #define PHP_ZLIB_MODIFIER 1000
 #define GZIP_HEADER_LENGTH 10
@@ -71,7 +72,7 @@ static const int gz_magic[2] = {0x1f, 0x8b}; /* gzip magic header */
 /* ===========================================================================
      Read a byte from a gz_stream; update next_in and avail_in. Return EOF
    for end of file.
-   IN assertion: the stream s has been sucessfully opened for reading.
+   IN assertion: the stream s has been successfully opened for reading.
 */
 static int get_byte(z_stream &stream) {
   if (stream.avail_in == 0) {
@@ -86,7 +87,7 @@ static int get_byte(z_stream &stream) {
     mode to transparent if the gzip magic header is not present; set s->err
     to Z_DATA_ERROR if the magic header is present but the rest of the header
     is incorrect.
-    IN assertion: the stream s has already been created sucessfully;
+    IN assertion: the stream s has already been created successfully;
        s->stream.avail_in is zero for the first time, but may be non-zero
        for concatenated .gz files.
 */

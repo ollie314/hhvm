@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,9 @@
 
 #include "hphp/util/hdf.h"
 
-#include <boost/algorithm/string/predicate.hpp>
+#include <mutex>
 
-#include "hphp/util/lock.h"
+#include <boost/algorithm/string/predicate.hpp>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -26,13 +26,12 @@ namespace HPHP {
 /**
  * Helper class storing HDF raw pointer and reference counts on it.
  */
-class HdfRaw {
-public:
-  static Mutex HdfMutex;
+struct HdfRaw {
+  static std::mutex HdfMutex;
 
   HdfRaw() : m_hdf(nullptr), m_count(1) {
     // ClearSilver is not thread-safe when calling hdf_init(), so guarding it.
-    Lock lock(HdfMutex);
+    std::lock_guard<std::mutex> lock(HdfMutex);
     Hdf::CheckNeoError(hdf_init(&m_hdf));
     assert(m_hdf);
   }
@@ -49,7 +48,7 @@ public:
   void dec() { assert(m_count > 0); if (--m_count == 0) { delete this;}}
 };
 
-Mutex HdfRaw::HdfMutex;
+std::mutex HdfRaw::HdfMutex;
 
 ///////////////////////////////////////////////////////////////////////////////
 // constructors
@@ -101,6 +100,11 @@ Hdf::~Hdf() {
   if (m_dump) {
     free(m_dump);
   }
+}
+
+bool Hdf::isEmpty() const {
+  return this->getFullPath() == "" &&
+         this->getName() == "";
 }
 
 void Hdf::assign(const Hdf &hdf) {
@@ -352,6 +356,14 @@ void Hdf::configGet(std::set<std::string, stdltistr> &values) const {
 }
 
 void Hdf::configGet(std::map<std::string, std::string> &values) const {
+  values.clear();
+  for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
+    values[hdf.getName()] = hdf.configGetString("");
+  }
+}
+
+void Hdf::configGet(std::map<std::string, std::string,
+                    stdltistr> &values) const {
   values.clear();
   for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
     values[hdf.getName()] = hdf.configGetString("");

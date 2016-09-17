@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -60,11 +60,6 @@ bool is_special_method_name(SString name);
  * attribute allows final methods and final classes to be overridden.
  */
 bool is_mock_class(borrowed_ptr<const php::Class>);
-
-/*
- * Returns a collection type name given a Collection::Type.
- */
-SString collectionTypeToString(uint32_t ctype);
 
 //////////////////////////////////////////////////////////////////////
 

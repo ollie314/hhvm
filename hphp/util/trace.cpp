@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,6 +14,8 @@
    +----------------------------------------------------------------------+
 */
 
+// We can't do this on MSVC, it's all debug or all release.
+#ifndef _MSC_VER
 /*
  * Forcibly define USE_TRACE, so we get the debug trace.h interface included
  * here. This allows mixed compilation, where some units were compiled
@@ -22,8 +24,10 @@
 #ifndef USE_TRACE
 #  define USE_TRACE 1
 #endif
+#endif
 #include "hphp/util/trace.h"
 
+#include <iostream>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -42,7 +46,7 @@ int levels[NumModules];
 __thread int tl_levels[NumModules];
 __thread int indentDepth = 0;
 
-static FILE* out;
+static FILE* out{nullptr};
 
 static const char *tokNames[] = {
 #define TM(x) #x,
@@ -55,53 +59,74 @@ namespace {
 /*
  * Dummy class to get some code to run before main().
  */
-class Init {
-  Module name2mod(const char *name) {
+struct Init {
+private:
+  static Module name2mod(folly::StringPiece name) {
     for (int i = 0; i < NumModules; i++) {
-      if (!strcasecmp(tokNames[i], name)) {
+      if (name == tokNames[i]) {
         return (Module)i;
       }
     }
     return (Module)-1;
   }
 
-  public:
+public:
   Init() {
     /* Parse the environment for flags. */
     const char *envName = "TRACE";
     const char *env = getenv(envName);
-    const char *file = getenv("HPHP_TRACE_FILE");
-    if (!file) file = "/tmp/hphp.log";
     if (env) {
-      out = fopen(file, "w");
-      if (!out) {
-        fprintf(stderr, "could not create log file (%s); using stderr\n", file);
-        out = stderr;
-      }
-      char *e = strdup(env);
-      char *tok;
-      for (tok = strtok(e, ","); tok; tok = strtok(nullptr, ",")) {
-        char *ctok;
-        char *moduleName = tok;
-        if (( ctok = strchr(moduleName, ':'))) {
-          *ctok++ = 0;
-        }
-        int level = ctok ? atoi(ctok) : 1;
-        int mod = name2mod(moduleName);
-        if (mod >= 0) {
-          levels[mod] = level;
-        }
-        if (mod == Trace::minstr ||
-            mod == Trace::interpOne ||
-            mod == Trace::dispatchBB) {
-          levels[Trace::statgroups] = std::max(levels[Trace::statgroups], 1);
-        }
-      }
-      free(e);
+      EnsureInitFile(getenv("HPHP_TRACE_FILE"));
+      InitFromSpec(env, levels);
     } else {
       // If TRACE env var is not set, nothing should be traced...
       // but if it does, use stderr.
       out = stderr;
+    }
+  }
+
+  static void EnsureInitFile(const char* file) {
+    if (out && out != stderr) return;
+    if (!file) file = "/tmp/hphp.log";
+    out = fopen(file, "w");
+    if (!out) {
+      fprintf(stderr, "could not create log file (%s); using stderr\n", file);
+      out = stderr;
+    }
+  }
+
+  static void InitFromSpec(std::string spec, int* levels) {
+    std::vector<folly::StringPiece> pieces;
+    folly::split(",", spec, pieces);
+    for (auto piece : pieces) {
+      folly::StringPiece moduleName;
+      int level;
+      try {
+        if (!folly::split(":", piece, moduleName, level)) {
+          moduleName = piece;
+          level = 1;
+        }
+      } catch (const std::exception& re) {
+        std::cerr <<
+          folly::format("Ignoring invalid TRACE component: {}\n", piece);
+        continue;
+      }
+
+      int mod = name2mod(moduleName);
+      if (mod >= 0) levels[mod] = level;
+
+      static auto const groups = {
+        Trace::minstr,
+        Trace::interpOne,
+        Trace::dispatchBB,
+        Trace::decreftype,
+      };
+      for (auto g : groups) {
+        if (mod == g) {
+          levels[Trace::statgroups] = std::max(levels[Trace::statgroups], 1);
+          break;
+        }
+      }
     }
   }
 };
@@ -118,6 +143,16 @@ void flush() {
   if (!moduleEnabledRelease(Trace::traceAsync)) {
     fflush(out);
   }
+}
+
+#ifdef USE_TRACE
+void ensureInit(std::string outFile) {
+  Init::EnsureInitFile(outFile.c_str());
+}
+
+void setTraceThread(const std::string& traceSpec) {
+  for (auto& level : tl_levels) level = 0;
+  Init::InitFromSpec(traceSpec, tl_levels);
 }
 
 void vtrace(const char *fmt, va_list ap) {
@@ -141,6 +176,7 @@ void trace(const char *fmt, ...) {
   vtrace(fmt, ap);
   va_end(ap);
 }
+#endif
 
 void traceRelease(const char* fmt, ...) {
   va_list ap;
@@ -156,9 +192,11 @@ void traceRingBufferRelease(const char *fmt, ...) {
   va_end(ap);
 }
 
+#ifdef USE_TRACE
 void trace(const std::string& s) {
   trace("%s", s.c_str());
 }
+#endif
 
 void traceRelease(const std::string& s) {
   traceRelease("%s", s.c_str());

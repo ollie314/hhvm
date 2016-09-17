@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,21 +8,25 @@
  *
  *)
 
-open Utils
+let go (env:ServerEnv.env) (fn, line, char) =
+  let get_result = InferAtPosService.attach_hooks line char in
+  ignore @@ ServerIdeUtils.check_file_input
+    env.ServerEnv.tcopt env.ServerEnv.files_info fn;
+  let pos, ty = get_result () in
+  let pos = Option.map pos Pos.to_absolute in
+  InferAtPosService.detach_hooks ();
+  pos, ty
 
-type result = Pos.absolute option * string option
-
-let go (fn, line, char) oc =
-  let clean () =
-    Typing_defs.infer_type := None;
-    Typing_defs.infer_target := None;
-    Typing_defs.infer_pos := None;
+let to_json pos ty =
+  let ty_json = match ty with
+    | Some ty -> Hh_json.JSON_String ty
+    | None -> Hh_json.JSON_Null
   in
-  clean ();
-  Typing_defs.infer_target := Some (line, char);
-  ServerIdeUtils.check_file_input fn;
-  let pos = opt_map Pos.to_absolute !Typing_defs.infer_pos in
-  let ty = !Typing_defs.infer_type in
-  clean ();
-  Marshal.to_channel oc ((pos, ty) : result) [];
-  flush oc
+  let pos_json = match pos with
+    | Some pos -> Pos.json pos
+    | None -> Hh_json.JSON_Null
+  in
+  Hh_json.JSON_Object [
+    "type", ty_json;
+    "pos", pos_json;
+  ]

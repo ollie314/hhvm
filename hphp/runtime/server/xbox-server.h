@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,20 +17,22 @@
 #ifndef incl_HPHP_XBOX_SERVER_H_
 #define incl_HPHP_XBOX_SERVER_H_
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/server/satellite-server.h"
 #include "hphp/runtime/server/server-task-event.h"
+#include "hphp/runtime/server/transport.h"
+#include "hphp/util/synchronizable.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+struct Array;
 struct XboxServerInfo;
-class RPCRequestHandler;
-class XboxTransport;
+struct RPCRequestHandler;
+struct XboxTransport;
 
-class XboxServer {
-public:
+struct XboxServer {
   /**
    * Start or restart xbox server.
    */
@@ -52,9 +54,12 @@ public:
    */
   static Resource TaskStart(const String& msg, const String& reqInitDoc = "",
       ServerTaskEvent<XboxServer, XboxTransport> *event = nullptr);
+  static void TaskStartFromNonRequest(
+    const folly::StringPiece msg,
+    const folly::StringPiece reqInitDoc = "");
   static bool TaskStatus(const Resource& task);
-  static int TaskResult(const Resource& task, int timeout_ms, Variant &ret);
-  static int TaskResult(XboxTransport* const job, int timeout_ms, Variant &ret);
+  static int TaskResult(const Resource& task, int timeout_ms, Variant *ret);
+  static int TaskResult(XboxTransport* const job, int timeout_ms, Variant *ret);
 
   /**
    * Gets the ServerInfo and RequestHandler for the current xbox worker thread.
@@ -66,8 +71,7 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class XboxServerInfo : public SatelliteServerInfo {
-public:
+struct XboxServerInfo : SatelliteServerInfo {
   XboxServerInfo() : SatelliteServerInfo(IniSetting::Map::object, Hdf()) {
     m_type = SatelliteServer::Type::KindOfXboxServer;
     m_name = "xbox";
@@ -89,29 +93,29 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class XboxTransport : public Transport, public Synchronizable {
-public:
-  explicit XboxTransport(const String& message, const String& reqInitDoc = "");
+struct XboxTransport final : Transport, Synchronizable {
+  explicit XboxTransport(
+    const folly::StringPiece message,
+    const folly::StringPiece reqInitDoc = "");
 
   timespec getStartTimer() const { return m_queueTime; }
 
   /**
    * Request URI.
    */
-  virtual const char *getUrl();
-  virtual const char *getRemoteHost() { return "127.0.0.1"; }
-  virtual uint16_t getRemotePort() { return 0; }
-  virtual const char *getServerAddr() {
-    return RuntimeOption::ServerPrimaryIPv4.empty() ?
-      RuntimeOption::ServerPrimaryIPv6.c_str() :
-      RuntimeOption::ServerPrimaryIPv4.c_str();
+  const char *getUrl() override;
+  const char *getRemoteHost() override { return "127.0.0.1"; }
+  uint16_t getRemotePort() override { return 0; }
+  const std::string& getServerAddr() override {
+    auto const& ipv4 = RuntimeOption::GetServerPrimaryIPv4();
+    return ipv4.empty() ? RuntimeOption::GetServerPrimaryIPv6() : ipv4;
   }
 
   /**
    * Request data.
    */
-  virtual Method getMethod() { return Transport::Method::POST; }
-  virtual const void *getPostData(int &size) {
+  Method getMethod() override { return Transport::Method::POST; }
+  const void *getPostData(size_t &size) override {
     size = m_message.size();
     return m_message.data();
   }
@@ -119,13 +123,14 @@ public:
   /**
    * Manage headers.
    */
-  virtual std::string getHeader(const char *name);
-  virtual void getHeaders(HeaderMap &headers) {}
-  virtual void addHeaderImpl(const char *name, const char *value) {}
-  virtual void removeHeaderImpl(const char *name) {}
+  std::string getHeader(const char *name) override;
+  void getHeaders(HeaderMap &headers) override {}
+  void addHeaderImpl(const char *name, const char *value) override {}
+  void removeHeaderImpl(const char *name) override {}
 
-  virtual void sendImpl(const void *data, int size, int code, bool chunked);
-  virtual void onSendEndImpl();
+  void sendImpl(const void *data, int size, int code, bool chunked, bool eom)
+       override;
+  void onSendEndImpl() override;
 
   /**
    * Task interface.
@@ -160,6 +165,7 @@ private:
   std::string m_host;
   std::string m_reqInitDoc;
 
+  // points to an event with an attached waithandle from a different request
   ServerTaskEvent<XboxServer, XboxTransport> *m_event;
 };
 

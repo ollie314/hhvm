@@ -2,6 +2,10 @@
 GDB commands for inspecting HHVM bytecode.
 """
 # @lint-avoid-python-3-compatibility-imports
+# @lint-avoid-pyflakes3
+# @lint-avoid-pyflakes2
+
+from compatibility import *
 
 import gdb
 import unit
@@ -31,7 +35,7 @@ def iva_imm_types():
 
 @memoized
 def vec_imm_types():
-    return [V('HPHP::' + t) for t in ['MA', 'BLA', 'SLA', 'ILA', 'VSA']]
+    return [V('HPHP::' + t) for t in ['BLA', 'ILA', 'VSA', 'SLA']]
 
 @memoized
 def vec_elm_sizes():
@@ -45,12 +49,12 @@ def vec_elm_sizes():
 
 @memoized
 def rata_arrs():
-    return [V('HPHP::RepoAuthType::' + t) for t in
+    return [V('HPHP::RepoAuthType::Tag::' + t) for t in
             ['SArr', 'Arr', 'OptSArr', 'OptArr']]
 
 @memoized
 def rata_objs():
-    return [V('HPHP::RepoAuthType::' + t) for t in
+    return [V('HPHP::RepoAuthType::Tag::' + t) for t in
             ['ExactObj', 'SubObj', 'OptExactObj', 'OptSubObj']]
 
 @memoized
@@ -60,11 +64,45 @@ def uints_by_size():
             4: 'uint32_t',
             8: 'uint64_t'}
 
-class HHBC:
+class HHBC(object):
     """
     Namespace for HHBC inspection helpers.
     """
 
+    ##
+    # HPHP::Op decoding and info.
+    #
+    @staticmethod
+    def decode_op(pc):
+        """Decode the HPHP::Op at `pc', returning it as well as the size of its
+        encoding."""
+
+        pc = pc.cast(T('uint8_t').pointer())
+        raw_val = ~pc.dereference()
+
+        if (raw_val == 0xff):
+            byte = ~pc.dereference()
+            raw_val += byte
+
+        return raw_val.cast(T('HPHP::Op'))
+
+    @staticmethod
+    def op_name(op):
+        """Return the name of HPHP::Op `op'."""
+
+        table_name = 'HPHP::opcodeToName(HPHP::Op)::namesArr'
+        table_type = T('char').pointer().pointer()
+        return op_table(table_name).cast(table_type)[as_idx(op)]
+
+    @staticmethod
+    def op_size(op):
+        """Return the encoding size of the HPHP::Op `op'."""
+
+        return 1 if op.cast(T('size_t')) < 0xff else 2
+
+    ##
+    # Opcode immediate info.
+    #
     @staticmethod
     def num_imms(op):
         """Return the number of immediates for HPHP::Op `op'."""
@@ -89,23 +127,23 @@ class HHBC:
 
         if immtype in iva_imm_types():
             imm = ptr.cast(T('unsigned char').pointer()).dereference()
-            if imm & 0x1:
-                imm = ptr.cast(T('int32_t').pointer()).dereference()
-                info['size'] = T('int32_t').sizeof
-            else:
-                info['size'] = T('unsigned char').sizeof
 
+            if imm & 0x1:
+                iva_type = T('int32_t')
+            else:
+                iva_type = T('unsigned char')
+
+            imm = ptr.cast(iva_type.pointer()).dereference()
+            info['size'] = iva_type.sizeof
             info['value'] = imm >> 1
 
         elif immtype in vec_imm_types():
-            prefixes = 2 if immtype == V('HPHP::MA') else 1
             elm_size = vec_elm_sizes()[vec_imm_types().index(immtype)]
 
             num_elms = ptr.cast(T('int32_t').pointer()).dereference()
 
-            info['size'] = prefixes * T('int32_t').sizeof + \
-                           elm_size * num_elms
-            info['value'] = 'vector'
+            info['size'] = T('int32_t').sizeof + elm_size * num_elms
+            info['value'] = '<vector>'
 
         elif immtype == V('HPHP::RATA'):
             imm = ptr.cast(T('unsigned char').pointer()).dereference()
@@ -122,10 +160,10 @@ class HHBC:
             else:
                 info['size'] = 1
 
-            info['value'] = str(tag)[len('HPHP::RepoAuthType::'):]
+            info['value'] = str(tag)[len('HPHP::RepoAuthType::Tag::'):]
 
         else:
-            table_name = 'HPHP::immSize(HPHP::Op const*, int)::argTypeToSizes'
+            table_name = 'HPHP::immSize(unsigned char const*, int)::argTypeToSizes'
             if immtype >= 0:
                 size = op_table(table_name)[as_idx(immtype)]
 
@@ -139,26 +177,28 @@ class HHBC:
                 # Try to print out literal strings.
                 if immtype == V('HPHP::SA') and unit.curunit is not None:
                     litstr = lookup_litstr(info['value'], unit.curunit)
-                    info['value'] = litstr['m_data']
+                    info['value'] = string_data_val(rawptr(litstr))
             else:
                 info['size'] = 0
                 info['value'] = None
 
         return info
 
+    ##
+    # Main public interface.
+    #
     @staticmethod
-    def instr_info(bc, off=0):
-        bc = (bc + off).cast(T('HPHP::Op').pointer())
-        op = bc.dereference()
+    def instr_info(bc):
+        op = HHBC.decode_op(bc)
 
         if op <= V('HPHP::OpLowInvalid') or op >= V('HPHP::OpHighInvalid'):
             print('Invalid Op %d @ %p' % (op, bc))
             return 1
 
-        instrlen = 1
+        instrlen = HHBC.op_size(op)
         imms = []
 
-        for i in xrange(0, HHBC.num_imms(op)):
+        for i in xrange(0, int(HHBC.num_imms(op))):
             immoff = bc + instrlen
             immtype = HHBC.imm_type(op, i)
             imminfo = HHBC.imm_info(immoff, immtype)
@@ -166,7 +206,7 @@ class HHBC:
             instrlen += imminfo['size']
             imms.append(imminfo['value'])
 
-        return {'len': instrlen, 'imms': imms}
+        return {'op': op, 'len': instrlen, 'imms': imms}
 
 
 #------------------------------------------------------------------------------
@@ -181,8 +221,8 @@ omit these argument to print the same number of opcodes starting wherever the
 previous call left off.
 
 If only a single argument is provided, if it is in the range for bytecode
-allocations (i.e., > 0xffffffff), it replaces the saved PC and defaults
-the count to 1 before printing.  Otherwise, it replaces the count and the PC
+allocations (i.e., > 0xffffffff), it replaces the saved PC and defaults the
+count to 1 before printing.  Otherwise, it replaces the count and the PC
 remains where it left off after the previous call.
 """
 
@@ -190,6 +230,7 @@ remains where it left off after the previous call.
         super(HHXCommand, self).__init__('hhx', gdb.COMMAND_DATA)
         self.bcpos = None
 
+    @errorwrap
     def invoke(self, args, from_tty):
         argv = parse_argv(args)
 
@@ -209,19 +250,18 @@ remains where it left off after the previous call.
             self.bcoff = 0
             self.count = int(argv[1])
 
-        bctype = gdb.lookup_type('HPHP::Op').const().pointer()
+        bctype = T('HPHP::PC')
         self.bcpos = self.bcpos.cast(bctype)
 
         bcstart = self.bcpos - self.bcoff
 
-        op_names = gdb.parse_and_eval(
-            "(char **)*(uint32_t*)('HPHP::opcodeToName(HPHP::Op)' + 10)")
-
         for i in xrange(0, self.count):
             instr = HHBC.instr_info(self.bcpos)
-            name = op_names[as_idx(self.bcpos.dereference())].string()
+            name = HHBC.op_name(instr['op']).string()
 
-            out = "%s+%d: %s" % (str(bcstart), self.bcoff, name)
+            start_addr = bcstart.cast(T('void').pointer())
+
+            out = "%s+%d: %s" % (str(start_addr), self.bcoff, name)
             for imm in instr['imms']:
                 if type(imm) is str:
                     pass

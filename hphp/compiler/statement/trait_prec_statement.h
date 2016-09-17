@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,10 @@
 #ifndef incl_HPHP_TRAIT_PREC_STATEMENT_H_
 #define incl_HPHP_TRAIT_PREC_STATEMENT_H_
 
-#include "hphp/compiler/statement/statement.h"
-#include <set>
 #include "hphp/compiler/expression/scalar_expression.h"
+#include "hphp/compiler/statement/statement.h"
+
+#include <unordered_set>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -28,8 +29,7 @@ DECLARE_BOOST_TYPES(ExpressionList);
 DECLARE_BOOST_TYPES(StatementList);
 DECLARE_BOOST_TYPES(TraitPrecStatement);
 
-class TraitPrecStatement : public Statement {
-public:
+struct TraitPrecStatement : Statement {
   TraitPrecStatement(STATEMENT_CONSTRUCTOR_PARAMETERS,
                      ScalarExpressionPtr className,
                      ScalarExpressionPtr methodName,
@@ -38,7 +38,8 @@ public:
   DECLARE_STATEMENT_VIRTUAL_FUNCTIONS;
   const std::string& getMethodName() const { return m_methodName->getString(); }
   const std::string& getTraitName()  const { return m_traitName->getString(); }
-  void getOtherTraitNames(std::set<std::string> &nameSet) const;
+  void getOtherTraitNames(
+    hphp_string_iset& nameSet) const;
 
 private:
   ScalarExpressionPtr m_traitName;        // selected trait name

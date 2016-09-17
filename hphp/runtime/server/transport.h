@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,14 +24,20 @@
 
 #include "hphp/util/compression.h"
 #include "hphp/util/functional.h"
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/string-holder.h"
 #include "hphp/runtime/base/debuggable.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/string-holder.h"
+#include "hphp/runtime/base/type-string.h"
+
+namespace brotli {
+  class BrotliCompressor;
+};
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+struct Array;
+struct Variant;
 
 /**
  * For storing headers and cookies.
@@ -50,8 +56,7 @@ using CookieList = std::vector<std::pair<std::string, std::string>>;
  * Note that one transport object is created for each request, and
  * one transport is ONLY accessed from one single thread.
  */
-class Transport : public IDebuggable {
-public:
+struct Transport : IDebuggable {
   enum class Method {
     Unknown,
 
@@ -135,10 +140,9 @@ public:
   virtual const char *getServerName() {
     return "";
   };
-  virtual const char *getServerAddr() {
-    return  RuntimeOption::ServerPrimaryIPv4.empty() ?
-       RuntimeOption::ServerPrimaryIPv6.c_str() :
-       RuntimeOption::ServerPrimaryIPv4.c_str();
+  virtual const std::string& getServerAddr() {
+    auto const& ipv4 = RuntimeOption::GetServerPrimaryIPv4();
+    return ipv4.empty() ? RuntimeOption::GetServerPrimaryIPv6() : ipv4;
   };
   virtual uint16_t getServerPort() {
     return RuntimeOption::ServerPort;
@@ -150,9 +154,9 @@ public:
   /**
    * POST request's data.
    */
-  virtual const void *getPostData(int &size) = 0;
+  virtual const void *getPostData(size_t &size) = 0;
   virtual bool hasMorePostData() { return false; }
-  virtual const void *getMorePostData(int &size) { size = 0; return nullptr; }
+  virtual const void *getMorePostData(size_t &size) { size = 0;return nullptr; }
   virtual bool getFiles(std::string &files) { return false; }
   /**
    * Is this a GET, POST or anything?
@@ -169,7 +173,7 @@ public:
   /**
    * Get http request size.
    */
-  virtual int getRequestSize() const;
+  virtual size_t getRequestSize() const;
 
   /**
    * Get request header(s).
@@ -202,20 +206,19 @@ public:
   void setUseDefaultContentType(bool send) { m_sendContentType = send;}
 
   /**
-   * Can we gzip response?
+   * Can we compress response?
    */
-  void enableCompression() { m_compression = true;}
-  void disableCompression() { m_compression = false;}
-  bool isCompressionEnabled() const {
-    return m_compression && RuntimeOption::GzipCompressionLevel;
-  }
+  void enableCompression();
+  void disableCompression();
+  bool isCompressionEnabled() const;
 
   /**
    * Set cookie response header.
    */
   bool setCookie(const String& name, const String& value, int64_t expire = 0,
-                 const String& path = "", const String& domain = "", bool secure = false,
-                 bool httponly = false, bool encode_url = true);
+                 const String& path = "", const String& domain = "",
+                 bool secure = false, bool httponly = false,
+                 bool encode_url = true);
 
   /**
    * Add/remove a response header.
@@ -241,7 +244,7 @@ public:
    * Caller deletes data, callee must copy
    */
   virtual void sendImpl(const void *data, int size, int code,
-                        bool chunked) = 0;
+                        bool chunked, bool eom) = 0;
 
   /**
    * Override to implement more send end logic.
@@ -372,7 +375,6 @@ public:
   void setResponse(int code, const char *info = nullptr);
   const std::string &getResponseInfo() const { return m_responseCodeInfo; }
   bool headersSent() { return m_headerSent;}
-  bool setHeaderCallback(const Variant& callback);
   void sendRaw(void *data, int size, int code = 200,
                bool compressed = false, bool chunked = false,
                const char *codeInfo = nullptr);
@@ -427,8 +429,8 @@ protected:
    * token's start char * addresses in ParamMaps. Therefore, this entire
    * process is very efficient without excessive string copying.
    */
-  typedef hphp_hash_map<const char*, std::vector<const char*>,
-                        cstr_hash, eqstr> ParamMap;
+  using ParamMap = hphp_hash_map<const char*, std::vector<const char*>,
+                                 cstr_hash, eqstr>;
 
   // timers
   timespec m_queueTime;
@@ -452,8 +454,6 @@ protected:
   // output
   bool m_chunkedEncoding;
   bool m_headerSent;
-  Cell m_headerCallback;
-  bool m_headerCallbackDone;  // used to prevent infinite loops
   int m_responseCode;
   std::string m_responseCodeInfo;
   HeaderMap m_responseHeaders;
@@ -469,10 +469,28 @@ protected:
 
   std::vector<int> m_chunksSentSizes;
 
+  // Supported compression types.
+  enum CompressionType {
+    Brotli,
+    BrotliChunked,
+    Gzip,
+    Max,
+  };
+  static const char* ENCODING_TYPE_TO_NAME[CompressionType::Max + 1];
+  const char* compressionName(CompressionType type);
+
   std::string m_mimeType;
   bool m_sendContentType;
-  bool m_compression;
-  StreamCompressor *m_compressor;
+  //  0 - disabled
+  //  1 - enabled, ini_set("off) allows to disable
+  // -1 - disabled, ini_set("on") allows to enable
+  int8_t m_compressionEnabled[CompressionType::Max];
+  // encodings accepted by the client, and enabled
+  bool m_acceptedEncodings[CompressionType::Max];
+  // encoding we decided to use
+  CompressionType m_encodingType;
+  std::unique_ptr<StreamCompressor> m_compressor;
+  std::unique_ptr<brotli::BrotliCompressor> m_brotliCompressor;
 
   bool m_isSSL;
 
@@ -496,6 +514,10 @@ protected:
 
   StringHolder prepareResponse(const void *data, int size, bool &compressed,
                                bool last);
+  StringHolder compressGzip(const void *data, int size, bool &compressed,
+                            bool last);
+  StringHolder compressBrotli(const void *data, int size, bool &compressed,
+                              bool last);
 
 private:
   void prepareHeaders(bool compressed, bool chunked,

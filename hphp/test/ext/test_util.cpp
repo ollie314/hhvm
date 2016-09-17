@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,6 @@
 #include "hphp/test/ext/test_util.h"
 #include "hphp/util/logger.h"
 #include "hphp/runtime/base/file-util.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/shared-string.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/config.h"
@@ -49,7 +48,7 @@ bool TestUtil::RunTests(const std::string &which) {
 
 struct testhash {
   size_t operator()(const String& s) const {
-    return hash_string(s.data(), s.size());
+    return hash_string_unsafe(s.data(), s.size());
   }
 };
 
@@ -84,14 +83,14 @@ bool TestUtil::TestSharedString() {
   {
     hphp_shared_string_map<int64_t> map;
     for (int i = 0; i < 100; i++) {
-      string k("key");
+      std::string k("key");
       k += i;
       map[k] = i;
     }
     for (int i = 0; i < 100; i++) {
-      string k("key");
+      std::string k("key");
       k += i;
-      hphp_shared_string_map<int64_t>::const_iterator it = map.find(k);
+      auto const it = map.find(k);
       VERIFY(it != map.end());
       VERIFY(it->second == i);
     }
@@ -103,10 +102,14 @@ bool TestUtil::TestSharedString() {
 bool TestUtil::TestCanonicalize() {
   VERIFY(FileUtil::canonicalize(String("foo")) == String("foo"));
   VERIFY(FileUtil::canonicalize(String("/foo")) == String("/foo"));
-  VERIFY(FileUtil::canonicalize(String("./foo")) == String("foo"));
   VERIFY(FileUtil::canonicalize(String("foo/bar")) == String("foo/bar"));
   VERIFY(FileUtil::canonicalize(String("foo/////bar")) == String("foo/bar"));
   VERIFY(FileUtil::canonicalize(String("foo/bar/")) == String("foo/bar/"));
+  VERIFY(FileUtil::canonicalize(String("./foo")) == String("foo"));
+  VERIFY(FileUtil::canonicalize(String(".")) == String("."));
+  VERIFY(FileUtil::canonicalize(String("./")) == String("./"));
+  VERIFY(FileUtil::canonicalize(String("././")) == String("./"));
+  VERIFY(FileUtil::canonicalize(String("foo/./")) == String("foo/"));
   VERIFY(FileUtil::canonicalize(String("foo/../bar")) == String("bar"));
   VERIFY(FileUtil::canonicalize(String("./foo/../bar")) == String("bar"));
   VERIFY(FileUtil::canonicalize(String(".////foo/xyz////..////../bar"))
@@ -120,7 +123,9 @@ bool TestUtil::TestCanonicalize() {
   VERIFY(FileUtil::canonicalize(String("foo/../../bar")) == String("../bar"));
   VERIFY(FileUtil::canonicalize(String("./../../")) == String("../../"));
   VERIFY(FileUtil::canonicalize(String("/test\0", 6, CopyString))
-         == String("/test"));
+         == String(""));
+  VERIFY(FileUtil::canonicalize(String("/test\0test", 10, CopyString))
+         == String(""));
   return Count(true);
 }
 
@@ -138,7 +143,7 @@ bool TestUtil::TestHDF() {
       "node.* {\n"
       "  name = value\n"
       "}");
-    VS(Config::GetString(ini, doc["node"][0]["name"]), "value");
+    VS(Config::GetString(ini, doc, "node.0.name"), "value");
   }
 
   return Count(true);

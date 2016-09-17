@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,7 +38,7 @@ namespace HPHP { namespace jit {
 //////////////////////////////////////////////////////////////////////
 
 TEST(Simplifier, JumpConstFold) {
-  BCMarker dummy = BCMarker::Dummy();
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
   IRUnit unit(test_context);
 
   // Folding JmpZero and JmpNZero.
@@ -59,28 +59,17 @@ TEST(Simplifier, JumpConstFold) {
     EXPECT_SINGLE_OP(resultFalseZero, Jmp);
     EXPECT_SINGLE_OP(resultTrueNZero, Jmp);
   }
-
-  // Folding query jumps.
-  {
-    auto jmpeqTaken = unit.gen(JmpEq, dummy, unit.cns(10), unit.cns(10));
-    auto result = simplify(unit, jmpeqTaken, false);
-    EXPECT_SINGLE_OP(result, Jmp);
-
-    auto jmpeqNTaken = unit.gen(JmpEq, dummy, unit.cns(10), unit.cns(400));
-    result = simplify(unit, jmpeqNTaken, false);
-    EXPECT_SINGLE_OP(result, Nop);
-  }
 }
 
 TEST(Simplifier, CondJmp) {
   IRUnit unit{test_context};
-  BCMarker marker = BCMarker::Dummy();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
 
   // Folding Conv*ToBool
   {
-    auto val = unit.gen(Conjure, marker, Type::Int);
-    auto cnv = unit.gen(ConvIntToBool, marker, val->dst());
-    auto jcc = unit.gen(JmpZero, marker, unit.defBlock(), cnv->dst());
+    auto val = unit.gen(Conjure, bcctx, TInt);
+    auto cnv = unit.gen(ConvIntToBool, bcctx, val->dst());
+    auto jcc = unit.gen(JmpZero, bcctx, unit.defBlock(), cnv->dst());
 
     auto result = simplify(unit, jcc, false);
 
@@ -91,9 +80,9 @@ TEST(Simplifier, CondJmp) {
 
   // Folding in negation
   {
-    auto val = unit.gen(Conjure, marker, Type::Bool);
-    auto neg = unit.gen(XorBool, marker, val->dst(), unit.cns(true));
-    auto jcc = unit.gen(JmpZero, marker, unit.defBlock(), neg->dst());
+    auto val = unit.gen(Conjure, bcctx, TBool);
+    auto neg = unit.gen(XorBool, bcctx, val->dst(), unit.cns(true));
+    auto jcc = unit.gen(JmpZero, bcctx, unit.defBlock(), neg->dst());
 
     auto result = simplify(unit, jcc, false);
 
@@ -103,95 +92,13 @@ TEST(Simplifier, CondJmp) {
   }
 }
 
-TEST(Simplifier, JumpFuse) {
-  BCMarker dummy = BCMarker::Dummy();
-  IRUnit unit(test_context);
-
-  {
-    // JmpZero(Eq(X, true)) --> JmpEq(X, false)
-    auto taken = unit.defBlock();
-    auto lhs = unit.cns(true);
-    auto rhs = unit.gen(Conjure, dummy, Type::Bool);
-    auto eq  = unit.gen(Eq, dummy, lhs, rhs->dst());
-    auto jmp = unit.gen(JmpZero, dummy, taken, eq->dst());
-    auto result = simplify(unit, jmp, false);
-
-    EXPECT_EQ(nullptr, result.dst);
-    EXPECT_EQ(2, result.instrs.size());
-
-    // This is a dead Eq instruction; an artifact of weirdness in the
-    // implementation. Should go away.
-    EXPECT_FALSE(result.instrs[0]->isControlFlow());
-
-    EXPECT_MATCH(result.instrs[1], JmpEq, taken, rhs->dst(), unit.cns(false));
-  }
-
-  {
-    // JmpNZero(Neq(X:Int, Y:Int)) --> JmpNeqInt(X, Y)
-    auto taken = unit.defBlock();
-    auto x = unit.gen(Conjure, dummy, Type::Int);
-    auto y = unit.gen(Conjure, dummy, Type::Int);
-
-    auto neq = unit.gen(Neq, dummy, x->dst(), y->dst());
-    auto jmp = unit.gen(JmpNZero, dummy, taken, neq->dst());
-    auto result = simplify(unit, jmp, false);
-
-    EXPECT_EQ(nullptr, result.dst);
-    EXPECT_EQ(2, result.instrs.size());
-    EXPECT_FALSE(result.instrs[0]->isControlFlow());  // dead Neq
-    EXPECT_MATCH(result.instrs[1], JmpNeqInt, taken, x->dst(), y->dst());
-  }
-
-  {
-    // JmpNZero(Neq(X:Cls, Y:Cls)) --> JmpNeq(X, Y)
-    auto taken = unit.defBlock();
-    auto x = unit.gen(Conjure, dummy, Type::Bool);
-    auto y = unit.gen(Conjure, dummy, Type::Bool);
-
-    auto neq = unit.gen(Neq, dummy, x->dst(), y->dst());
-    auto jmp = unit.gen(JmpNZero, dummy, taken, neq->dst());
-    auto result = simplify(unit, jmp, false);
-
-    EXPECT_EQ(nullptr, result.dst);
-    EXPECT_EQ(1, result.instrs.size());
-    EXPECT_MATCH(result.instrs[0], JmpNeq, taken, x->dst(), y->dst());
-  }
-}
-
-TEST(Simplifier, DoubleCmp) {
-  IRUnit unit{test_context};
-  BCMarker dummy = BCMarker::Dummy();
-
-  // Lt(X:Dbl, Y:Int) --> LtDbl(X, ConvIntToDbl(Y))
-  {
-    auto x = unit.gen(Conjure, dummy, Type::Dbl);
-    auto y = unit.gen(Conjure, dummy, Type::Int);
-    auto lt = unit.gen(Lt, dummy, x->dst(), y->dst());
-    auto result = simplify(unit, lt, false);
-
-    auto conv = result.instrs[0];
-    EXPECT_MATCH(conv, ConvIntToDbl, y->dst());
-    EXPECT_MATCH(result.instrs[1], LtDbl, x->dst(), conv->dst());
-    EXPECT_EQ(result.instrs[1]->dst(), result.dst);
-  }
-
-  // Lt(X:Dbl, 10) --> LtDbl(X, 10.0)
-  {
-    auto x  = unit.gen(Conjure, dummy, Type::Dbl);
-    auto lt = unit.gen(Lt, dummy, x->dst(), unit.cns(10));
-    auto result = simplify(unit, lt, false);
-
-    EXPECT_MATCH(result.instrs[0], LtDbl, x->dst(), unit.cns(10.0));
-  }
-}
-
 TEST(Simplifier, Count) {
   IRUnit unit{test_context};
-  BCMarker dummy = BCMarker::Dummy();
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
 
   // Count($null) --> 0
   {
-    auto null = unit.gen(Conjure, dummy, Type::Null);
+    auto null = unit.gen(Conjure, dummy, TNull);
     auto count = unit.gen(Count, dummy, null->dst());
     auto result = simplify(unit, count, false);
 
@@ -202,7 +109,7 @@ TEST(Simplifier, Count) {
 
   // Count($bool_int_dbl_str) --> 1
   {
-    auto ty = Type::Bool | Type::Int | Type::Dbl | Type::Str | Type::Res;
+    auto ty = TBool | TInt | TDbl | TStr | TRes;
     auto val = unit.gen(Conjure, dummy, ty);
     auto count = unit.gen(Count, dummy, val->dst());
     auto result = simplify(unit, count, false);
@@ -214,7 +121,7 @@ TEST(Simplifier, Count) {
 
   // Count($array_no_kind) --> CountArray($array_no_kind)
   {
-    auto arr = unit.gen(Conjure, dummy, Type::Arr);
+    auto arr = unit.gen(Conjure, dummy, TArr);
     auto count = unit.gen(Count, dummy, arr->dst());
     auto result = simplify(unit, count, false);
 
@@ -223,9 +130,9 @@ TEST(Simplifier, Count) {
     EXPECT_MATCH(result.instrs[0], CountArray, arr->dst());
   }
 
-  // Count($array_not_nvtw) --> CountArrayFast($array_not_nvtw)
+  // Count($array_packed) --> CountArrayFast($array_packed)
   {
-    auto ty = Type::Arr.specialize(ArrayData::kPackedKind);
+    auto ty = Type::Array(ArrayData::kPackedKind);
     auto arr = unit.gen(Conjure, dummy, ty);
     auto count = unit.gen(Count, dummy, arr->dst());
     auto result = simplify(unit, count, false);
@@ -237,7 +144,7 @@ TEST(Simplifier, Count) {
 
   // Count($some_obj) --> Count($some_obj)
   {
-    auto obj = unit.gen(Conjure, dummy, Type::Obj);
+    auto obj = unit.gen(Conjure, dummy, TObj);
     auto count = unit.gen(Count, dummy, obj->dst());
     auto result = simplify(unit, count, false);
     EXPECT_NO_CHANGE(result);
@@ -247,12 +154,12 @@ TEST(Simplifier, Count) {
 
 TEST(Simplifier, LdObjClass) {
   IRUnit unit{test_context};
-  auto const dummy = BCMarker::Dummy();
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
   auto const cls = SystemLib::s_IteratorClass;
 
   // LdObjClass t1:Obj<=C doesn't simplify
   {
-    auto sub = Type::Obj.specialize(cls);
+    auto sub = Type::SubObj(cls);
     auto obj = unit.gen(Conjure, dummy, sub);
     auto load = unit.gen(LdObjClass, dummy, obj->dst());
     auto result = simplify(unit, load, false);
@@ -261,7 +168,7 @@ TEST(Simplifier, LdObjClass) {
 
   // LdObjClass t1:Obj=C --> Cls(C)
   {
-    auto exact = Type::Obj.specializeExact(cls);
+    auto exact = Type::ExactObj(cls);
     auto obj = unit.gen(Conjure, dummy, exact);
     auto load = unit.gen(LdObjClass, dummy, obj->dst());
     auto result = simplify(unit, load, false);
@@ -272,12 +179,12 @@ TEST(Simplifier, LdObjClass) {
 
 TEST(Simplifier, LdObjInvoke) {
   IRUnit unit{test_context};
-  auto const dummy = BCMarker::Dummy();
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
   auto const taken = unit.defBlock();
 
   // LdObjInvoke t1:Cls doesn't simplify
   {
-    auto type = Type::Cls;
+    auto type = TCls;
     auto cls = unit.gen(Conjure, dummy, type);
     auto load = unit.gen(LdObjInvoke, dummy, taken, cls->dst());
     auto result = simplify(unit, load, false);

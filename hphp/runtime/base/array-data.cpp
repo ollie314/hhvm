@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,11 +23,11 @@
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/empty-array.h"
 #include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/array-common.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/apc-local-array.h"
@@ -36,6 +36,8 @@
 #include "hphp/runtime/base/proxy-array.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/set-array.h"
+#include "hphp/zend/zend-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -45,29 +47,55 @@ static_assert(
   "Performance is sensitive to sizeof(ArrayData)."
   " Make sure you changed it with good reason and then update this assert.");
 
-typedef tbb::concurrent_hash_map<std::string, ArrayData*> ArrayDataMap;
+using ArrayDataMap = tbb::concurrent_hash_map<ArrayData::ScalarArrayKey,
+                                              ArrayData*,
+                                              ArrayData::ScalarHash>;
 static ArrayDataMap s_arrayDataMap;
 
+const StaticString s_InvalidKeysetOperationMsg("Invalid operation on keyset");
+
+ArrayData::ScalarArrayKey ArrayData::GetScalarArrayKey(const char* str,
+                                                       size_t sz) {
+  return MD5(string_md5(folly::StringPiece{str, sz}));
+}
+
+ArrayData::ScalarArrayKey ArrayData::GetScalarArrayKey(ArrayData* arr) {
+  VariableSerializer vs(VariableSerializer::Type::Serialize);
+  auto s = vs.serializeValue(VarNR(arr), false /* limit */);
+  return GetScalarArrayKey(s.data(), s.size());
+}
+
 ArrayData* ArrayData::GetScalarArray(ArrayData* arr) {
-  if (arr->empty()) return staticEmptyArray();
-  auto key = f_serialize(arr).toCppString();
+  if (arr->empty()) {
+    if (arr->isVecArray()) return staticEmptyVecArray();
+    if (arr->isDict()) return staticEmptyDictArray();
+    if (arr->isKeyset()) return staticEmptyKeysetArray();
+    return staticEmptyArray();
+  }
+  auto key = GetScalarArrayKey(arr);
   return GetScalarArray(arr, key);
 }
 
-ArrayData* ArrayData::GetScalarArray(ArrayData* arr, const std::string& key) {
-  if (arr->empty()) return staticEmptyArray();
-  assert(key == f_serialize(arr).toCppString());
+ArrayData* ArrayData::GetScalarArray(ArrayData* arr,
+                                     const ScalarArrayKey& key) {
+  if (arr->empty()) {
+    if (arr->isVecArray()) return staticEmptyVecArray();
+    if (arr->isDict()) return staticEmptyDictArray();
+    if (arr->isKeyset()) return staticEmptyKeysetArray();
+    return staticEmptyArray();
+  }
+  assert(key == GetScalarArrayKey(arr));
 
   ArrayDataMap::accessor acc;
   if (s_arrayDataMap.insert(acc, key)) {
     ArrayData* ad;
-
-    if (arr->isVectorData() && !arr->isPacked()) {
-      ad = PackedArray::NonSmartConvert(arr);
+    if (arr->isVectorData() && !arr->hasPackedLayout() && !arr->isDict() &&
+        !arr->isKeyset()) {
+      ad = PackedArray::ConvertStatic(arr);
     } else {
-      ad = arr->nonSmartCopy();
+      ad = arr->copyStatic();
     }
-    ad->setStatic();
+    assert(ad->isStatic());
     ad->onSetEvalScalar();
     acc->second = ad;
   }
@@ -77,65 +105,32 @@ ArrayData* ArrayData::GetScalarArray(ArrayData* arr, const std::string& key) {
 //////////////////////////////////////////////////////////////////////
 
 static ArrayData* ZSetIntThrow(ArrayData* ad, int64_t k, RefData* v) {
-  throw FatalErrorException("Unimplemented ArrayData::ZSetInt");
+  raise_fatal_error("Unimplemented ArrayData::ZSetInt");
 }
 
 static ArrayData* ZSetStrThrow(ArrayData* ad, StringData* k, RefData* v) {
-  throw FatalErrorException("Unimplemented ArrayData::ZSetStr");
+  raise_fatal_error("Unimplemented ArrayData::ZSetStr");
 }
 
 static ArrayData* ZAppendThrow(ArrayData* ad, RefData* v, int64_t* key_ptr) {
-  throw FatalErrorException("Unimplemented ArrayData::ZAppend");
+  raise_fatal_error("Unimplemented ArrayData::ZAppend");
 }
 
 //////////////////////////////////////////////////////////////////////
 
+static_assert(ArrayFunctions::NK == ArrayData::ArrayKind::kNumKinds,
+              "add new kinds here");
+
 #define DISPATCH(entry)                         \
   { PackedArray::entry,                         \
     MixedArray::entry,                          \
-    MixedArray::entry,                          \
-    MixedArray::entry,                          \
-    PackedArray::entry,                         \
     EmptyArray::entry,                          \
     APCLocalArray::entry,                       \
     GlobalsArray::entry,                        \
-    ProxyArray::entry                           \
-  },
-
-#define DISPATCH_INTMAP_SPECIALIZED(entry)      \
-  { PackedArray::entry,                         \
-    MixedArray::entry,                          \
-    MixedArray::entry,                          \
-    MixedArray::entry##Impl<ArrayData::kIntMapKind>, \
-    PackedArray::entry,                         \
-    EmptyArray::entry,                          \
-    APCLocalArray::entry,                       \
-    GlobalsArray::entry,                        \
-    ProxyArray::entry                           \
-  },
-
-#define DISPATCH_STRMAP_SPECIALIZED(entry)      \
-  { PackedArray::entry,                         \
-    MixedArray::entry,                          \
-    MixedArray::entry##Impl<ArrayData::kStrMapKind>, \
-    MixedArray::entry,                          \
-    PackedArray::entry,                         \
-    EmptyArray::entry,                          \
-    APCLocalArray::entry,                       \
-    GlobalsArray::entry,                        \
-    ProxyArray::entry                           \
-  },
-
-#define DISPATCH_MAP_ARRAY_SPECIALIZED(entry)   \
-  { PackedArray::entry,                         \
-    MixedArray::entry,                          \
-    MixedArray::entry##Impl<ArrayData::kStrMapKind>, \
-    MixedArray::entry##Impl<ArrayData::kIntMapKind>, \
-    PackedArray::entry,                         \
-    EmptyArray::entry,                          \
-    APCLocalArray::entry,                       \
-    GlobalsArray::entry,                        \
-    ProxyArray::entry                           \
+    ProxyArray::entry,                          \
+    MixedArray::entry##Dict,   /* Dict */       \
+    PackedArray::entry##Vec,   /* Vec */        \
+    SetArray::entry,           /* Keyset */     \
   },
 
 /*
@@ -163,15 +158,13 @@ static ArrayData* ZAppendThrow(ArrayData* ad, RefData* v, int64_t* key_ptr) {
  *   array doesn't have to copy if it was asked to remove an element
  *   that doesn't exist.
  *
- *   When a function with these semantics returns a new array, the new
- *   array is not yet incref'd (for historical reasons relating to our
- *   smart pointers).  Correctly using functions with these semantics
- *   usually involves checking whether the return value is the same
- *   pointer to be able to conditionally incref it.  TODO(#2926276):
- *   we want to change this to make callsites cheaper.
+ *   When a function with these semantics returns a new array, the new array is
+ *   already incref'd. In a few cases, an existing array (different than the
+ *   source array) may be returned. In this case, the array will already be
+ *   incref'd.
  */
 
-extern const ArrayFunctions g_array_funcs_unmodified = {
+const ArrayFunctions g_array_funcs = {
   /*
    * void Release(ArrayData*)
    *
@@ -183,30 +176,18 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
   /*
    * const TypedValue* NvGetInt(const ArrayData*, int64_t key)
    *
-   *   Lookup a value in an array using an integer key.  Returns
-   *   nullptr if the key is not in the array.
+   *   Lookup a value in an array using an integer key.  Returns nullptr if the
+   *   key is not in the array. Must not throw if key isn't present.
    */
-  DISPATCH_STRMAP_SPECIALIZED(NvGetInt)
+  DISPATCH(NvGetInt)
 
   /*
-   * const TypedValue* NvGetIntConverted(const ArrayData*, int64_t key)
+   * const TypedValue* NvTryGetInt(const ArrayData*, int64_t key)
    *
-   *   Lookup a value in an array using an integer key. Signifies that the key
-   *   was originally a numeric-string key that was converted to int.
-   *   Returns nullptr if the key is not in the array.
+   *   Lookup a value in an array using an integer key. Either throws, or
+   *   returns nullptr if the key is not in the array.
    */
-  {
-    PackedArray::NvGetInt,
-    MixedArray::NvGetInt,
-    MixedArray::NvGetIntImpl<ArrayData::kStrMapKind>,
-    /* IntMapArray */
-    MixedArray::NvGetIntConverted,
-    PackedArray::NvGetIntConverted,
-    EmptyArray::NvGetInt,
-    APCLocalArray::NvGetInt,
-    GlobalsArray::NvGetInt,
-    ProxyArray::NvGetInt,
-  },
+  DISPATCH(NvTryGetInt)
 
   /*
    * const TypedValue* NvGetStr(const ArrayData*, const StringData*)
@@ -215,7 +196,15 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   must not be an integer-like string.  Returns nullptr if the key
    *   is not in the array.
    */
-  DISPATCH_INTMAP_SPECIALIZED(NvGetStr)
+  DISPATCH(NvGetStr)
+
+  /*
+   * const TypedValue* NvTryGetStr(const ArrayData*, const StringData*)
+   *
+   *   Lookup a value in an array using a string key. Either throws, or
+   *   returns nullptr if the key is not in the array.
+   */
+  DISPATCH(NvTryGetStr)
 
   /*
    * void NvGetKey(const ArrayData*, TypedValue* out, ssize_t pos)
@@ -231,27 +220,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   Set a value in the array for an integer key.  This function has
    *   copy/grow semantics.
    */
-  DISPATCH_STRMAP_SPECIALIZED(SetInt)
-
-  /*
-   * ArrayData* SetIntConverted(ArrayData*, int64_t key, Cell v, bool copy)
-   *
-   *   Set a value in the array for an integer key. Signifies that the key
-   *   was originally a numeric-string key that was converted to int.
-   *   This function has copy/grow semantics.
-   */
-  {
-    PackedArray::SetInt,
-    MixedArray::SetInt,
-    MixedArray::SetIntImpl<ArrayData::kStrMapKind>,
-    /* IntMapArray */
-    MixedArray::SetIntConverted,
-    PackedArray::SetIntConverted,
-    EmptyArray::SetInt,
-    APCLocalArray::SetInt,
-    GlobalsArray::SetInt,
-    ProxyArray::SetInt,
-  },
+  DISPATCH(SetInt)
 
   /*
    * ArrayData* SetStr(ArrayData*, StringData*, Cell v, bool copy)
@@ -260,12 +229,12 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   be an integer-like string.  This function has copy/grow
    *   semantics.
    */
-  DISPATCH_INTMAP_SPECIALIZED(SetStr)
+  DISPATCH(SetStr)
 
   /*
    * size_t Vsize(const ArrayData*)
    *
-   *   This entry point essentially is only for GlobalsArray;
+   *   This entry point essentially is only for GlobalsArray and ProxyArray;
    *   all the other cases are not_reached().
    *
    *   Because of particulars of how GlobalsArray works,
@@ -300,7 +269,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   Returns true iff this array contains an element with the
    *   supplied integer key.
    */
-  DISPATCH_STRMAP_SPECIALIZED(ExistsInt)
+  DISPATCH(ExistsInt)
 
   /*
    * bool ExistsStr(const ArrayData*, const StringData*)
@@ -309,53 +278,44 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   supplied string key.  The string must not be an integer-like
    *   string.
    */
-  DISPATCH_INTMAP_SPECIALIZED(ExistsStr)
+  DISPATCH(ExistsStr)
 
   /*
    * ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& out, bool copy)
+   * ArrayData* LvalIntRef(ArrayData*, int64_t k, Variant*& out, bool copy)
    *
-   *   Looks up a value in the array by the supplied integer key,
-   *   creating it as a KindOfNull if it doesn't exist, and sets `out'
-   *   to point to it.  This function has copy/grow semantics.
+   *   Looks up a value in the array by the supplied integer key, creating it as
+   *   a KindOfNull if it doesn't exist, and sets `out' to point to it. Use the
+   *   ref variant if the retrieved value will be boxed. This function has
+   *   copy/grow semantics.
    */
-  DISPATCH_STRMAP_SPECIALIZED(LvalInt)
+  DISPATCH(LvalInt)
+  DISPATCH(LvalIntRef)
 
   /*
    * ArrayData* LvalStr(ArrayData*, StringData* key, Variant*& out, bool copy)
+   * ArrayData* LvalStrRef(ArrayData*, StringData* key, Variant*& out, bool copy)
    *
-   *   Looks up a value in the array by the supplied string key,
-   *   creating it as a KindOfNull if it doesn't exist, and sets `out'
-   *   to point to it.  The string `key' may not be an integer-like
-   *   string.  This function has copy/grow semantics.
+   *   Looks up a value in the array by the supplied string key, creating it as
+   *   a KindOfNull if it doesn't exist, and sets `out' to point to it.  The
+   *   string `key' may not be an integer-like string. Use the ref variant if
+   *   the retrieved value will be boxed. This function has copy/grow semantics.
    */
-  DISPATCH_INTMAP_SPECIALIZED(LvalStr)
+  DISPATCH(LvalStr)
+  DISPATCH(LvalStrRef)
 
   /*
    * ArrayData* LvalNew(ArrayData*, Variant*& out, bool copy)
-   *
-   *   This function inserts a new null value in the array at the next
-   *   available integer key, and then sets `out' to point to it.  In
-   *   the case that there is no next available integer key, this
-   *   function sets out to point to the lvalBlackHole.  This function
-   *   has copy/grow semantics.
-   */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(LvalNew)
-
-  /*
    * ArrayData* LvalNewRef(ArrayData*, Variant*& out, bool copy)
+   *
+   *   This function inserts a new null value in the array at the next available
+   *   integer key, and then sets `out' to point to it.  In the case that there
+   *   is no next available integer key, this function sets out to point to the
+   *   lvalBlackHole. Use the ref variant if the retrieved value will be
+   *   boxed. This function has copy/grow semantics.
    */
-  {
-    PackedArray::LvalNewRef,
-    MixedArray::LvalNew,
-    MixedArray::LvalNewImpl<ArrayData::kStrMapKind>,
-    /* IntMapArray */
-    MixedArray::LvalNewImpl<ArrayData::kIntMapKind>,
-    PackedArray::LvalNewRef,
-    EmptyArray::LvalNew,
-    APCLocalArray::LvalNew,
-    GlobalsArray::LvalNew,
-    ProxyArray::LvalNew,
-  },
+  DISPATCH(LvalNew)
+  DISPATCH(LvalNewRef)
 
   /*
    * ArrayData* SetRefInt(ArrayData*, int64_t key, Variant& v, bool copy)
@@ -364,7 +324,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   boxed, and then insert a KindOfRef that points to v's RefData.
    *   This function has copy/grow semantics.
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(SetRefInt)
+  DISPATCH(SetRefInt)
 
   /*
    * ArrayData* SetRefStr(ArrayData*, StringData* key, Variant& v, bool copy)
@@ -374,7 +334,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *  then insert a KindOfRef that points to v's RefData.  This
    *  function has copy/grow semantics.
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(SetRefStr)
+  DISPATCH(SetRefStr)
 
   /*
    * ArrayData* AddInt(ArrayData*, int64_t key, Cell, bool copy)
@@ -385,8 +345,8 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   already contain a value for the key `key' if it can make the
    *   operation more efficient.
    */
-  DISPATCH_STRMAP_SPECIALIZED(SetInt)
-  DISPATCH_INTMAP_SPECIALIZED(SetStr)
+  DISPATCH(SetInt)
+  DISPATCH(SetStr)
 
   /*
    * ArrayData* RemoveInt(ArrayData*, int64_t key, bool copy)
@@ -395,7 +355,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   entry for that element, this function does not remove it, and
    *   may or may not cow.  This function has copy/grow semantics.
    */
-  DISPATCH_STRMAP_SPECIALIZED(RemoveInt)
+  DISPATCH(RemoveInt)
 
   /*
    * ArrayData* RemoveStr(ArrayData*, const StringData*, bool copy)
@@ -404,7 +364,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   entry for that element, this function does not remove it, and
    *   may or may not cow.  This function has copy/grow semantics.
    */
-  DISPATCH_INTMAP_SPECIALIZED(RemoveStr)
+  DISPATCH(RemoveStr)
 
   /*
    * ssize_t IterEnd(const ArrayData*)
@@ -470,19 +430,19 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *
    *   Pre: fp.getContainer() == ad
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(AdvanceMArrayIter)
+  DISPATCH(AdvanceMArrayIter)
 
   /*
-   * ArrayData* EscalateForSort(ArrayData*)
+   * ArrayData* EscalateForSort(ArrayData*, SortFunction)
    *
    *   Must be called before calling any of the sort routines on an
-   *   array.  This gives arrays a chance to change to a kind that
+   *   array. This gives arrays a chance to change to a kind that
    *   supports sorting.
    */
   DISPATCH(EscalateForSort)
 
   /*
-   * void Ksort(int sort_flags, bool ascending)
+   * void Ksort(ArrayData*, int sort_flags, bool ascending)
    *
    *   Sort an array by its keys, keeping the values associated with
    *   their respective keys.
@@ -490,27 +450,15 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
   DISPATCH(Ksort)
 
   /*
-   * void Sort(int sort_flags, bool ascending)
+   * void Sort(ArrayData*, int sort_flags, bool ascending)
    *
    *   Sort an array, by values, and then assign new keys to the
    *   elements in the resulting array.
    */
-  {
-    PackedArray::Sort,
-    MixedArray::Sort,
-    /* StrMapArray */
-    MixedArray::WarnAndSort,
-    /* IntMapArray */
-    MixedArray::WarnAndSort,
-    PackedArray::Sort,
-    EmptyArray::Sort,
-    APCLocalArray::Sort,
-    GlobalsArray::Sort,
-    ProxyArray::Sort,
-  },
+  DISPATCH(Sort)
 
   /*
-   * void Asort(int sort_flags, bool ascending)
+   * void Asort(ArrayData*, int sort_flags, bool ascending)
    *
    *   Sort an array and maintain index association.  This means sort
    *   the array by values, but keep the keys associated with the
@@ -534,19 +482,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   function (in the variant).  Returns false if the user-defined
    *   comparison function modifies the array we are sorting.
    */
-  {
-    PackedArray::Usort,
-    MixedArray::Usort,
-    /* StrMapArray */
-    MixedArray::WarnAndUsort,
-    /* IntMapArray */
-    MixedArray::WarnAndUsort,
-    PackedArray::Usort,
-    EmptyArray::Usort,
-    APCLocalArray::Usort,
-    GlobalsArray::Usort,
-    ProxyArray::Usort,
-  },
+  DISPATCH(Usort)
 
   /*
    * bool Uasort(ArrayData*, const Variant&)
@@ -579,23 +515,24 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
   DISPATCH(CopyWithStrongIterators)
 
   /*
-   * ArrayData* NonSmartCopy(const ArrayData*)
+   * ArrayData* CopyStatic(const ArrayData*)
    *
    *   Copy an array, allocating the new array with malloc() instead
    *   of from the request local allocator.  This function does
    *   guarantee the returned array is a new copy---but it may throw a
    *   fatal error if this cannot be accomplished (e.g. for $GLOBALS).
    */
-  DISPATCH(NonSmartCopy)
+  DISPATCH(CopyStatic)
 
   /*
-   * ArrayData* Append(ArrayData*, const Variant& v, bool copy)
+   * ArrayData* Append(ArrayData*, Cell v, bool copy)
    *
    *   Append a new value to the array, with the next available
    *   integer key.  If there is no next available integer key, no
-   *   value is appended.  This function has copy/grow semantics.
+   *   value is appended.  This function has copy/grow semantics.  The
+   *   value must not be KindOfUninit.
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(Append)
+  DISPATCH(Append)
 
   /*
    * ArrayData* AppendRef(ArrayData*, Variant& v, bool copy)
@@ -606,7 +543,7 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   If there is no next available integer key, this function does
    *   not append a value.  This function has copy/grow semantics.
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(AppendRef)
+  DISPATCH(AppendRef)
 
   /*
    * ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy)
@@ -618,16 +555,14 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *   referenced"---i.e. if `v' is already KindOfRef and
    *   RefData::isReferenced is true.
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(AppendWithRef)
+  DISPATCH(AppendWithRef)
 
   /*
    * ArrayData* PlusEq(ArrayData*, const ArrayData* elems)
    *
    *    Performs array addition, logically mutating the first array.
    *    It may return a new array if the array needed to grow, or if
-   *    it needed to COW because hasMultipleRefs was true---in this
-   *    case the new returned array will already have a reference
-   *    count of 1.
+   *    it needed to COW because cowCheck() was true.
    */
   DISPATCH(PlusEq)
 
@@ -636,34 +571,33 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
    *
    *   Perform part of the semantics of the php function array_merge.
    *   (Renumbering keys is not done by this routine currently.)
-   *
-   *   This function always produces a new array with reference count 1.
    */
   DISPATCH(Merge)
 
   /*
    * ArrayData* Pop(ArrayData*, Variant& value);
    *
-   *   Remove the last element from the array and assign it to
-   *   `value'.  This function may return a new (not yet incref'd)
-   *   array if it decided to COW due to hasMultipleRefs().
+   *   Remove the last element from the array and assign it to `value'.  This
+   *   function may return a new array if it decided to COW due to
+   *   cowCheck().
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(Pop)
+  DISPATCH(Pop)
 
   /*
    * ArrayData* Dequeue(ArrayData*, Variant& value)
    *
-   *   Remove the first element from the array and assign it to
-   *   `value'.  This function may return a new (not yet incref'd)
-   *   array if it decided to COW due to hasMultipleRefs().
+   *   Remove the first element from the array and assign it to `value'.  This
+   *   function may return a new array if it decided to COW due to
+   *   cowCheck().
    */
-  DISPATCH_MAP_ARRAY_SPECIALIZED(Dequeue)
+  DISPATCH(Dequeue)
 
   /*
-   * ArrayData* Prepend(ArrayData*, const Variant& `v', bool copy)
+   * ArrayData* Prepend(ArrayData*, Cell v, bool copy)
    *
    *   Insert `v' as the first element of the array.  Then renumber
-   *   integer keys.  This function has copy/grow semantics.
+   *   integer keys.  This function has copy/grow semantics.  `v' must
+   *   not be KindOfUninit.
    */
   DISPATCH(Prepend)
 
@@ -704,54 +638,86 @@ extern const ArrayFunctions g_array_funcs_unmodified = {
   {
     &PackedArray::ZSetInt,
     &MixedArray::ZSetInt,
-    &MixedArray::ZSetInt,
-    &MixedArray::ZSetInt,
-    &PackedArray::ZSetInt,
     &ZSetIntThrow,
     &ZSetIntThrow,
     &ZSetIntThrow,
     &ProxyArray::ZSetInt,
+    &MixedArray::ZSetInt,
+    &ZSetIntThrow,
+    &ZSetIntThrow,
   },
 
   {
     &PackedArray::ZSetStr,
     &MixedArray::ZSetStr,
-    &MixedArray::ZSetStr,
-    &MixedArray::ZSetStr,
-    &PackedArray::ZSetStr,
     &ZSetStrThrow,
     &ZSetStrThrow,
     &ZSetStrThrow,
     &ProxyArray::ZSetStr,
+    &MixedArray::ZSetStr,
+    &ZSetStrThrow,
+    &ZSetStrThrow,
   },
 
   {
     &PackedArray::ZAppend,
     &MixedArray::ZAppend,
-    &MixedArray::ZAppend,
-    &MixedArray::ZAppend,
-    &PackedArray::ZAppend,
     &ZAppendThrow,
     &ZAppendThrow,
     &ZAppendThrow,
     &ProxyArray::ZAppend,
+    &MixedArray::ZAppend,
+    &ZAppendThrow,
+    &ZAppendThrow,
   },
+
+   /*
+   * ArrayData* ToPHPArray(ArrayData*, bool)
+   *
+   *   Convert to a PHP array. If already a PHP array, it will be returned
+   *   unchange (without copying). If copy is false, it may be converted in
+   *   place.
+   */
+  DISPATCH(ToPHPArray)
+
+   /*
+   * ArrayData* ToDict(ArrayData*, bool)
+   *
+   *   Convert to a dict. If already a dict, it will be returned unchange
+   *   (without copying). If copy is false, it may be converted in place. If the
+   *   input array contains references, an exception will be thrown.
+   */
+  DISPATCH(ToDict)
+
+  /*
+   * ArrayData* ToVec(ArrayData*, bool)
+   *
+   *   Convert to a vec. Keys will be discarded and the vec will contain the
+   *   values in iteration order. If already a vec, it will be returned
+   *   unchanged (without copying). If copy is false, it may be converted in
+   *   place. If the input array contains references, an exception will be
+   *   thrown.
+   */
+  DISPATCH(ToVec)
+
+   /*
+   * ArrayData* ToKeyset(ArrayData*, bool)
+   *
+   *   Convert to a keyset. Values will be discarded and the keyset will contain
+   *   just the keys. If already a keyset, it will be returned unchange (without
+   *   copying). If copy is false, it may be converted in place. If the input
+   *   array contains references, an exception will be thrown.
+   */
+  DISPATCH(ToKeyset)
 };
 
-// We create a copy so that we can dynamically instrument g_array_funcs at
-// runtime in ArrayTracer to capture array usage.
-ArrayFunctions g_array_funcs = g_array_funcs_unmodified;
-
 #undef DISPATCH
-#undef DISPATCH_INTMAP_SPECIALIZED
-#undef DISPATCH_STRMAP_SPECIALIZED
-#undef DISPATCH_MAP_ARRAY_SPECIALIZED
 
 ///////////////////////////////////////////////////////////////////////////////
 
-// In general, arrays can contain int-valued-strings, even though
-// plain array access converts them to integers.  non-int-string
-// assersions should go upstream of the ArrayData api.
+// In general, arrays can contain int-valued-strings, even though plain array
+// access converts them to integers.  non-int-string assertions should go
+// upstream of the ArrayData api.
 
 bool ArrayData::IsValidKey(const String& k) {
   return IsValidKey(k.get());
@@ -766,6 +732,18 @@ ArrayData *ArrayData::Create() {
   return staticEmptyArray();
 }
 
+ArrayData* ArrayData::CreateVec() {
+  return staticEmptyVecArray();
+}
+
+ArrayData* ArrayData::CreateDict() {
+  return staticEmptyDictArray();
+}
+
+ArrayData* ArrayData::CreateKeyset() {
+  return staticEmptyKeysetArray();
+}
+
 ArrayData *ArrayData::Create(const Variant& value) {
   PackedArrayInit pai(1);
   pai.append(value);
@@ -774,8 +752,12 @@ ArrayData *ArrayData::Create(const Variant& value) {
 
 ArrayData *ArrayData::Create(const Variant& name, const Variant& value) {
   ArrayInit init(1, ArrayInit::Map{});
-  // There is no toKey() call on name.
-  init.set(name, value);
+  DEBUG_ONLY int64_t unused;
+  assertx(name.isString() ?
+         !name.getStringData()->isStrictlyInteger(unused) :
+         name.isInteger());
+
+  init.setValidKey(name, value);
   return init.create();
 }
 
@@ -787,7 +769,11 @@ ArrayData *ArrayData::CreateRef(Variant& value) {
 
 ArrayData *ArrayData::CreateRef(const Variant& name, Variant& value) {
   ArrayInit init(1, ArrayInit::Map{});
-  // There is no toKey() call on name.
+  DEBUG_ONLY int64_t unused;
+  assertx(name.isString() ?
+         !name.getStringData()->isStrictlyInteger(unused) :
+         name.isInteger());
+
   init.setRef(name, value, true);
   return init.create();
 }
@@ -795,60 +781,161 @@ ArrayData *ArrayData::CreateRef(const Variant& name, Variant& value) {
 ///////////////////////////////////////////////////////////////////////////////
 // reads
 
-int ArrayData::compare(const ArrayData *v2) const {
-  assert(v2);
+ALWAYS_INLINE
+bool ArrayData::EqualHelper(const ArrayData* ad1, const ArrayData* ad2,
+                            bool strict) {
+  assert(ad1->isPHPArray());
+  assert(ad2->isPHPArray());
 
-  auto const count1 = size();
-  auto const count2 = v2->size();
-  if (count1 < count2) return -1;
-  if (count1 > count2) return 1;
-  if (count1 == 0) return 0;
+  if (ad1 == ad2) return true;
+  if (ad1->size() != ad2->size()) return false;
 
-  // prevent circular referenced objects/arrays or deep ones
-  DECLARE_THREAD_INFO; check_recursion(info);
-
-  for (ArrayIter iter(this); iter; ++iter) {
-    auto key = iter.first();
-    if (!v2->exists(key)) return 1;
-    auto value1 = iter.second();
-    auto value2 = v2->get(key);
-    if (HPHP::more(value1, value2)) return 1;
-    if (HPHP::less(value1, value2)) return -1;
-  }
-
-  return 0;
-}
-
-bool ArrayData::equal(const ArrayData *v2, bool strict) const {
-  assert(v2);
-
-  if (this == v2) return true;
-  auto const count1 = size();
-  auto const count2 = v2->size();
-  if (count1 != count2) return false;
-  if (count1 == 0) return true;
-
-  // prevent circular referenced objects/arrays or deep ones
-  DECLARE_THREAD_INFO; check_recursion(info);
+  // Prevent circular referenced objects/arrays or deep ones.
+  check_recursion_error();
 
   if (strict) {
-    for (ArrayIter iter1(this), iter2(v2); iter1; ++iter1, ++iter2) {
+    for (ArrayIter iter1{ad1}, iter2{ad2}; iter1; ++iter1, ++iter2) {
       assert(iter2);
       if (!same(iter1.first(), iter2.first())
           || !same(iter1.second(), iter2.secondRef())) return false;
     }
+    return true;
   } else {
-    for (ArrayIter iter(this); iter; ++iter) {
-      Variant key(iter.first());
-      if (!v2->exists(key)) return false;
-      if (!tvEqual(*iter.second().asTypedValue(),
-                   *v2->get(key).asTypedValue())) {
+    bool equal = true;
+    IterateKV(
+      ad1,
+      [&](const TypedValue* k, const TypedValue* v) {
+        if (!ad2->exists(tvAsCVarRef(k)) ||
+            !tvEqual(*v, *ad2->get(tvAsCVarRef(k)).asTypedValue())) {
+          equal = false;
+          return true;
+        }
         return false;
       }
+    );
+    return equal;
+  }
+}
+
+ALWAYS_INLINE
+int64_t ArrayData::CompareHelper(const ArrayData* ad1, const ArrayData* ad2) {
+  assert(ad1->isPHPArray());
+  assert(ad2->isPHPArray());
+
+  auto const size1 = ad1->size();
+  auto const size2 = ad2->size();
+  if (size1 < size2) return -1;
+  if (size1 > size2) return 1;
+
+  // Prevent circular referenced objects/arrays or deep ones.
+  check_recursion_error();
+
+  int result = 0;
+  IterateKV(
+    ad1,
+    [&](const TypedValue* k, const TypedValue* v) {
+      if (!ad2->exists(tvAsCVarRef(k))) {
+        result = 1;
+        return true;
+      }
+      auto const cmp = tvCompare(*v, *ad2->get(tvAsCVarRef(k)).asTypedValue());
+      if (cmp != 0) {
+        result = cmp;
+        return true;
+      }
+      return false;
     }
+  );
+
+  return result;
+}
+
+bool ArrayData::Equal(const ArrayData* ad1, const ArrayData* ad2) {
+  return EqualHelper(ad1, ad2, false);
+}
+
+bool ArrayData::NotEqual(const ArrayData* ad1, const ArrayData* ad2) {
+  return !EqualHelper(ad1, ad2, false);
+}
+
+bool ArrayData::Same(const ArrayData* ad1, const ArrayData* ad2) {
+  return EqualHelper(ad1, ad2, true);
+}
+
+bool ArrayData::NotSame(const ArrayData* ad1, const ArrayData* ad2) {
+  return !EqualHelper(ad1, ad2, true);
+}
+
+bool ArrayData::Lt(const ArrayData* ad1, const ArrayData* ad2) {
+  return CompareHelper(ad1, ad2) < 0;
+}
+
+bool ArrayData::Lte(const ArrayData* ad1, const ArrayData* ad2) {
+  return CompareHelper(ad1, ad2) <= 0;
+}
+
+bool ArrayData::Gt(const ArrayData* ad1, const ArrayData* ad2) {
+  return 0 > CompareHelper(ad2, ad1); // Not symmetric; Order matters here.
+}
+
+bool ArrayData::Gte(const ArrayData* ad1, const ArrayData* ad2) {
+  return 0 >= CompareHelper(ad2, ad1); // Not symmetric; Order matters here.
+}
+
+int64_t ArrayData::Compare(const ArrayData* ad1, const ArrayData* ad2) {
+  return CompareHelper(ad1, ad2);
+}
+
+int ArrayData::compare(const ArrayData* v2) const {
+  assert(v2);
+
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2->isPHPArray())) {
+      if (v2->isVecArray()) throw_vec_compare_exception();
+      if (v2->isDict()) throw_dict_compare_exception();
+      if (v2->isKeyset()) throw_keyset_compare_exception();
+      not_reached();
+    }
+    return Compare(this, v2);
   }
 
-  return true;
+  if (isVecArray()) {
+    if (UNLIKELY(!v2->isVecArray())) throw_vec_compare_exception();
+    return PackedArray::VecCmp(this, v2);
+  }
+
+  if (isDict()) throw_dict_compare_exception();
+  if (isKeyset()) throw_keyset_compare_exception();
+
+  not_reached();
+}
+
+bool ArrayData::equal(const ArrayData* v2, bool strict) const {
+  assert(v2);
+
+  if (isPHPArray()) {
+    if (UNLIKELY(!v2->isPHPArray())) return false;
+    return strict ? Same(this, v2) : Equal(this, v2);
+  }
+
+  if (isVecArray()) {
+    if (UNLIKELY(!v2->isVecArray())) return false;
+    return strict
+      ? PackedArray::VecSame(this, v2) : PackedArray::VecEqual(this, v2);
+  }
+
+  if (isDict()) {
+    if (UNLIKELY(!v2->isDict())) return false;
+    return strict
+      ? MixedArray::DictSame(this, v2) : MixedArray::DictEqual(this, v2);
+  }
+
+  if (isKeyset()) {
+    if (UNLIKELY(!v2->isKeyset())) return false;
+    return strict ? SetArray::Same(this, v2) : SetArray::Equal(this, v2);
+  }
+
+  not_reached();
 }
 
 Variant ArrayData::reset() {
@@ -916,36 +1003,6 @@ Variant ArrayData::each() {
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
 
-void ArrayData::serializeImpl(VariableSerializer *serializer) const {
-  serializer->writeArrayHeader(size(), isVectorData());
-  for (ArrayIter iter(this); iter; ++iter) {
-    serializer->writeArrayKey(iter.first());
-    serializer->writeArrayValue(iter.secondRef());
-  }
-  serializer->writeArrayFooter();
-}
-
-void ArrayData::serialize(VariableSerializer *serializer,
-                          bool skipNestCheck /* = false */) const {
-  if (size() == 0) {
-    serializer->writeArrayHeader(0, isVectorData());
-    serializer->writeArrayFooter();
-    return;
-  }
-  if (!skipNestCheck) {
-    if (serializer->incNestedLevel((void*)this)) {
-      serializer->writeOverflow((void*)this);
-    } else {
-      serializeImpl(serializer);
-    }
-    serializer->decNestedLevel((void*)this);
-  } else {
-    // If isObject, the array is temporary and we should not check or save
-    // its pointer.
-    serializeImpl(serializer);
-  }
-}
-
 const Variant& ArrayData::get(const Variant& k, bool error) const {
   assert(IsValidKey(k));
   auto const cell = k.asCell();
@@ -964,12 +1021,12 @@ const Variant& ArrayData::getNotFound(const StringData* k) {
 }
 
 const Variant& ArrayData::getNotFound(int64_t k, bool error) const {
-  return error && m_kind != kGlobalsKind ? getNotFound(k) :
+  return error && kind() != kGlobalsKind ? getNotFound(k) :
          null_variant;
 }
 
 const Variant& ArrayData::getNotFound(const StringData* k, bool error) const {
-  return error && m_kind != kGlobalsKind ? getNotFound(k) :
+  return error && kind() != kGlobalsKind ? getNotFound(k) :
          null_variant;
 }
 
@@ -987,16 +1044,167 @@ const char* ArrayData::kindToString(ArrayKind kind) {
   std::array<const char*,9> names = {{
     "PackedKind",
     "MixedKind",
-    "StrMapKind",
-    "IntMapKind",
-    "VPackedKind",
     "EmptyKind",
-    "SharedKind",
+    "ApcKind",
     "GlobalsKind",
     "ProxyKind",
+    "DictKind",
+    "VecKind",
+    "KeysetKind"
   }};
   static_assert(names.size() == kNumKinds, "add new kinds here");
   return names[kind];
+}
+
+namespace {
+
+////////////////////////////////////////////////////////////////////////////////
+
+const char* describeKeyType(const TypedValue* tv) {
+  switch (tv->m_type) {
+  case KindOfUninit:
+  case KindOfNull:             return "null";
+  case KindOfBoolean:          return "bool";
+  case KindOfInt64:            return "int";
+  case KindOfDouble:           return "double";
+  case KindOfPersistentString:
+  case KindOfString:           return "string";
+  case KindOfPersistentVec:
+  case KindOfVec:              return "vec";
+  case KindOfPersistentDict:
+  case KindOfDict:             return "dict";
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:           return "keyset";
+  case KindOfPersistentArray:
+  case KindOfArray:            return "array";
+  case KindOfResource:
+    return tv->m_data.pres->data()->o_getClassName().c_str();
+
+  case KindOfObject:
+    return tv->m_data.pobj->getClassName().c_str();
+
+  case KindOfRef:
+    return describeKeyType(tv->m_data.pref->var()->asTypedValue());
+
+  case KindOfClass:
+    break;
+  }
+  not_reached();
+}
+
+std::string describeKeyValue(TypedValue tv) {
+  switch (tv.m_type) {
+  case KindOfPersistentString:
+  case KindOfString:
+    return folly::sformat("\"{}\"", tv.m_data.pstr->data());
+  case KindOfInt64:
+    return folly::to<std::string>(tv.m_data.num);
+  case KindOfRef:
+    return describeKeyValue(*tv.m_data.pref->var()->asTypedValue());
+  case KindOfUninit:
+  case KindOfNull:
+  case KindOfBoolean:
+  case KindOfDouble:
+  case KindOfPersistentVec:
+  case KindOfVec:
+  case KindOfPersistentDict:
+  case KindOfDict:
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:
+  case KindOfPersistentArray:
+  case KindOfArray:
+  case KindOfResource:
+  case KindOfObject:
+  case KindOfClass:
+    return "<invalid key type>";
+  }
+  not_reached();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+}
+
+void throwInvalidArrayKeyException(const TypedValue* key, const ArrayData* ad) {
+  std::pair<const char*, const char*> kind_type = [&]{
+    if (ad->isVecArray()) return std::make_pair("vec", "int");
+    if (ad->isDict()) return std::make_pair("dict", "int or string");
+    if (ad->isKeyset()) return std::make_pair("keyset", "int or string");
+    assertx(ad->isPHPArray());
+    return std::make_pair("array", "int or string");
+  }();
+  SystemLib::throwInvalidArgumentExceptionObject(
+    folly::sformat(
+      "Invalid {} key: expected a key of type {}, {} given",
+      kind_type.first, kind_type.second, describeKeyType(key)
+    )
+  );
+}
+
+void throwInvalidArrayKeyException(const StringData* key, const ArrayData* ad) {
+  auto const tv = make_tv<KindOfString>(const_cast<StringData*>(key));
+  throwInvalidArrayKeyException(&tv, ad);
+}
+
+void throwOOBArrayKeyException(TypedValue key, const ArrayData* ad) {
+  const char* type = [&]{
+    if (ad->isVecArray()) return "vec";
+    if (ad->isDict()) return "dict";
+    if (ad->isKeyset()) return "keyset";
+    assertx(ad->isPHPArray());
+    return "array";
+  }();
+  SystemLib::throwOutOfBoundsExceptionObject(
+    folly::sformat(
+      "Out of bounds {} access: invalid index {}",
+      type, describeKeyValue(key)
+    )
+  );
+}
+
+void throwOOBArrayKeyException(int64_t key, const ArrayData* ad) {
+  throwOOBArrayKeyException(make_tv<KindOfInt64>(key), ad);
+}
+
+void throwOOBArrayKeyException(const StringData* key, const ArrayData* ad) {
+  throwOOBArrayKeyException(
+    make_tv<KindOfString>(const_cast<StringData*>(key)),
+    ad
+  );
+}
+
+void throwRefInvalidArrayValueException(const ArrayData* ad) {
+  assertx(ad->isHackArray());
+  const char* type = [&]{
+    if (ad->isVecArray()) return "Vecs";
+    if (ad->isDict()) return "Dicts";
+    if (ad->isKeyset()) return "Keysets";
+    not_reached();
+  }();
+  SystemLib::throwInvalidArgumentExceptionObject(
+    folly::sformat("{} cannot contain references", type)
+  );
+}
+
+void throwRefInvalidArrayValueException(const Array& arr) {
+  throwRefInvalidArrayValueException(arr.get());
+}
+
+void throwInvalidKeysetOperation() {
+  SystemLib::throwInvalidOperationExceptionObject(s_InvalidKeysetOperationMsg);
+}
+
+void throwInvalidAdditionException(const ArrayData* ad) {
+  assertx(ad->isHackArray());
+  const char* type = [&]{
+    if (ad->isVecArray()) return "Vecs";
+    if (ad->isDict()) return "Dicts";
+    if (ad->isKeyset()) return "Keysets";
+    not_reached();
+  }();
+  SystemLib::throwInvalidOperationExceptionObject(
+    folly::sformat("{} do not support the + operator", type)
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////

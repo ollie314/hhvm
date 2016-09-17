@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,8 @@
 */
 
 #include "hphp/util/compatibility.h"
-#include "hphp/util/vdso.h"
+
+#include "hphp/util/assertions.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -23,7 +24,6 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -61,45 +61,48 @@ int dprintf(int fd, const char *format, ...) {
 
    return ret;
 }
-#endif
 
-int gettime(clockid_t which_clock, struct timespec *tp) {
-#if defined(__CYGWIN__)
-  // let's bypass trying to load vdso
-  return clock_gettime(which_clock, tp);
-#elif defined(__APPLE__) || defined(__FreeBSD__)
-  // XXX: OSX doesn't support realtime so we ignore which_clock
-  struct timeval tv;
-  int ret = gettimeofday(&tv, nullptr);
-  tp->tv_sec = tv.tv_sec;
-  tp->tv_nsec = tv.tv_usec * 1000;
-  return ret;
-#else
-  static int vdso_usable = Vdso::ClockGetTime(which_clock, tp);
-  if (vdso_usable == 0) {
-    return Vdso::ClockGetTime(which_clock, tp);
+int pipe2(int pipefd[2], int flags) {
+  if (flags & ~O_CLOEXEC) {
+    always_assert(!"Unknown flag passed to pipe2 compatibility layer");
   }
-  return clock_gettime(which_clock, tp);
-#endif
-}
 
-int64_t gettime_diff_us(const timespec &start, const timespec &end) {
-  int64_t dsec = end.tv_sec - start.tv_sec;
-  int64_t dnsec = end.tv_nsec - start.tv_nsec;
-  return dsec * 1000000 + dnsec / 1000;
+  if (pipe(pipefd) < 0) {
+    return -1;
+  }
+
+  if (flags & O_CLOEXEC) {
+    if (fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) == -1 ||
+        fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == -1) {
+      close(pipefd[0]);
+      close(pipefd[1]);
+      return -1;
+    }
+  }
+
+  return 0;
 }
+#endif
 
 int fadvise_dontneed(int fd, off_t len) {
-#if defined(__FreeBSD__) || defined(__APPLE__)
+#if defined(__FreeBSD__) || defined(__APPLE__) || defined(_MSC_VER)
   return 0;
 #else
   return posix_fadvise(fd, 0, len, POSIX_FADV_DONTNEED);
 #endif
 }
 
-#if defined(__CYGWIN__)
+int advise_out(const std::string& fileName) {
+  if (fileName.empty()) return -1;
+  int fd = open(fileName.c_str(), O_RDONLY);
+  if (fd == -1) return -1;
+  int result = fadvise_dontneed(fd, 0);
+  close(fd);
+  return result;
+}
+
+#if defined(__CYGWIN__) || defined(_MSC_VER)
 #include <windows.h>
-#include <libintl.h>
 
 // since we only support win 7+
 // capturestackbacktrace is always available in kernel
@@ -117,14 +120,13 @@ int backtrace (void **buffer, int size) {
 
 int dladdr(const void *addr, Dl_info *info) {
   MEMORY_BASIC_INFORMATION mem_info;
-  HMODULE module;
   char moduleName[MAX_PATH];
 
   if(!VirtualQuery(addr, &mem_info, sizeof(mem_info))) {
     return 0;
   }
 
-  if(!GetModuleFileNameA(module, moduleName, sizeof(moduleName))) {
+  if(!GetModuleFileNameA(nullptr, moduleName, sizeof(moduleName))) {
     return 0;
   }
 
@@ -137,10 +139,14 @@ int dladdr(const void *addr, Dl_info *info) {
   return 1;
 }
 
+#ifdef __CYGWIN__
+#include <libintl.h>
 // libbfd on cygwin is broken, stub dgettext to make linker unstupid
 char * libintl_dgettext(const char *domainname, const char *msgid) {
   return dgettext(domainname, msgid);
 }
+#endif
+
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////

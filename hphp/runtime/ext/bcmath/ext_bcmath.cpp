@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,7 +15,7 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/bcmath/bcmath.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include <folly/ScopeGuard.h>
@@ -23,8 +23,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class bcmath_data {
-public:
+struct bcmath_data {
   bcmath_data() {
     // we can't really call bc_init_numbers() that calls into this constructor
     data._zero_ = _bc_new_num_ex (1,0,1);
@@ -39,6 +38,15 @@ public:
 static IMPLEMENT_THREAD_LOCAL(bcmath_data, s_globals);
 
 ///////////////////////////////////////////////////////////////////////////////
+
+static int64_t adjust_scale(int64_t scale) {
+  if (scale < 0) {
+    scale = BCG(bc_precision);
+    if (scale < 0) scale = 0;
+  }
+  if ((uint64_t)scale > StringData::MaxSize) return StringData::MaxSize;
+  return scale;
+}
 
 static void php_str2num(bc_num *num, const char *str) {
   const char *p;
@@ -56,7 +64,7 @@ static bool HHVM_FUNCTION(bcscale, int64_t scale) {
 
 static String HHVM_FUNCTION(bcadd, const String& left, const String& right,
                             int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num first, second, result;
   bc_init_num(&first);
   bc_init_num(&second);
@@ -76,7 +84,7 @@ static String HHVM_FUNCTION(bcadd, const String& left, const String& right,
 
 static String HHVM_FUNCTION(bcsub, const String& left, const String& right,
                             int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num first, second, result;
   bc_init_num(&first);
   bc_init_num(&second);
@@ -96,7 +104,7 @@ static String HHVM_FUNCTION(bcsub, const String& left, const String& right,
 
 static int64_t HHVM_FUNCTION(bccomp, const String& left, const String& right,
                              int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num first, second;
   bc_init_num(&first);
   bc_init_num(&second);
@@ -110,7 +118,7 @@ static int64_t HHVM_FUNCTION(bccomp, const String& left, const String& right,
 
 static String HHVM_FUNCTION(bcmul, const String& left, const String& right,
                             int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num first, second, result;
   bc_init_num(&first);
   bc_init_num(&second);
@@ -130,7 +138,7 @@ static String HHVM_FUNCTION(bcmul, const String& left, const String& right,
 
 static Variant HHVM_FUNCTION(bcdiv, const String& left, const String& right,
                int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num first, second, result;
   bc_init_num(&first);
   bc_init_num(&second);
@@ -172,7 +180,7 @@ static Variant HHVM_FUNCTION(bcmod, const String& left, const String& right) {
 
 static String HHVM_FUNCTION(bcpow, const String& left, const String& right,
                            int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num first, second, result;
   bc_init_num(&first);
   bc_init_num(&second);
@@ -194,7 +202,7 @@ static String HHVM_FUNCTION(bcpow, const String& left, const String& right,
 
 static Variant HHVM_FUNCTION(bcpowmod, const String& left, const String& right,
                              const String& modulus, int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num first, second, mod, result;
   bc_init_num(&first);
   bc_init_num(&second);
@@ -221,7 +229,7 @@ static Variant HHVM_FUNCTION(bcpowmod, const String& left, const String& right,
 
 static Variant HHVM_FUNCTION(bcsqrt, const String& operand,
                              int64_t scale /* = -1 */) {
-  if (scale < 0) scale = BCG(bc_precision);
+  scale = adjust_scale(scale);
   bc_num result;
   bc_init_num(&result);
   SCOPE_EXIT {
@@ -242,10 +250,9 @@ static Variant HHVM_FUNCTION(bcsqrt, const String& operand,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class bcmathExtension : public Extension {
- public:
+struct bcmathExtension final : Extension {
   bcmathExtension() : Extension("bcmath", NO_EXTENSION_VERSION_YET) {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     HHVM_FE(bcscale);
     HHVM_FE(bcadd);
     HHVM_FE(bcsub);
@@ -259,7 +266,7 @@ class bcmathExtension : public Extension {
     loadSystemlib();
   }
 
-  virtual void threadInit() {
+  void threadInit() override {
     IniSetting::Bind(this, IniSetting::PHP_INI_ALL,
                      "bcmath.scale", "0",
                      &BCG(bc_precision));

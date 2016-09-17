@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -53,6 +53,8 @@ PreClassEmitter::Prop::~Prop() {
 //=============================================================================
 // PreClassEmitter.
 
+extern const StaticString s_Closure;
+
 PreClassEmitter::PreClassEmitter(UnitEmitter& ue,
                                  Id id,
                                  const StringData* n,
@@ -60,8 +62,11 @@ PreClassEmitter::PreClassEmitter(UnitEmitter& ue,
   : m_ue(ue)
   , m_name(n)
   , m_id(id)
-  , m_hoistable(hoistable)
-{}
+  , m_hoistable(hoistable) {
+  if (n->isame(s_Closure.get())) {
+    setClosurePreClass();
+  }
+}
 
 void PreClassEmitter::init(int line1, int line2, Offset offset, Attr attrs,
                            const StringData* parent,
@@ -130,16 +135,37 @@ PreClassEmitter::lookupProp(const StringData* propName) const {
   return m_propMap[idx];
 }
 
+bool PreClassEmitter::addAbstractConstant(const StringData* n,
+                                          const StringData* typeConstraint,
+                                          const bool typeconst) {
+  auto it = m_constMap.find(n);
+  if (it != m_constMap.end()) {
+    return false;
+  }
+  PreClassEmitter::Const cns(n, typeConstraint, nullptr, nullptr, typeconst);
+  m_constMap.add(cns.name(), cns);
+  return true;
+}
+
 bool PreClassEmitter::addConstant(const StringData* n,
                                   const StringData* typeConstraint,
                                   const TypedValue* val,
-                                  const StringData* phpCode) {
+                                  const StringData* phpCode,
+                                  const bool typeconst,
+                                  const Array& typeStructure) {
   ConstMap::Builder::const_iterator it = m_constMap.find(n);
   if (it != m_constMap.end()) {
     return false;
   }
-  PreClassEmitter::Const const_(n, typeConstraint, val, phpCode);
-  m_constMap.add(const_.name(), const_);
+  TypedValue tvVal;
+  if (typeconst && !typeStructure.empty())  {
+    tvVal = make_tv<KindOfPersistentArray>(typeStructure.get());
+    assert(tvIsPlausible(tvVal));
+  } else {
+    tvVal = *val;
+  }
+  PreClassEmitter::Const cns(n, typeConstraint, &tvVal, phpCode, typeconst);
+  m_constMap.add(cns.name(), cns);
   return true;
 }
 
@@ -175,29 +201,6 @@ void PreClassEmitter::commit(RepoTxn& txn) const {
   }
 }
 
-void PreClassEmitter::setBuiltinClassInfo(const ClassInfo* info,
-                                          BuiltinCtorFunction ctorFunc,
-                                          BuiltinDtorFunction dtorFunc,
-                                          BuiltinObjExtents extents) {
-  if (info->getAttribute() & ClassInfo::IsFinal) {
-    m_attrs = m_attrs | AttrFinal;
-  }
-  if (info->getAttribute() & ClassInfo::IsAbstract) {
-    m_attrs = m_attrs | AttrAbstract;
-  }
-  if (info->getAttribute() & ClassInfo::IsTrait) {
-    m_attrs = m_attrs | AttrTrait;
-  }
-  m_attrs = m_attrs | AttrUnique;
-  m_instanceCtor = ctorFunc;
-  m_instanceDtor = dtorFunc;
-
-  assert(extents.totalSizeBytes <= std::numeric_limits<uint32_t>::max());
-  assert(extents.odOffsetBytes  <= std::numeric_limits<int32_t>::max());
-  m_builtinObjSize  = extents.totalSizeBytes - sizeof(ObjectData);
-  m_builtinODOffset = extents.odOffsetBytes;
-}
-
 const StaticString s_nativedata("__nativedata");
 
 PreClass* PreClassEmitter::create(Unit& unit) const {
@@ -221,6 +224,8 @@ PreClass* PreClassEmitter::create(Unit& unit) const {
   pc->m_traitPrecRules = m_traitPrecRules;
   pc->m_traitAliasRules = m_traitAliasRules;
   pc->m_enumBaseTy = m_enumBaseTy;
+  pc->m_numDeclMethods = m_numDeclMethods;
+  pc->m_ifaceVtableSlot = m_ifaceVtableSlot;
 
   // Set user attributes.
   [&] {
@@ -233,7 +238,7 @@ PreClass* PreClassEmitter::create(Unit& unit) const {
     if (it == m_userAttributes.end()) return;
 
     TypedValue ndiInfo = it->second;
-    if (ndiInfo.m_type != KindOfArray) return;
+    if (!isArrayType(ndiInfo.m_type)) return;
 
     // Use the first string label which references a registered type.  In
     // practice, there should generally only be one item and it should be a
@@ -271,17 +276,28 @@ PreClass* PreClassEmitter::create(Unit& unit) const {
   PreClass::ConstMap::Builder constBuild;
   for (unsigned i = 0; i < m_constMap.size(); ++i) {
     const Const& const_ = m_constMap[i];
+    TypedValueAux tvaux;
+    if (const_.isAbstract()) {
+      tvWriteUninit(&tvaux);
+      tvaux.constModifiers().m_isAbstract = true;
+    } else {
+      tvCopy(const_.val(), tvaux);
+      tvaux.constModifiers().m_isAbstract = false;
+    }
+
+    tvaux.constModifiers().m_isType = const_.isTypeconst();
+
     constBuild.add(const_.name(), PreClass::Const(const_.name(),
-                                                  const_.typeConstraint(),
-                                                  const_.val(),
+                                                  tvaux,
                                                   const_.phpCode()));
   }
   if (auto nativeConsts = Native::getClassConstants(m_name)) {
     for (auto cnsMap : *nativeConsts) {
-      auto tv = cnsMap.second;
+      TypedValueAux tvaux;
+      tvCopy(cnsMap.second, tvaux);
+      tvaux.constModifiers() = { false, false };
       constBuild.add(cnsMap.first, PreClass::Const(cnsMap.first,
-                                                   staticEmptyString(),
-                                                   tv,
+                                                   tvaux,
                                                    staticEmptyString()));
     }
   }
@@ -299,6 +315,8 @@ template<class SerDe> void PreClassEmitter::serdeMetaData(SerDe& sd) {
     (m_attrs)
     (m_parent)
     (m_docComment)
+    (m_numDeclMethods)
+    (m_ifaceVtableSlot)
 
     (m_interfaces)
     (m_usedTraits)

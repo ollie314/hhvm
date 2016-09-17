@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,33 +33,28 @@ void SSATmp::setInstruction(IRInstruction* inst, int dstId) {
 
 namespace {
 int typeNeededWords(Type t) {
-  assert(!t.equals(Type::Bottom));
-
-  if (t.subtypeOfAny(Type::Uninit, Type::InitNull,
-                     Type::ActRec, Type::RetAddr, Type::Nullptr)) {
+  if (t.subtypeOfAny(TUninit,
+                     TInitNull,
+                     TNullptr)) {
     // These don't need a register because their values are static or unused.
-    //
-    // RetAddr doesn't take any register because currently we only target x86,
-    // which takes the return address from the stack.  This knowledge should be
-    // moved to a machine-specific section once we target other architectures.
     return 0;
   }
-  if (t.maybe(Type::Nullptr)) {
-    return typeNeededWords(t - Type::Nullptr);
+  if (t.maybe(TNullptr)) {
+    return typeNeededWords(t - TNullptr);
   }
-  if (t <= Type::Ctx || t.isPtr()) {
+  if (t <= TCtx || t <= TPtrToGen) {
     // Ctx and PtrTo* may be statically unknown but always need just 1 register.
     return 1;
   }
   if (!t.isUnion()) {
     // Not a union type and not a special case: 1 register.
-    assert(IMPLIES(t <= Type::StackElem, t.isKnownDataType()));
+    assertx(IMPLIES(t <= TStkElem, t.isKnownDataType()));
     return 1;
   }
 
-  assert(t <= Type::StackElem);
+  assertx(t <= TStkElem);
 
-  // XXX(t4592459): This will return 2 for Type::Null, even though it only
+  // XXX(t4592459): This will return 2 for TNull, even though it only
   // needs 1 register (one for the type, none for the value). This is to work
   // around limitations in codegen; see the task for details. It does mean we
   // will be loading and storing garbage m_data for Null values but that's fine
@@ -84,11 +79,18 @@ Variant SSATmp::variantVal() const {
       return intVal();
     case KindOfDouble:
       return dblVal();
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       return Variant(const_cast<StringData*>(strVal()));
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
-      return const_cast<ArrayData*>(arrVal());
+      return Variant{const_cast<ArrayData*>(arrVal())};
     case KindOfObject:
     case KindOfResource:
     case KindOfRef:

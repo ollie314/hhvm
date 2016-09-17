@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,24 +16,25 @@
 #ifndef incl_HHBBC_REPRESENTATION_H_
 #define incl_HHBBC_REPRESENTATION_H_
 
+#include <list>
+#include <memory>
 #include <string>
 #include <tuple>
-#include <vector>
-#include <memory>
 #include <unordered_map>
-#include <list>
+#include <utility>
+#include <vector>
 
 #include <boost/variant.hpp>
-#include <utility>
 
 #include "hphp/util/md5.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/user-attributes.h"
+#include "hphp/runtime/vm/preclass.h"
 #include "hphp/runtime/vm/type-alias.h"
 #include "hphp/runtime/vm/type-constraint.h"
 
+#include "hphp/hhbbc/bc.h"
 #include "hphp/hhbbc/misc.h"
 #include "hphp/hhbbc/src-loc.h"
-#include "hphp/hhbbc/bc.h"
 
 namespace HPHP { namespace HHBBC {
 namespace php {
@@ -315,6 +316,11 @@ struct Func {
   bool isPairGenerator : 1;
 
   /*
+   * This is an HNI function
+   */
+  bool isNative : 1;
+
+  /*
    * All owning pointers to blocks are in this vector, which has the
    * blocks in an unspecified order.  Blocks have borrowed pointers to
    * each other to represent control flow arcs.
@@ -420,8 +426,10 @@ struct Const {
   /*
    * The value will be KindOfUninit if the class constant is defined
    * using an 86cinit method.
+   *
+   * The lack of a value represents an abstract class constant.
    */
-  Cell val;
+  folly::Optional<Cell> val;
 
   /*
    * We pass through eval'able php code and a string type constraint,
@@ -429,6 +437,8 @@ struct Const {
    */
   SString phpCode;
   SString typeConstraint;
+
+  bool isTypeconst;
 };
 
 /*
@@ -475,17 +485,18 @@ struct Class {
   std::vector<LowStringPtr> interfaceNames;
 
   /*
-   * Names of used traits, and the trait alias/precedence rules (if
-   * any).
+   * Names of used traits, number of declared (i.e., non-trait, non-inherited)
+   * methods, trait alias/precedence rules (if any).
    *
    * This is using the exact structures from the runtime PreClass.  In
-   * WholeProgram mode, we won't see these because traits will already
-   * be flattened.
+   * WholeProgram mode, we won't see these because traits will already be
+   * flattened.
    */
   std::vector<LowStringPtr> usedTraitNames;
   std::vector<PreClass::ClassRequirement> requirements;
   std::vector<PreClass::TraitPrecRule> traitPrecRules;
   std::vector<PreClass::TraitAliasRule> traitAliasRules;
+  int32_t numDeclMethods;
 
   /*
    * Methods on the class.
@@ -525,6 +536,8 @@ using TypeAlias = ::HPHP::TypeAlias;
 struct Unit {
   MD5 md5;
   SString filename;
+  bool isHHFile{false};
+  bool useStrictTypes{false};
   int preloadPriority{0};
   std::unique_ptr<Func> pseudomain;
   std::vector<std::unique_ptr<Func>> funcs;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2013 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,12 +19,14 @@
 #include "hphp/runtime/ext_zend_compat/php-src/TSRM/TSRM.h"
 
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/file.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
+
+#include <folly/portability/Unistd.h>
 
 // Unimplemented:
 // CWD_API int virtual_file_ex(cwd_state *state, const char *path, verify_path_func verify_path, int use_realpath TSRMLS_DC)
@@ -124,7 +126,11 @@ CWD_API int virtual_chown(const char *filename, uid_t owner, gid_t group, int li
     ret = -1;
 #endif
   } else {
+#ifdef _MSC_VER
+    ret = -1;
+#else
     ret = chown(translated.c_str(), owner, group);
+#endif
   }
   return ret;
 }

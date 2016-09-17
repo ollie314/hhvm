@@ -19,31 +19,29 @@
 #define incl_HPHP_XDEBUG_PROFILER_H_
 
 #include "hphp/runtime/ext/xdebug/ext_xdebug.h"
-#include "hphp/runtime/ext/xdebug/xdebug_utils.h"
+#include "hphp/runtime/ext/xdebug/util.h"
 
-#include "hphp/runtime/ext/ext_hotprofiler.h"
+#include "hphp/runtime/ext/hotprofiler/ext_hotprofiler.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 // Frame data gathered on function enter/exit.
 struct FrameData {
-  const Func* func;
   int64_t time;
+  LowPtr<const Func> func;
   Offset line; // For begin frames, the line called from
   // We don't need all 64 bits for memory_usage and we need to save space as
   // this struct is massive and we allocate a ton of them. The TraceProfiler
   // in ext_hotprofiler.cpp does the same.
   int64_t memory_usage : 63;
   bool is_func_begin : 1; // Whether or not this is an enter event
-  // If is_func_begin, then this will be the serialized aruments. Otherwise it
-  // will be the serialized return value
-  const StringData* context_str;
+  // TODO(#3704) need a string field for serialized arguments or return value.
+  template<class F> void scan(F& mark) const {}
 };
 
 // TODO(#3704) Allow user to set maximum buffer size
-class XDebugProfiler : public Profiler {
-public:
+struct XDebugProfiler final : Profiler {
   explicit XDebugProfiler() : Profiler(true) {}
   ~XDebugProfiler() {
     if (m_profilingEnabled) {
@@ -52,12 +50,12 @@ public:
     if (m_tracingEnabled) {
       disableTracing();
     }
-    smart_free(m_frameBuffer);
+    req::free(m_frameBuffer);
   }
 
   // Returns true if function enter/exit event collection is required by the
   // extension settings
-  static inline bool isCollectionNeeded() {
+  static bool isCollectionNeeded() {
     return
       XDEBUG_GLOBAL(MaxNestingLevel) ||
       XDEBUG_GLOBAL(CollectTime) ||
@@ -66,29 +64,29 @@ public:
 
   // Returns true if profiling is required by the extension settings or the
   // environment
-  static inline bool isProfilingNeeded() {
+  static bool isProfilingNeeded() {
+    static const StaticString s_profile("XDEBUG_PROFILE");
     return
       XDEBUG_GLOBAL(ProfilerEnable) ||
-      (XDEBUG_GLOBAL(ProfilerEnableTrigger) &&
-       XDebugUtils::isTriggerSet("XDEBUG_PROFILE"));
+      (XDEBUG_GLOBAL(ProfilerEnableTrigger) && xdebug_trigger_set(s_profile));
   }
 
   // Returns true if tracing is required by the extension settings or the
   // environment
-  static inline bool isTracingNeeded() {
+  static bool isTracingNeeded() {
+    static const StaticString s_trace("XDEBUG_TRACE");
     return
       XDEBUG_GLOBAL(AutoTrace) ||
-      (XDEBUG_GLOBAL(TraceEnableTrigger) &&
-       XDebugUtils::isTriggerSet("XDEBUG_TRACE"));
+      (XDEBUG_GLOBAL(TraceEnableTrigger) && xdebug_trigger_set(s_trace));
   }
 
   // Returns true if a profiler should be attached to the current thread
-  static inline bool isAttachNeeded() {
+  static bool isAttachNeeded() {
     return isCollectionNeeded() || isProfilingNeeded() || isTracingNeeded();
   }
 
   // Whether or not this profiler is collecting frame/exit enter information
-  inline bool isCollecting() {
+  bool isCollecting() {
     return
       m_profilingEnabled ||
       m_tracingEnabled ||
@@ -97,39 +95,38 @@ public:
   }
 
   // Whether or not this profiler is needed
-  inline bool isNeeded() {
+  bool isNeeded() {
     return m_maxDepth != 0 || isCollecting();
   }
 
   // Ini setting setters
-  inline void setCollectMemory(bool collect) { m_collectMemory = collect; }
-  inline void setCollectTime(bool collect) { m_collectTime = collect; }
-  inline void setMaxNestingLevel(int depth) { m_maxDepth = depth; }
+  void setCollectMemory(bool collect) { m_collectMemory = collect; }
+  void setCollectTime(bool collect) { m_collectTime = collect; }
+  void setMaxNestingLevel(int depth) { m_maxDepth = depth; }
 
   // Enables profiling. Profiling cannot be disabled.
   void enableProfiling(const String& filename, int64_t opts);
-  inline bool isProfiling() { return m_profilingEnabled; }
-  inline const String getProfilingFilename() {
+  bool isProfiling() { return m_profilingEnabled; }
+  const String getProfilingFilename() {
     return m_profilingEnabled ? m_profilingFilename : empty_string();
   }
 
   // Enable/disable tracing
   void enableTracing(const String& filename, int64_t opts);
   void disableTracing();
-  inline bool isTracing() { return m_tracingEnabled; }
-  inline const String getTracingFilename() {
+  bool isTracing() { return m_tracingEnabled; }
+  const String getTracingFilename() {
     return m_tracingEnabled ? m_tracingFilename : empty_string();
   }
 
   // Functions called on frame begin/end
-  virtual void beginFrame(const char* symbol);
-  virtual void endFrame(const TypedValue* retVal,
-                        const char* symbol,
-                        bool endMain = false);
-  virtual inline void endAllFrames() {}
+  void beginFrame(const char* symbol) override;
+  void endFrame(const TypedValue* retVal, const char* symbol,
+                bool endMain = false) override;
+  void endAllFrames() override {}
 
   // xdebug has no need to write stats to php array
-  virtual inline void writeStats(Array &ret) {}
+  void writeStats(Array &ret) override {}
 
   // TODO (#3704) Need some way to get stack time/memory information for when
   //              we print the stack trace
@@ -140,7 +137,7 @@ private:
 
   // Populates the passed frame data. All fields should be filled, because
   // the passed frameData is filled with junk.
-  virtual void collectFrameData(FrameData& frameData, const TypedValue* retVal);
+  void collectFrameData(FrameData& frameData, const TypedValue* retVal);
 
   // Helper for begin/end frame that grabs the next frame data and populates it
   // If retVal is null, this is a begin frame. Otherwise this is a frame end
@@ -149,7 +146,7 @@ private:
 
   // Helper used to convert a microseconds since epoch into the format xdebug
   // uses: microseconds since request init, as a double
-  inline double timeSinceBase(int64_t time) {
+  double timeSinceBase(int64_t time) {
     return (time - XDEBUG_GLOBAL(InitTime)) * 1.0e-6;
   }
 
@@ -241,6 +238,18 @@ private:
   // Writes the given function's name in cachegrind format
   void writeCachegrindFuncName(const Func* func, bool isTopPseudoMain);
 
+public:
+  void vscan(IMarker& mark) const override {
+    if (m_frameBuffer) m_frameBuffer->scan(mark);
+    mark(m_profilingFilename);
+    for (auto& data : m_tracingStartFrameData) {
+      data.scan(mark);
+    }
+    mark(m_tracingFilename);
+    if (m_tracingPrevBegin) m_tracingPrevBegin->scan(mark);
+  }
+
+private:
   FrameData* m_frameBuffer = nullptr;
   int64_t m_frameBufferSize = 0;
   int64_t m_nextFrameIdx = 0;
@@ -262,7 +271,7 @@ private:
 
   // Maximum stack depth allowed. 0 implies infinite
   uint64_t m_maxDepth = 0;
-  uint64_t m_depth = XDebugUtils::stackDepth(); // current stack depth
+  uint64_t m_depth = xdebug_stack_depth(); // current stack depth
 
   // When writing the tracing file in computerized and html output we need to
   // assign each begin/end frame pair an id.

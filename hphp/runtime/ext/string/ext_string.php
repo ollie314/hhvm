@@ -1,5 +1,10 @@
 <?hh
 
+namespace HH {
+newtype FormatString<T> = string;
+}
+
+namespace {
 /**
  * Returns a string with backslashes before characters that are listed in
  *   charlist parameter.
@@ -46,7 +51,7 @@ function stripcslashes(string $str): string;
  *   insert the name O'reilly into a database, you will need to escape it. It's
  *   highly recommended to use DBMS specific escape function (e.g.
  *   mysqli_real_escape_string() for MySQL or pg_escape_string() for
- *   PostgreSQL), but if the DBMS you're using does't have an escape function
+ *   PostgreSQL), but if the DBMS you're using doesn't have an escape function
  *   and the DBMS uses \ to escape special chars, you can use this function.
  *   This would only be to get the data into the database, the extra \ will not
  *   be inserted. Having the PHP directive magic_quotes_sybase set to on will
@@ -220,7 +225,7 @@ function lcfirst(string $str): string;
  *
  */
 <<__Native>>
-function ucwords(string $str): string;
+function ucwords(string $str, string $delimiters = " \t\r\n\f\v"): string;
 
 /**
  * This function tries to return a string with all NUL bytes, HTML and PHP
@@ -1711,3 +1716,4 @@ function soundex(string $str): mixed;
  */
 <<__IsFoldable, __Native>>
 function metaphone(string $str, int $phones = 0): mixed;
+}

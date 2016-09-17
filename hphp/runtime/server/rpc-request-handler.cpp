@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,21 +16,28 @@
 
 #include "hphp/runtime/server/rpc-request-handler.h"
 
-#include "hphp/runtime/server/http-request-handler.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/init-fini-node.h"
+#include "hphp/runtime/base/memory-manager.h"
+#include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/server/server-stats.h"
-#include "hphp/runtime/server/http-protocol.h"
-#include "hphp/runtime/server/access-log.h"
-#include "hphp/runtime/server/source-root-info.h"
-#include "hphp/runtime/server/request-uri.h"
 #include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/std/ext_std_output.h"
-#include "hphp/runtime/base/php-globals.h"
-#include "hphp/runtime/vm/vm-regs.h"
-#include "hphp/util/process.h"
+#include "hphp/runtime/server/access-log.h"
+#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/server/http-request-handler.h"
+#include "hphp/runtime/server/request-uri.h"
 #include "hphp/runtime/server/satellite-server.h"
-#include "hphp/system/constants.h"
+#include "hphp/runtime/server/server-stats.h"
+#include "hphp/runtime/server/source-root-info.h"
+#include "hphp/runtime/vm/debugger-hook.h"
+#include "hphp/runtime/vm/vm-regs.h"
+
+#include "hphp/util/process.h"
+#include "hphp/util/stack-trace.h"
 
 #include <folly/ScopeGuard.h>
 
@@ -38,6 +45,12 @@ using std::set;
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+IMPLEMENT_THREAD_LOCAL(AccessLog::ThreadData,
+                       RPCRequestHandler::s_accessLogThreadData);
+
+AccessLog RPCRequestHandler::s_accessLog(
+  &(RPCRequestHandler::getAccessLogThreadData));
 
 RPCRequestHandler::RPCRequestHandler(int timeout, bool info)
   : RequestHandler(timeout),
@@ -48,19 +61,26 @@ RPCRequestHandler::RPCRequestHandler(int timeout, bool info)
 }
 
 RPCRequestHandler::~RPCRequestHandler() {
-  cleanupState();
+  if (vmStack().isAllocated()) cleanupState();
 }
 
 void RPCRequestHandler::initState() {
   hphp_session_init();
   bool isServer = RuntimeOption::ServerExecutionMode();
+  m_context = hphp_context_init();
   if (isServer) {
-    m_context = hphp_context_init();
+    m_context->obStart(uninit_null(),
+                       0,
+                       OBFlags::Default | OBFlags::OutputDisabled);
+    m_context->obProtect(true);
   } else {
     // In command line mode, we want the xbox workers to
     // output to STDOUT
-    m_context = g_context.getNoCheck();
     m_context->obSetImplicitFlush(true);
+    m_context->obStart(uninit_null(),
+                       0,
+                       OBFlags::Default | OBFlags::WriteToStdout);
+    m_context->obProtect(true);
   }
   m_lastReset = time(0);
 
@@ -96,9 +116,10 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   ExecutionProfiler ep(ThreadInfo::RuntimeFunctions);
 
   Logger::OnNewRequest();
-  HttpRequestHandler::GetAccessLog().onNewRequest();
+  GetAccessLog().onNewRequest();
   m_context->setTransport(transport);
   transport->enableCompression();
+  InitFiniNode::RequestStart();
 
   ServerStatsHelper ssh("all", ServerStatsHelper::TRACK_MEMORY);
   Logger::Verbose("receiving %s", transport->getCommand().c_str());
@@ -107,6 +128,23 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   StackTraceNoHeap::ExtraLoggingClearer clearer;
   StackTraceNoHeap::AddExtraLogging("RPC-URL", transport->getUrl());
 
+  // Checking functions whitelist
+  const std::set<std::string> &functions = m_serverInfo->getFunctions();
+  if (!functions.empty()) {
+    auto iter = functions.find(transport->getCommand());
+    if (iter == functions.end()) {
+      transport->sendString("Forbidden", 403);
+      transport->onSendEnd();
+      GetAccessLog().log(transport, nullptr);
+      /*
+       * HPHP logs may need to access data in ServerStats, so we have to
+       * clear the hashtable after writing the log entry.
+       */
+      ServerStats::Reset();
+      return;
+    }
+  }
+
   // authentication
   const std::set<std::string> &passwords = m_serverInfo->getPasswords();
   if (!passwords.empty()) {
@@ -114,7 +152,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
     if (iter == passwords.end()) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
-      HttpRequestHandler::GetAccessLog().log(transport, nullptr);
+      GetAccessLog().log(transport, nullptr);
       /*
        * HPHP logs may need to access data in ServerStats, so we have to
        * clear the hashtable after writing the log entry.
@@ -127,7 +165,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
     if (!password.empty() && password != transport->getParam("auth")) {
       transport->sendString("Unauthorized", 401);
       transport->onSendEnd();
-      HttpRequestHandler::GetAccessLog().log(transport, nullptr);
+      GetAccessLog().log(transport, nullptr);
       /*
        * HPHP logs may need to access data in ServerStats, so we have to
        * clear the hashtable after writing the log entry.
@@ -149,7 +187,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   if (vhost->disabled()) {
     transport->sendString("Virtual host disabled.", 404);
     transport->onSendEnd();
-    HttpRequestHandler::GetAccessLog().log(transport, vhost);
+    GetAccessLog().log(transport, vhost);
     return;
   }
 
@@ -179,7 +217,7 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
   // record request for debugging purpose
   std::string tmpfile = HttpProtocol::RecordRequest(transport);
   bool ret = executePHPFunction(transport, sourceRootInfo, returnEncodeType);
-  HttpRequestHandler::GetAccessLog().log(transport, vhost);
+  GetAccessLog().log(transport, vhost);
   /*
    * HPHP logs may need to access data in ServerStats, so we have to
    * clear the hashtable after writing the log entry.
@@ -189,11 +227,16 @@ void RPCRequestHandler::handleRequest(Transport *transport) {
 }
 
 void RPCRequestHandler::abortRequest(Transport *transport) {
-  HttpRequestHandler::GetAccessLog().onNewRequest();
+  g_context.getCheck();
+  GetAccessLog().onNewRequest();
   const VirtualHost *vhost = HttpProtocol::GetVirtualHost(transport);
   assert(vhost);
   transport->sendString("Service Unavailable", 503);
-  HttpRequestHandler::GetAccessLog().log(transport, vhost);
+  GetAccessLog().log(transport, vhost);
+  if (!vmStack().isAllocated()) {
+    hphp_memory_cleanup();
+  }
+  m_reset = true;
 }
 
 const StaticString
@@ -213,6 +256,7 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     auto env = php_global(s__ENV);
     env.toArrRef().set(s_HPHP_RPC, 1);
     php_global_set(s__ENV, std::move(env));
+    InitFiniNode::GlobalsInit();
   }
 
   bool isFile = rpcFunc.rfind('.') != std::string::npos;
@@ -222,7 +266,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
   Array params;
   std::string sparams = transport->getParam("params");
   if (!sparams.empty()) {
-    Variant jparams = HHVM_FN(json_decode)(String(sparams), true);
+    Variant jparams = Variant::attach(
+      HHVM_FN(json_decode)(String(sparams), true)
+    );
     if (jparams.isArray()) {
       params = jparams.toArray();
     } else {
@@ -233,7 +279,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     transport->getArrayParam("p", sparams);
     if (!sparams.empty()) {
       for (unsigned int i = 0; i < sparams.size(); i++) {
-        Variant jparams = HHVM_FN(json_decode)(String(sparams[i]), true);
+        Variant jparams = Variant::attach(
+          HHVM_FN(json_decode)(String(sparams[i]), true)
+        );
         if (same(jparams, false)) {
           error = true;
           break;
@@ -242,7 +290,7 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
       }
     } else {
       // single string parameter, used by xbox to avoid any en/decoding
-      int size;
+      size_t size;
       const void *data = transport->getPostData(size);
       if (data && size) {
         params.append(String((char*)data, size, CopyString));
@@ -254,6 +302,10 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
     m_reset = true;
   }
   int output = transport->getIntParam("output");
+
+  // We don't debug RPC requests, so we need to detach XDebugHook if xdebug was
+  // enabled.
+  DEBUGGER_ATTACHED_ONLY(DebuggerHook::detach());
 
   int code;
   if (!error) {
@@ -322,9 +374,9 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
           assert(returnEncodeType == ReturnEncodeType::Json ||
                  returnEncodeType == ReturnEncodeType::Serialize);
           try {
-            response = (returnEncodeType == ReturnEncodeType::Json) ?
-                       HHVM_FN(json_encode)(funcRet).toString() :
-                       f_serialize(funcRet);
+            response = (returnEncodeType == ReturnEncodeType::Json)
+              ? Variant::attach(HHVM_FN(json_encode)(funcRet)).toString()
+              : f_serialize(funcRet);
           } catch (...) {
             serializeFailed = true;
           }
@@ -332,10 +384,14 @@ bool RPCRequestHandler::executePHPFunction(Transport *transport,
         }
         case 1: response = m_context->obDetachContents(); break;
         case 2:
-          response =
-            HHVM_FN(json_encode)(
-              make_map_array(s_output, m_context->obDetachContents(),
-                             s_return, HHVM_FN(json_encode)(funcRet)));
+          response = Variant::attach(HHVM_FN(json_encode)(
+            make_map_array(
+              s_output,
+              m_context->obDetachContents(),
+              s_return,
+              Variant::attach(HHVM_FN(json_encode)(funcRet))
+            )
+          )).toString();
           break;
         case 3: response = f_serialize(funcRet); break;
       }

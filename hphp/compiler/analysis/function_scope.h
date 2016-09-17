@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -44,7 +44,7 @@ DECLARE_BOOST_TYPES(ClassScope);
 DECLARE_BOOST_TYPES(ParameterExpression);
 DECLARE_BOOST_TYPES(MethodStatement);
 
-class CodeGenerator;
+struct CodeGenerator;
 
 typedef ExpressionPtr (*FunctionOptPtr)(CodeGenerator *cg,
                                         AnalysisResultConstPtr ar,
@@ -60,15 +60,14 @@ typedef std::vector< ParameterExpressionPtrIdxPair >
  * A FunctionScope corresponds to a function declaration. We store all
  * inferred types and analyzed results here, so not to pollute syntax trees.
  */
-class FunctionScope : public BlockScope,
-                      public JSON::CodeError::ISerializable,
-                      public JSON::DocTarget::ISerializable {
-public:
+struct FunctionScope : BlockScope,
+                       JSON::CodeError::ISerializable,
+                       JSON::DocTarget::ISerializable {
   /**
    * User defined functions.
    */
   FunctionScope(AnalysisResultConstPtr ar, bool method,
-                const std::string &name, StatementPtr stmt,
+                const std::string &originalName, StatementPtr stmt,
                 bool reference, int minParam, int maxParam,
                 ModifierExpressionPtr modifiers, int attribute,
                 const std::string &docComment,
@@ -77,7 +76,7 @@ public:
                 bool inPseudoMain = false);
 
   FunctionScope(FunctionScopePtr orig, AnalysisResultConstPtr ar,
-                const std::string &name, const std::string &originalName,
+                const std::string &originalName,
                 StatementPtr stmt, ModifierExpressionPtr modifiers, bool user);
 
   /**
@@ -86,10 +85,7 @@ public:
   FunctionScope(bool method, const std::string &name, bool reference);
   void setParamCounts(AnalysisResultConstPtr ar,
                       int minParam, int numDeclParam);
-  void setParamSpecs(AnalysisResultPtr ar);
   void setParamName(int index, const std::string &name);
-  void setParamDefault(int index, const char* value, int64_t len,
-                       const std::string &text);
   void setRefParam(int index);
   bool hasRefParam(int max) const;
 
@@ -102,7 +98,6 @@ public:
    */
   bool isUserFunction() const { return !m_system && !isNative(); }
   bool isSystem() const { return m_system; }
-  bool isDynamic() const { return m_dynamic; }
   bool isPublic() const;
   bool isProtected() const;
   bool isPrivate() const;
@@ -117,8 +112,6 @@ public:
   bool isDynamicInvoke() const { return m_dynamicInvoke; }
   void setDynamicInvoke();
   bool hasImpl() const;
-  void setDirectInvoke() { m_directInvoke = true; }
-  bool hasDirectInvoke() const { return m_directInvoke; }
   bool isParamCoerceMode() const;
   bool mayContainThis();
   bool isClosure() const;
@@ -126,15 +119,9 @@ public:
   void setGenerator(bool f) { m_generator = f; }
   bool isAsync() const { return m_async; }
   void setAsync(bool f) { m_async = f; }
+  bool isFromTrait() const { return m_fromTrait; }
+  void setFromTrait(bool f) { m_fromTrait = f; }
 
-  bool needsClassParam();
-
-  void setInlineSameContext(bool f) { m_inlineSameContext = f; }
-  bool getInlineSameContext() const { return m_inlineSameContext; }
-  void setContextSensitive(bool f) { m_contextSensitive = f; }
-  bool getContextSensitive() const { return m_contextSensitive; }
-  void setInlineAsExpr(bool f) { m_inlineAsExpr = f; }
-  bool getInlineAsExpr() const { return m_inlineAsExpr; }
   int nextInlineIndex() { return ++m_inlineIndex; }
 
   bool usesLSB() const { return !m_noLSB; }
@@ -150,6 +137,11 @@ public:
 
   bool needsLocalThis() const;
 
+  bool isNamed(const char* n) const;
+  bool isNamed(const std::string& n) const {
+    return isNamed(n.c_str());
+  }
+
   /**
    * Either __construct or a class-name constructor.
    */
@@ -157,16 +149,12 @@ public:
 
   const std::string &getParamName(int index) const;
 
-  const std::string &name() const {
-    return getName();
-  }
+//  const std::string &name() const {
+//    return getName();
+//  }
 
   int getRedeclaringId() const {
     return m_redeclaring;
-  }
-
-  void setDynamic() {
-    m_dynamic = true;
   }
 
   void setSystem() {
@@ -185,7 +173,7 @@ public:
    * Get/set original name of the function, without case being lowered.
    */
   const std::string &getOriginalName() const;
-  void setOriginalName(const std::string &name) { m_originalName = name; }
+  void setOriginalName(const std::string &name) { m_scopeName = name; }
 
   std::string getDocName() const;
   std::string getDocFullName() const;
@@ -193,7 +181,6 @@ public:
   /**
    * If class method, returns class::name, otherwise just name.
    */
-  std::string getFullName() const;
   std::string getOriginalFullName() const;
 
   /**
@@ -215,19 +202,12 @@ public:
    * Whether this function can be constant folded
    */
   bool isFoldable() const;
-  void setIsFoldable();
 
   /*
    * If this is a builtin function and does not need an ActRec
    */
   bool noFCallBuiltin() const;
   void setNoFCallBuiltin();
-
-  /*
-   * If this is a builtin (C++ or PHP) and can be redefined
-   */
-  bool allowOverride() const;
-  void setAllowOverride();
 
   bool needsFinallyLocals() const;
 
@@ -259,42 +239,16 @@ public:
   }
   int getOptionalParamCount() const { return getMaxParamCount() - m_minParam;}
 
-  /**
-   * What is the inferred type of this function's return.
-   * Note that for generators and async functions, this is different
-   * from what caller actually gets when calling the function.
-   */
-  void pushReturnType();
-  void setReturnType(AnalysisResultConstPtr ar, TypePtr type);
-  TypePtr getReturnType() const {
-    return m_prevReturn ? m_prevReturn : m_returnType;
-  }
-  bool popReturnType();
-  void resetReturnType();
-
-  void addRetExprToFix(ExpressionPtr e);
-  void clearRetExprs();
-  void fixRetExprs();
-
   void setOptFunction(FunctionOptPtr fn) { m_optFunction = fn; }
   FunctionOptPtr getOptFunction() const { return m_optFunction; }
 
   /**
-   * Whether this is a virtual function that needs to go through invoke().
-   * A perfect virtual will be generated as C++ virtual function without
-   * going through invoke(), but rather directly generated as obj->foo().
-   * "Overriding" is only being used by magic methods, enforcing parameter
-   * and return types.
+   * Whether this is a virtual function that needs dynamic dispatch
    */
   void setVirtual() { m_virtual = true;}
   bool isVirtual() const { return m_virtual;}
   void setHasOverride() { m_hasOverride = true; }
   bool hasOverride() const { return m_hasOverride; }
-  void setPerfectVirtual();
-  bool isPerfectVirtual() const { return m_perfectVirtual;}
-  void setOverriding(TypePtr returnType, TypePtr param1 = TypePtr(),
-                     TypePtr param2 = TypePtr());
-  bool isOverriding() const { return m_overriding;}
 
   /**
    * Whether same function name was declared twice or more.
@@ -314,58 +268,30 @@ public:
   bool isPersistent() const { return m_persistent; }
   void setPersistent(bool p) { m_persistent = p; }
 
-  bool isInlined() const { return m_inlineable; }
-  void disableInline() { m_inlineable = false; }
-
-  /* Whether we need to worry about the named return value optimization
-     for this function */
-  void setNRVOFix(bool flag) { m_nrvoFix = flag; }
-  bool getNRVOFix() const { return m_nrvoFix; }
-
   /* Indicates if a function may need to use a VarEnv or varargs (aka
    * extraArgs) at run time */
   bool mayUseVV() const;
-
-  /**
-   * Whether this function matches the specified one with same number of
-   * parameters and types and defaults, so to qualify for perfect virtuals.
-   */
-  bool matchParams(FunctionScopePtr func);
-
-  TypePtr setParamType(AnalysisResultConstPtr ar, int index, TypePtr type);
-  TypePtr getParamType(int index);
-  TypePtr getParamTypeSpec(int index) { return m_paramTypeSpecs[index]; }
 
   typedef hphp_hash_map<std::string, ExpressionPtr, string_hashi,
     string_eqstri> UserAttributeMap;
 
   UserAttributeMap& userAttributes() { return m_userAttributes;}
 
-  std::vector<std::string> getUserAttributeStringParams(const std::string& key);
+  std::vector<ScalarExpressionPtr> getUserAttributeParams(
+      const std::string& key);
 
   /**
    * Override BlockScope::outputPHP() to generate return type.
    */
-  virtual void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar);
+  void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) override;
   /**
    * Serialize the iface, not everything.
    */
-  void serialize(JSON::CodeError::OutputStream &out) const;
-  void serialize(JSON::DocTarget::OutputStream &out) const;
+  void serialize(JSON::CodeError::OutputStream &out) const override;
+  void serialize(JSON::DocTarget::OutputStream &out) const override;
 
-  bool inPseudoMain() const {
+  bool inPseudoMain() const override {
     return m_pseudoMain;
-  }
-
-  void setMagicMethod() {
-    m_magicMethod = true;
-  }
-  bool isMagicMethod() const {
-    return m_magicMethod;
-  }
-
-  void setStmtCloned(StatementPtr stmt) {
-    m_stmtCloned = stmt;
   }
 
   void setClosureVars(ExpressionListPtr closureVars) {
@@ -382,16 +308,7 @@ public:
   void addCaller(BlockScopePtr caller, bool careAboutReturn = true);
   void addNewObjCaller(BlockScopePtr caller);
 
-  ReadWriteMutex &getInlineMutex() { return m_inlineMutex; }
-
-  DECLARE_EXTENDED_BOOST_TYPES(FunctionInfo);
-
-  static void RecordFunctionInfo(std::string fname, FunctionScopePtr func);
-
-  static FunctionInfoPtr GetFunctionInfo(std::string fname);
-
-  class FunctionInfo {
-  public:
+  struct FunctionInfo {
     explicit FunctionInfo(int rva = -1)
       : m_maybeStatic(false)
       /*
@@ -433,22 +350,22 @@ public:
     std::set<int> m_refParams; // set of ref arg positions
   };
 
+  using FunctionInfoPtr = std::shared_ptr<FunctionInfo>;
+  using StringToFunctionInfoPtrMap = hphp_string_imap<FunctionInfoPtr>;
+  static void RecordFunctionInfo(std::string fname, FunctionScopePtr func);
+  static FunctionInfoPtr GetFunctionInfo(const std::string& fname);
+
 private:
   void init(AnalysisResultConstPtr ar);
 
   static StringToFunctionInfoPtrMap s_refParamInfo;
 
+  int m_coerceMode{0};
   int m_minParam;
   int m_numDeclParams;
   int m_attribute;
   std::vector<std::string> m_paramNames;
-  TypePtrVec m_paramTypes;
-  TypePtrVec m_paramTypeSpecs;
-  std::vector<std::string> m_paramDefaults;
-  std::vector<std::string> m_paramDefaultTexts;
   std::vector<bool> m_refs;
-  TypePtr m_returnType;
-  TypePtr m_prevReturn;
   ModifierExpressionPtr m_modifiers;
   UserAttributeMap m_userAttributes;
 
@@ -457,24 +374,14 @@ private:
   unsigned m_refReturn : 1; // whether it's "function &get_reference()"
   unsigned m_virtual : 1;
   unsigned m_hasOverride : 1;
-  unsigned m_perfectVirtual : 1;
-  unsigned m_dynamic : 1;
   unsigned m_dynamicInvoke : 1;
-  unsigned m_overriding : 1; // overriding a virtual function
   unsigned m_volatile : 1; // for function_exists
   unsigned m_persistent : 1;
   unsigned m_pseudoMain : 1;
-  unsigned m_magicMethod : 1;
   unsigned m_system : 1;
-  unsigned m_inlineable : 1;
   unsigned m_containsThis : 1; // contains a usage of $this?
   unsigned m_containsBareThis : 2; // $this outside object-context,
                                    // 2 if in reference context
-  unsigned m_nrvoFix : 1;
-  unsigned m_inlineAsExpr : 1;
-  unsigned m_inlineSameContext : 1;
-  unsigned m_contextSensitive : 1;
-  unsigned m_directInvoke : 1;
   unsigned m_generator : 1;
   unsigned m_async : 1;
   unsigned m_noLSB : 1;
@@ -482,15 +389,13 @@ private:
   unsigned m_hasTry : 1;
   unsigned m_hasGoto : 1;
   unsigned m_localRedeclaring : 1;
+  unsigned m_fromTrait : 1;
 
   int m_redeclaring; // multiple definition of the same function
-  StatementPtr m_stmtCloned; // cloned method body stmt
   int m_inlineIndex;
   FunctionOptPtr m_optFunction;
-  ExpressionPtrVec m_retExprsToFix;
   ExpressionListPtr m_closureVars;
   ExpressionListPtr m_closureValues;
-  ReadWriteMutex m_inlineMutex;
   unsigned m_nextID; // used when cloning generators for traits
   std::list<FunctionScopeRawPtr> m_clonedTraitOuterScope;
 };

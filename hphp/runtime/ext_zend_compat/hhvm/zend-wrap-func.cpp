@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,15 +31,18 @@ void zBoxAndProxy(TypedValue* arg) {
     tvBox(arg);
   }
   auto inner = arg->m_data.pref->tv();
-  if (inner->m_type == KindOfArray && !inner->m_data.parr->isProxyArray()) {
+  assert(!isHackArrayType(inner->m_type));
+  if (isArrayType(inner->m_type) && !inner->m_data.parr->isProxyArray()) {
     ArrayData * inner_arr = inner->m_data.parr;
-    if (inner_arr->isStatic() || inner_arr->hasMultipleRefs()) {
+    if (inner_arr->cowCheck()) {
       ArrayData * tmp = inner_arr->copy();
-      tmp->incRefCount();
-      inner_arr->decRefAndRelease();
-      inner_arr = tmp;
+      if (inner_arr != tmp) {
+        inner_arr->decRefAndRelease();
+        inner_arr = tmp;
+      }
     }
     inner->m_data.parr = ProxyArray::Make(inner_arr);
+    inner->m_type = KindOfArray;
   }
 }
 
@@ -71,7 +74,7 @@ TypedValue* zend_wrap_func(ActRec* ar) {
   auto const this_ptr = this_ptr_var.asTypedValue();
   tvBox(this_ptr);
 
-  if (ar->hasThis()) {
+  if (ar->func()->cls() && ar->hasThis()) {
     tvWriteObject(
       ar->getThis(),
       this_ptr->m_data.pref->tv()
@@ -106,11 +109,14 @@ TypedValue* zend_wrap_func(ActRec* ar) {
     exceptionStore.rethrow();
   }
 
-  // Take care of freeing the args, tearing down the ActRec,
-  // and moving the return value to the right place
-  frame_free_locals_inl(ar, ar->func()->numLocals(), return_value);
-  memcpy(&ar->m_r, return_value, sizeof(TypedValue));
-  return_value->m_type = KindOfNull;
+  // Take care of freeing the args, tearing down the ActRec, and moving the
+  // return value to the right place.  Note that frame_free_locals expects to
+  // be able to free return_value in the event of an exception, so we have to
+  // take it out of our Variant /before/ calling that.
+  TypedValue return_value_copy = *return_value;
+  return_value->m_type = KindOfNull; // clear the Variant's copy
+  frame_free_locals_inl(ar, ar->func()->numLocals(), &return_value_copy);
+  memcpy(&ar->m_r, &return_value_copy, sizeof(TypedValue));
   if (ar->func()->isReturnRef()) {
     if (!ar->m_r.m_data.pref->isReferenced()) {
       tvUnbox(&ar->m_r);

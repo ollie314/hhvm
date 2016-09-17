@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,116 +15,245 @@
 */
 
 #include "hphp/system/systemlib.h"
-#include "hphp/runtime/base/hphp-system.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/vm/unit.h"
 #include "hphp/runtime/vm/class.h"
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/builtin-functions.h"
 
-namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
+#include <vector>
 
-#define ALLOC_OBJECT_STUB_RETURN(name)                                    \
-  ObjectData::newInstance(SystemLib::s_##name##Class)
+namespace HPHP { namespace SystemLib {
+/////////////////////////////////////////////////////////////////////////////
 
-#define ALLOC_OBJECT_STUB(name)                                           \
-  ObjectData* SystemLib::Alloc##name##Object() {                          \
-    return ALLOC_OBJECT_STUB_RETURN(name);                                \
-  }
+namespace {
 
-bool SystemLib::s_inited = false;
-bool SystemLib::s_anyNonPersistentBuiltins = false;
-std::string SystemLib::s_source = "";
-HPHP::Unit* SystemLib::s_unit = nullptr;
-HPHP::Unit* SystemLib::s_hhas_unit = nullptr;
-HPHP::Unit* SystemLib::s_nativeFuncUnit = nullptr;
-HPHP::Unit* SystemLib::s_nativeClassUnit = nullptr;
-HPHP::Func* SystemLib::s_nullFunc = nullptr;
+ALWAYS_INLINE
+Object createAndConstruct(Class* cls, const Variant& args) {
+  Object inst{cls};
+  TypedValue ret;
+  g_context->invokeFunc(&ret,
+                        cls->getCtor(),
+                        args,
+                        inst.get());
+  tvRefcountedDecRef(&ret);
+  return inst;
+}
+
+}
+
+bool s_inited = false;
+bool s_anyNonPersistentBuiltins = false;
+std::string s_source;
+Unit* s_unit = nullptr;
+Unit* s_hhas_unit = nullptr;
+Unit* s_nativeFuncUnit = nullptr;
+Unit* s_nativeClassUnit = nullptr;
+Func* s_nullFunc = nullptr;
+
+/////////////////////////////////////////////////////////////////////////////
 
 #define DEFINE_SYSTEMLIB_CLASS(cls)       \
-  HPHP::Class* SystemLib::s_ ## cls ## Class = nullptr;
+  Class* s_ ## cls ## Class = nullptr;
 SYSTEMLIB_CLASSES(DEFINE_SYSTEMLIB_CLASS)
 #undef DEFINE_SYSTEMLIB_CLASS
 
-ObjectData* SystemLib::AllocStdClassObject() {
-  return ObjectData::newInstance(SystemLib::s_stdclassClass);
+Class* s_ThrowableClass;
+Class* s_BaseExceptionClass;
+Class* s_ErrorClass;
+Class* s_ArithmeticErrorClass;
+Class* s_AssertionErrorClass;
+Class* s_DivisionByZeroErrorClass;
+Class* s_ParseErrorClass;
+Class* s_TypeErrorClass;
+
+Object AllocStdClassObject() {
+  return Object{s_stdclassClass};
 }
 
-ObjectData* SystemLib::AllocPinitSentinel() {
-  return ObjectData::newInstance(SystemLib::s_pinitSentinelClass);
+Object AllocPinitSentinel() {
+  return Object{s_pinitSentinelClass};
 }
 
-#define CREATE_AND_CONSTRUCT(clsname, params)                               \
-  ObjectData* inst =                                                        \
-    ObjectData::newInstance(SystemLib::s_##clsname##Class);                 \
-  TypedValue ret;                                                           \
-  {                                                                         \
-    /* Increment refcount across call to ctor, so the object doesn't */     \
-    /* get destroyed when ctor's frame is torn down */                      \
-    CountableHelper cnt(inst);                                              \
-    g_context->invokeFunc(&ret,                                           \
-                            SystemLib::s_##clsname##Class->getCtor(),       \
-                            params,                                         \
-                            inst);                                          \
-  }                                                                         \
-  tvRefcountedDecRef(&ret);                                                 \
-  return inst;
-
-ObjectData* SystemLib::AllocExceptionObject(const Variant& message) {
-  CREATE_AND_CONSTRUCT(Exception, make_packed_array(message));
+Object AllocExceptionObject(const Variant& message) {
+  return createAndConstruct(s_ExceptionClass, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocBadMethodCallExceptionObject(const Variant& message) {
-  CREATE_AND_CONSTRUCT(BadMethodCallException, make_packed_array(message));
+Object AllocErrorObject(const Variant& message) {
+  return createAndConstruct(s_ErrorClass, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocInvalidArgumentExceptionObject(const Variant& message) {
-  CREATE_AND_CONSTRUCT(InvalidArgumentException, make_packed_array(message));
+Object AllocArithmeticErrorObject(const Variant& message) {
+  return createAndConstruct(s_ArithmeticErrorClass, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocRuntimeExceptionObject(const Variant& message) {
-  CREATE_AND_CONSTRUCT(RuntimeException, make_packed_array(message));
+Object AllocDivisionByZeroErrorObject(const Variant& message) {
+  return createAndConstruct(s_DivisionByZeroErrorClass,
+                            make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocOutOfBoundsExceptionObject(const Variant& message) {
-  CREATE_AND_CONSTRUCT(OutOfBoundsException, make_packed_array(message));
+Object AllocParseErrorObject(const Variant& message) {
+  return createAndConstruct(s_ParseErrorClass, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocInvalidOperationExceptionObject(const Variant& message) {
-  CREATE_AND_CONSTRUCT(InvalidOperationException, make_packed_array(message));
+Object AllocTypeErrorObject(const Variant& message) {
+  return createAndConstruct(s_TypeErrorClass, make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocDOMExceptionObject(const Variant& message, const Variant& code) {
-  CREATE_AND_CONSTRUCT(DOMException, make_packed_array(message, code));
+Object AllocBadMethodCallExceptionObject(const Variant& message) {
+  return createAndConstruct(s_BadMethodCallExceptionClass,
+                            make_packed_array(message));
 }
 
-ObjectData*
-SystemLib::AllocSoapFaultObject(const Variant& code,
-                                const Variant& message,
-                                const Variant& actor /* = null_variant */,
-                                const Variant& detail /* = null_variant */,
-                                const Variant& name /* = null_variant */,
-                                const Variant& header /* = null_variant */) {
-  CREATE_AND_CONSTRUCT(SoapFault, make_packed_array(code, message, actor,
-                                                 detail, name, header));
+Object AllocInvalidArgumentExceptionObject(const Variant& message) {
+  return createAndConstruct(s_InvalidArgumentExceptionClass,
+                            make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocLazyKVZipIterableObject(const Variant& mp) {
-  CREATE_AND_CONSTRUCT(LazyKVZipIterable, make_packed_array(mp));
+Object AllocRuntimeExceptionObject(const Variant& message) {
+  return createAndConstruct(s_RuntimeExceptionClass,
+                            make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocLazyIterableViewObject(const Variant& iterable) {
-  CREATE_AND_CONSTRUCT(LazyIterableView, make_packed_array(iterable));
+Object AllocOutOfBoundsExceptionObject(const Variant& message) {
+  return createAndConstruct(s_OutOfBoundsExceptionClass,
+                            make_packed_array(message));
 }
 
-ObjectData* SystemLib::AllocLazyKeyedIterableViewObject(const Variant& iterable) {
-  CREATE_AND_CONSTRUCT(LazyKeyedIterableView, make_packed_array(iterable));
+Object AllocInvalidOperationExceptionObject(const Variant& message) {
+  return createAndConstruct(s_InvalidOperationExceptionClass,
+                            make_packed_array(message));
 }
 
-#undef CREATE_AND_CONSTRUCT
+Object AllocDOMExceptionObject(const Variant& message,
+                                    const Variant& code) {
+  return createAndConstruct(s_DOMExceptionClass,
+                            make_packed_array(message, code));
+}
+
+Object AllocSoapFaultObject(const Variant& code,
+                                 const Variant& message,
+                                 const Variant& actor /* = null_variant */,
+                                 const Variant& detail /* = null_variant */,
+                                 const Variant& name /* = null_variant */,
+                                 const Variant& header /* = null_variant */) {
+  return createAndConstruct(
+    s_SoapFaultClass,
+    make_packed_array(code,
+                      message,
+                      actor,
+                      detail,
+                      name,
+                      header
+                     )
+  );
+}
+
+Object AllocLazyKVZipIterableObject(const Variant& mp) {
+  return createAndConstruct(s_LazyKVZipIterableClass,
+                            make_packed_array(mp));
+}
+
+Object AllocLazyIterableViewObject(const Variant& iterable) {
+  return createAndConstruct(s_LazyIterableViewClass,
+                            make_packed_array(iterable));
+}
+
+Object AllocLazyKeyedIterableViewObject(const Variant& iterable) {
+  return createAndConstruct(s_LazyKeyedIterableViewClass,
+                            make_packed_array(iterable));
+}
+
+void throwExceptionObject(const Variant& message) {
+  throw_object(AllocExceptionObject(message));
+}
+
+void throwErrorObject(const Variant& message) {
+  throw_object(AllocErrorObject(message));
+}
+
+void throwArithmeticErrorObject(const Variant& message) {
+  throw_object(AllocArithmeticErrorObject(message));
+}
+
+void throwDivisionByZeroErrorObject(const Variant& message) {
+  throw_object(AllocDivisionByZeroErrorObject(message));
+}
+
+void throwParseErrorObject(const Variant& message) {
+  throw_object(AllocParseErrorObject(message));
+}
+
+void throwTypeErrorObject(const Variant& message) {
+  throw_object(AllocTypeErrorObject(message));
+}
+
+void throwBadMethodCallExceptionObject(const Variant& message) {
+  throw_object(AllocBadMethodCallExceptionObject(message));
+}
+
+void throwInvalidArgumentExceptionObject(const Variant& message) {
+  throw_object(AllocInvalidArgumentExceptionObject(message));
+}
+
+void throwRuntimeExceptionObject(const Variant& message) {
+  throw_object(AllocRuntimeExceptionObject(message));
+}
+
+void throwOutOfBoundsExceptionObject(const Variant& message) {
+  throw_object(AllocOutOfBoundsExceptionObject(message));
+}
+
+void throwInvalidOperationExceptionObject(const Variant& message) {
+  throw_object(AllocInvalidOperationExceptionObject(message));
+}
+
+void throwDOMExceptionObject(const Variant& message,
+                             const Variant& code) {
+  throw_object(AllocDOMExceptionObject(message, code));
+}
+
+void throwSoapFaultObject(const Variant& code,
+                          const Variant& message,
+                          const Variant& actor /* = null_variant */,
+                          const Variant& detail /* = null_variant */,
+                          const Variant& name /* = null_variant */,
+                          const Variant& header /* = null_variant */) {
+  throw_object(Object{AllocSoapFaultObject(code, message,
+                                    actor, detail,
+                                    name, header)});
+}
+
+#define ALLOC_OBJECT_STUB(name)                                         \
+  Object Alloc##name##Object() {                                        \
+    return Object{s_##name##Class};                                     \
+  }
 
 ALLOC_OBJECT_STUB(Directory);
 ALLOC_OBJECT_STUB(PDOException);
 
-///////////////////////////////////////////////////////////////////////////////
+#undef ALLOC_OBJECT_STUB
+
+/////////////////////////////////////////////////////////////////////////////
+
+static std::vector<Unit*> s_persistent_units;
+
+/* To be called during process startup ONLY, before threads are spun up.
+ * Typically this will be called by HPHP::Extension::moduleInit to load an
+ * extension-specific systemlib file, or to load the main systemlib.
+ */
+void addPersistentUnit(Unit* unit) {
+  s_persistent_units.push_back(unit);
 }
 
+/* Typically called between requests in non-RepoAuthoritative mode
+ * when function renaming is enabled.
+ */
+void mergePersistentUnits() {
+  for (auto unit : s_persistent_units) {
+    unit->merge();
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////
+}} // namespace HPHP::SystemLib

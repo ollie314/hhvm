@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ICU_NUMFMT_H
 #define incl_HPHP_ICU_NUMFMT_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/unum.h>
@@ -26,8 +26,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_NumberFormatter;
 
-class NumberFormatter : public IntlError {
-public:
+struct NumberFormatter : IntlError {
   NumberFormatter() {}
   NumberFormatter(const NumberFormatter&) = delete;
   NumberFormatter& operator=(const NumberFormatter& src) {
@@ -55,7 +54,7 @@ public:
       c_NumberFormatter = Unit::lookupClass(s_NumberFormatter.get());
       assert(c_NumberFormatter);
     }
-    return ObjectData::newInstance(c_NumberFormatter);
+    return Object{c_NumberFormatter};
   }
   static NumberFormatter* Get(ObjectData* obj) {
     return GetData<NumberFormatter>(obj, s_NumberFormatter);

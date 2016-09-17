@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,9 @@
 #ifndef incl_HPHP_VM_RUNTIME_H_
 #define incl_HPHP_VM_RUNTIME_H_
 
-#include "hphp/runtime/ext/ext_generator.h"
-#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
-#include "hphp/runtime/ext/asio/async_generator.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-generator.h"
 #include "hphp/runtime/ext/std/ext_std_errorfunc.h"
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/runtime/vm/func.h"
@@ -45,6 +45,7 @@ void print_boolean(bool val);
 void raiseWarning(const StringData* sd);
 void raiseNotice(const StringData* sd);
 void raiseArrayIndexNotice(int64_t index);
+void raiseArrayKeyNotice(const StringData* key);
 
 inline Iter*
 frame_iter(const ActRec* fp, int i) {
@@ -57,12 +58,6 @@ inline TypedValue*
 frame_local(const ActRec* fp, int n) {
   return (TypedValue*)(uintptr_t(fp) -
     uintptr_t((n+1) * sizeof(TypedValue)));
-}
-
-inline TypedValue*
-frame_local_inner(const ActRec* fp, int n) {
-  TypedValue* ret = frame_local(fp, n);
-  return ret->m_type == KindOfRef ? ret->m_data.pref->tv() : ret;
 }
 
 inline Resumable*
@@ -81,48 +76,27 @@ frame_afwh(const ActRec* fp) {
   return waitHandle;
 }
 
-inline BaseGenerator*
-frame_base_generator(const ActRec* fp) {
-  assert(fp->func()->isGenerator());
-  auto resumable = frame_resumable(fp);
-  auto obj = (ObjectData*)((char*)resumable - BaseGenerator::resumableOff());
-  assert(obj->getVMClass() == c_AsyncGenerator::classof() ||
-         obj->getVMClass() == c_Generator::classof());
-  return static_cast<BaseGenerator*>(obj);
-}
-
-inline c_Generator*
+inline Generator*
 frame_generator(const ActRec* fp) {
   assert(fp->func()->isNonAsyncGenerator());
-  auto obj = frame_base_generator(fp);
-  assert(obj->getVMClass() == c_Generator::classof());
-  return static_cast<c_Generator*>(obj);
+  auto resumable = frame_resumable(fp);
+  return (Generator*)((char*)resumable - Generator::resumableOff());
 }
 
-inline c_AsyncGenerator*
+inline AsyncGenerator*
 frame_async_generator(const ActRec* fp) {
   assert(fp->func()->isAsyncGenerator());
-  auto obj = frame_base_generator(fp);
-  assert(obj->getVMClass() == c_AsyncGenerator::classof());
-  return static_cast<c_AsyncGenerator*>(obj);
+  auto resumable = frame_resumable(fp);
+  return (AsyncGenerator*)((char*)resumable -
+    AsyncGenerator::resumableOff());
 }
 
-/*
- * 'Unwinding' versions of the below frame_free_locals_* functions
- * zero locals and the $this pointer.
- *
- * This is necessary during unwinding because another object being
- * destructed by the unwind may decide to do a debug_backtrace and
- * read a destructed value.
- */
-
-template<bool unwinding>
 void ALWAYS_INLINE
 frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
   assert(numLocals == fp->m_func->numLocals());
-  assert(!fp->hasInvName());
   // Check if the frame has a VarEnv or if it has extraArgs
-  if (UNLIKELY(fp->m_varEnv != nullptr)) {
+  if (UNLIKELY(fp->func()->attrs() & AttrMayUseVV) &&
+      UNLIKELY(fp->m_varEnv != nullptr)) {
     if (fp->hasVarEnv()) {
       // If there is a VarEnv, free the locals and the VarEnv
       // by calling the detach method.
@@ -133,10 +107,6 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
     assert(fp->hasExtraArgs());
     ExtraArgs* ea = fp->getExtraArgs();
     int numExtra = fp->numArgs() - fp->m_func->numNonVariadicParams();
-    if (unwinding) {
-      fp->setNumArgs(fp->m_func->numParams());
-      fp->setVarEnv(nullptr);
-    }
     ExtraArgs::deallocate(ea, numExtra);
   }
   // Free locals
@@ -146,39 +116,30 @@ frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
               fp->m_func->numLocals());
     TypedValue* loc = frame_local(fp, i);
     DataType t = loc->m_type;
-    if (IS_REFCOUNTED_TYPE(t)) {
+    if (isRefcountedType(t)) {
       uint64_t datum = loc->m_data.num;
-      if (unwinding) {
-        tvWriteUninit(loc);
-      }
       tvDecRefHelper(t, datum);
     }
   }
 }
 
-template<bool unwinding>
 void ALWAYS_INLINE
 frame_free_locals_inl_no_hook(ActRec* fp, int numLocals) {
-  frame_free_locals_helper_inl<unwinding>(fp, numLocals);
-  if (fp->hasThis()) {
-    ObjectData* this_ = fp->getThis();
-    if (unwinding) {
-      fp->setThis(nullptr);
-    }
-    decRefObj(this_);
+  frame_free_locals_helper_inl(fp, numLocals);
+  if (fp->func()->cls() && fp->hasThis()) {
+    decRefObj(fp->getThis());
   }
 }
 
 void ALWAYS_INLINE
 frame_free_locals_inl(ActRec* fp, int numLocals, TypedValue* rv) {
-  frame_free_locals_inl_no_hook<false>(fp, numLocals);
+  frame_free_locals_inl_no_hook(fp, numLocals);
   EventHook::FunctionReturn(fp, *rv);
 }
 
 void ALWAYS_INLINE
 frame_free_inl(ActRec* fp, TypedValue* rv) { // For frames with no locals
   assert(0 == fp->m_func->numLocals());
-  assert(!fp->hasInvName());
   assert(fp->m_varEnv == nullptr);
   assert(fp->hasThis());
   decRefObj(fp->getThis());
@@ -186,14 +147,17 @@ frame_free_inl(ActRec* fp, TypedValue* rv) { // For frames with no locals
 }
 
 void ALWAYS_INLINE
-frame_free_locals_unwind(ActRec* fp, int numLocals, const Fault& fault) {
-  frame_free_locals_inl_no_hook<true>(fp, numLocals);
-  EventHook::FunctionUnwind(fp, fault);
+frame_free_locals_unwind(ActRec* fp, int numLocals, ObjectData* phpException) {
+  fp->setLocalsDecRefd();
+  frame_free_locals_inl_no_hook(fp, numLocals);
+  fp->trashThis();
+  fp->trashVarEnv();
+  EventHook::FunctionUnwind(fp, phpException);
 }
 
 void ALWAYS_INLINE
 frame_free_locals_no_this_inl(ActRec* fp, int numLocals, TypedValue* rv) {
-  frame_free_locals_helper_inl<false>(fp, numLocals);
+  frame_free_locals_helper_inl(fp, numLocals);
   EventHook::FunctionReturn(fp, *rv);
 }
 
@@ -203,7 +167,7 @@ frame_free_args(TypedValue* args, int count) {
   for (int i = 0; i < count; i++) {
     TypedValue* loc = args - i;
     DataType t = loc->m_type;
-    if (IS_REFCOUNTED_TYPE(t)) {
+    if (isRefcountedType(t)) {
       uint64_t datum = loc->m_data.num;
       // We don't have to write KindOfUninit here, because a
       // debug_backtrace wouldn't be able to see these slots (they are
@@ -214,19 +178,25 @@ frame_free_args(TypedValue* args, int count) {
   }
 }
 
-Unit*
-compile_file(const char* s, size_t sz, const MD5& md5, const char* fname);
-Unit* compile_string(const char* s, size_t sz, const char* fname = nullptr);
+// If set, releaseUnit will contain a pointer to any extraneous unit created due
+// to race-conditions while compiling
+Unit* compile_file(const char* s, size_t sz, const MD5& md5, const char* fname,
+                   Unit** releaseUnit = nullptr);
+Unit* compile_string(const char* s, size_t sz, const char* fname = nullptr,
+                     Unit** releaseUnit = nullptr);
 Unit* compile_systemlib_string(const char* s, size_t sz, const char* fname);
 Unit* build_native_func_unit(const HhbcExtFuncInfo* builtinFuncs,
                                  ssize_t numBuiltinFuncs);
 Unit* build_native_class_unit(const HhbcExtClassInfo* builtinClasses,
                                   ssize_t numBuiltinClasses);
 
+// Create a new class instance, and register it in the live object table if
+// necessary. The initial ref-count of the instance will be greater than zero.
 inline ObjectData*
 newInstance(Class* cls) {
   assert(cls);
   auto* inst = ObjectData::newInstance(cls);
+  assert(inst->checkCount());
   Stats::inc(cls->getDtor() ? Stats::ObjectData_new_dtor_yes
                             : Stats::ObjectData_new_dtor_no);
 
@@ -238,7 +208,7 @@ newInstance(Class* cls) {
 
 // Returns a RefData* that is already incref'd.
 RefData* lookupStaticFromClosure(ObjectData* closure,
-                                 StringData* name,
+                                 const StringData* name,
                                  bool& inited);
 
 /*
@@ -249,37 +219,15 @@ RefData* lookupStaticFromClosure(ObjectData* closure,
  * be set up before you use those parts of the runtime.
  */
 
-typedef StringData* (*CompileStringAST)(String, String);
-typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*);
+typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*,
+                                 Unit**);
 typedef Unit* (*BuildNativeFuncUnitFn)(const HhbcExtFuncInfo*, ssize_t);
 typedef Unit* (*BuildNativeClassUnitFn)(const HhbcExtClassInfo*, ssize_t);
 
-extern CompileStringAST g_hphp_compiler_serialize_code_model_for;
 extern CompileStringFn g_hphp_compiler_parse;
-extern BuildNativeFuncUnitFn g_hphp_build_native_func_unit;
-extern BuildNativeClassUnitFn g_hphp_build_native_class_unit;
-
-// always_assert tv is a plausible TypedValue*
-void assertTv(const TypedValue* tv);
 
 // returns the number of things it put on sp
 int init_closure(ActRec* ar, TypedValue* sp);
-
-/*
- * Returns whether the interface named `s' supports any non-object
- * types.
- */
-bool interface_supports_non_objects(const StringData* s);
-
-bool interface_supports_array(const StringData* s);
-bool interface_supports_string(const StringData* s);
-bool interface_supports_int(const StringData* s);
-bool interface_supports_double(const StringData* s);
-
-bool interface_supports_array(std::string const&);
-bool interface_supports_string(std::string const&);
-bool interface_supports_int(std::string const&);
-bool interface_supports_double(std::string const&);
 
 int64_t zero_error_level();
 void restore_error_level(int64_t oldLevel);

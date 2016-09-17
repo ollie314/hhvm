@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,32 +17,57 @@
 #ifndef incl_HPHP_APC_STRING_H_
 #define incl_HPHP_APC_STRING_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/apc-handle.h"
 #include "hphp/runtime/base/apc-typed-value.h"
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////
 
 /*
  * APCString holds the data to create a PHP string from APC.
- * This object only covers KindOfString. KindOfStaticString are handled
+ * This object only covers KindOfString. KindOfPersistentString are handled
  * via APCTypedValue.
  */
 struct APCString {
-  // Entry point to create an APCString
-  static APCHandle* MakeShared(DataType type, StringData* s, size_t& size);
 
-  // Return the PHP string from the APC one
-  static Variant MakeString(const APCHandle* handle) {
-    assert(handle->type() == KindOfString);
-    if (handle->isUncounted()) {
-      return APCTypedValue::fromHandle(handle)->getStringData();
-    }
-    return StringData::Make(APCString::fromHandle(handle));
+  static APCHandle::Pair MakeSharedString(StringData* str) {
+    return MakeSharedString(APCKind::SharedString, str);
+  }
+
+  static APCHandle::Pair MakeSerializedArray(StringData* str) {
+    return MakeSharedString(APCKind::SerializedArray, str);
+  }
+
+  static APCHandle::Pair MakeSerializedVec(StringData* str) {
+    return MakeSharedString(APCKind::SerializedVec, str);
+  }
+
+  static APCHandle::Pair MakeSerializedDict(StringData* str) {
+    return MakeSharedString(APCKind::SerializedDict, str);
+  }
+
+  static APCHandle::Pair MakeSerializedKeyset(StringData* str) {
+    return MakeSharedString(APCKind::SerializedKeyset, str);
+  }
+
+  static APCHandle::Pair MakeSerializedObject(const String& str) {
+    return MakeSharedString(APCKind::SerializedObject, str.get());
+  }
+
+  static void Delete(APCString* s) {
+    s->~APCString();
+    std::free(s);
   }
 
   static APCString* fromHandle(APCHandle* handle) {
+    assert(handle->checkInvariants());
+    assert(handle->kind() == APCKind::SharedString ||
+           handle->kind() == APCKind::SerializedArray ||
+           handle->kind() == APCKind::SerializedVec ||
+           handle->kind() == APCKind::SerializedDict ||
+           handle->kind() == APCKind::SerializedKeyset ||
+           handle->kind() == APCKind::SerializedObject);
     static_assert(
       offsetof(APCString, m_handle) == 0,
       "m_handle must appear first in APCString"
@@ -51,6 +76,13 @@ struct APCString {
   }
 
   static const APCString* fromHandle(const APCHandle* handle) {
+    assert(handle->checkInvariants());
+    assert(handle->kind() == APCKind::SharedString ||
+           handle->kind() == APCKind::SerializedArray ||
+           handle->kind() == APCKind::SerializedVec ||
+           handle->kind() == APCKind::SerializedDict ||
+           handle->kind() == APCKind::SerializedKeyset ||
+           handle->kind() == APCKind::SerializedObject);
     static_assert(
       offsetof(APCString, m_handle) == 0,
       "m_handle must appear first in APCString"
@@ -58,50 +90,35 @@ struct APCString {
     return reinterpret_cast<const APCString*>(handle);
   }
 
-  const APCHandle* getHandle() const {
-    return &m_handle;
-  }
-
-  APCHandle* getHandle() {
-    return &m_handle;
-  }
+  // Used when creating/destroying a local proxy (see StringData).
+  void reference() const { m_handle.referenceNonRoot(); }
+  void unreference() const { m_handle.unreferenceNonRoot(); }
 
   StringData* getStringData() {
-    return &m_data;
+    return &m_str;
   }
 
   const StringData* getStringData() const {
-    return &m_data;
+    return &m_str;
   }
 
 private:
+  static APCHandle::Pair MakeSharedString(APCKind, StringData*);
+  explicit APCString(APCKind kind) : m_handle(kind) {}
+  ~APCString() {}
   APCString(const APCString&) = delete;
   APCString& operator=(const APCString&) = delete;
-
-  explicit APCString(DataType type) : m_handle(type) {}
-  ~APCString() {}
-
-  void *operator new(size_t sz, int size) {
-    assert(sz == sizeof(APCString));
-    return malloc(sizeof(APCString) + size);
-  }
-  void operator delete(void* ptr) { free(ptr); }
-  // just to keep the compiler happy; used if the constructor throws
-  void operator delete(void* ptr, int size) { free(ptr); }
-
-  friend struct APCHandle;
-  friend struct APCArray;
-  friend struct APCObject;
 
 private:
   APCHandle m_handle;
   union {
-    StringData m_data;
+    StringData m_str;
     uintptr_t dummy[sizeof(StringData) / sizeof(uintptr_t)];
   };
 };
 
-///////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////
+
 }
 
-#endif /* incl_HPHP_APC_TYPED_VALUE_H_ */
+#endif

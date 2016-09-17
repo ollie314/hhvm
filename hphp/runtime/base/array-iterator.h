@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,24 +20,27 @@
 #include <array>
 #include <cstdint>
 
-#include "hphp/util/tls-pod-bag.h"
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/smart-ptr.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/base/array-data-defs.h"
+#include "hphp/runtime/base/collections.h"
+#include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/set-array.h"
+#include "hphp/runtime/base/req-containers.h"
+#include "hphp/runtime/base/req-ptr.h"
+#include "hphp/runtime/base/type-variant.h"
+#include "hphp/util/tls-pod-bag.h"
+#include "hphp/util/type-scan.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct TypedValue;
-class BaseVector;
-class BaseMap;
-class BaseSet;
-class c_ImmVector;
-class c_ImmSet;
-class c_Pair;
+struct BaseVector;
+struct BaseMap;
+struct BaseSet;
 struct Iter;
+struct MixedArray;
 
 enum class IterNextIndex : uint16_t {
   ArrayPacked = 0,
@@ -94,7 +97,7 @@ struct ArrayIter {
   explicit ArrayIter(ObjectData* obj);
   ArrayIter(ObjectData* obj, NoInc);
   explicit ArrayIter(const Object& obj);
-  explicit ArrayIter(const Cell& c);
+  explicit ArrayIter(Cell);
   explicit ArrayIter(const Variant& v);
 
   // Copy ctor
@@ -181,7 +184,7 @@ struct ArrayIter {
    * you need support for these cases.  And note that unlike second(),
    * secondRefPlus() will throw for non-collection types.
    */
-  const Variant& secondRef();
+  const Variant& secondRef() const;
   const Variant& secondRefPlus();
 
   // Inline version of secondRef.  Only for use in iterator helpers.
@@ -286,6 +289,7 @@ struct ArrayIter {
     return (ObjectData*)((intptr_t)m_obj & ~1);
   }
 
+  template<typename F> void scan(F& mark) const;
 private:
   friend int64_t new_iter_array(Iter*, ArrayData*, TypedValue*);
   template<bool withRef>
@@ -297,7 +301,7 @@ private:
   template <bool incRef>
   void objInit(ObjectData* obj);
 
-  void cellInit(const Cell& c);
+  void cellInit(Cell);
 
   static void VectorInit(ArrayIter* iter, ObjectData* obj);
   static void MapInit(ArrayIter* iter, ObjectData* obj);
@@ -309,58 +313,18 @@ private:
   static void IteratorObjInit(ArrayIter* iter, ObjectData* obj);
 
   typedef void(*InitFuncPtr)(ArrayIter*,ObjectData*);
-  static const InitFuncPtr initFuncTable[Collection::MaxNumTypes];
+  static const InitFuncPtr initFuncTable[];
 
   void destruct();
-
-  BaseVector* getVector() const {
-    assert(hasCollection());
-    assert(getCollectionType() == Collection::VectorType ||
-           getCollectionType() == Collection::ImmVectorType);
-    return (BaseVector*)((intptr_t)m_obj & ~1);
-  }
-  BaseMap* getMap() const {
-    assert(hasCollection());
-    assert(Collection::isMapType(getCollectionType()));
-    return (BaseMap*)((intptr_t)m_obj & ~1);
-  }
-  BaseSet* getSet() const {
-    assert(hasCollection());
-    assert(getCollectionType() == Collection::SetType ||
-           getCollectionType() == Collection::ImmSetType);
-    return (BaseSet*)((intptr_t)m_obj & ~1);
-  }
-  c_Pair* getPair() const {
-    assert(hasCollection() && getCollectionType() == Collection::PairType);
-    return (c_Pair*)((intptr_t)m_obj & ~1);
-  }
-  c_ImmVector* getImmVector() const {
-    assert(hasCollection() &&
-           getCollectionType() == Collection::ImmVectorType);
-
-    return (c_ImmVector*)((intptr_t)m_obj & ~1);
-  }
-  c_ImmSet* getImmSet() {
-    assert(hasCollection() && getCollectionType() == Collection::ImmSetType);
-    return (c_ImmSet*)((intptr_t)m_obj & ~1);
-  }
-  Collection::Type getCollectionType() const {
-    ObjectData* obj = getObject();
-    return obj->getCollectionType();
-  }
-  ObjectData* getIteratorObj() const {
-    assert(hasIteratorObj());
-    return getObject();
-  }
 
   void setArrayData(const ArrayData* ad) {
     assert((intptr_t(ad) & 1) == 0);
     m_data = ad;
     m_nextHelperIdx = IterNextIndex::ArrayMixed;
     if (ad != nullptr) {
-      if (ad->isPacked()) {
+      if (ad->hasPackedLayout()) {
         m_nextHelperIdx = IterNextIndex::ArrayPacked;
-      } else if (!ad->isMixed()) {
+      } else if (!ad->hasMixedLayout()) {
         m_nextHelperIdx = IterNextIndex::Array;
       }
     }
@@ -470,7 +434,7 @@ struct MArrayIter {
   Variant& val() {
     ArrayData* data = getArray();
     assert(data && data == getContainer());
-    assert(!data->hasMultipleRefs() || data->noCopyOnWrite());
+    assert(!data->cowCheck() || data->noCopyOnWrite());
     assert(!getResetFlag());
     assert(data->validMArrayIter(*this));
     // Normally it's not ok to modify the return value of getValueRef,
@@ -525,10 +489,11 @@ struct MArrayIter {
   bool getResetFlag() const { return m_resetFlag; }
   void setResetFlag(bool reset) { m_resetFlag = reset; }
 
+  template<typename F> void scan(F& mark) const;
 private:
   ArrayData* getData() const {
     assert(hasRef());
-    return m_ref->tv()->m_type == KindOfArray
+    return isArrayLikeType(m_ref->tv()->m_type)
       ? m_ref->tv()->m_data.parr
       : nullptr;
   }
@@ -611,9 +576,17 @@ private:
 struct MIterTable {
   struct Ent { ArrayData* array; MArrayIter* iter; };
 
-  std::array<Ent,7> ents;
+  void clear() {
+    ents.fill({nullptr, nullptr});
+    if (!extras.empty()) {
+      extras.release_if([] (const MIterTable::Ent& e) { return true; });
+    }
+  }
+
+  static constexpr int ents_size = 7;
+  std::array<Ent, ents_size> ents;
   // Slow path: we expect this `extras' list to rarely be allocated.
-  TlsPodBag<Ent,smart::Allocator<Ent>> extras;
+  TlsPodBag<Ent,req::Allocator<Ent>> extras;
 };
 static_assert(sizeof(MIterTable) == 2*64, "");
 extern __thread MIterTable tl_miter_table;
@@ -623,8 +596,7 @@ ArrayData* move_strong_iterators(ArrayData* dest, ArrayData* src);
 
 //////////////////////////////////////////////////////////////////////
 
-class CufIter {
- public:
+struct CufIter {
   CufIter() : m_func(nullptr), m_ctx(nullptr), m_name(nullptr) {}
   ~CufIter();
   const Func* func() const { return m_func; }
@@ -641,13 +613,26 @@ class CufIter {
   static constexpr uint32_t funcOff() { return offsetof(CufIter, m_func); }
   static constexpr uint32_t ctxOff()  { return offsetof(CufIter, m_ctx); }
   static constexpr uint32_t nameOff() { return offsetof(CufIter, m_name); }
+
+  template<class F> void scan(F& mark) const {
+    if (m_ctx && intptr_t(m_ctx) % 2 == 0) {
+      mark(reinterpret_cast<const ObjectData*>(m_ctx));
+    }
+    mark(m_name);
+  }
  private:
   const Func* m_func;
   void* m_ctx;
   StringData* m_name;
+
+  TYPE_SCAN_CUSTOM_FIELD(m_ctx) {
+    if (m_ctx && intptr_t(m_ctx) % 2 == 0) {
+      scanner.enqueue(reinterpret_cast<const ObjectData*>(m_ctx));
+    }
+  }
 };
 
-struct Iter {
+struct alignas(16) Iter {
   const ArrayIter&   arr() const { return m_u.aiter; }
   const MArrayIter& marr() const { return m_u.maiter; }
   const CufIter&     cuf() const { return m_u.cufiter; }
@@ -668,7 +653,217 @@ private:
     MArrayIter maiter;
     CufIter cufiter;
   } m_u;
-} __attribute__ ((__aligned__(16)));
+};
+
+//////////////////////////////////////////////////////////////////////
+// Template based iteration, bypassing ArrayIter where possible
+
+/*
+ * Iterate the values of the iterable 'it'.
+ *
+ * If it is a collection, preCollFn will be called first, with the ObjectData
+ * as a parameter. If it returns true, no further iteration will be performed.
+ * This allows for certain optimizations - see eg BaseSet::addAll. Otherwise...
+ *
+ * If its an array or a collection, the ArrayData is passed to preArrFn, which
+ * can do any necessary setup, and as with preCollFn can return true to bypass
+ * any further work. Otherwise...
+ *
+ * The array is iterated efficiently (without ArrayIter for MixedArray,
+ * PackedArray, and SetArray), and ArrFn is called for each element.
+ * Otherwise...
+ *
+ * If its an iterable object, the object is iterated using ArrayIter, and
+ * objFn is called on each element. Otherwise...
+ *
+ * If none of the above apply, the function returns false.
+ *
+ * During iteration, if objFn or arrFn returns true, iteration stops.
+ *
+ * There are also two supported shortcuts:
+ * If ObjFn is a bool, and 'it' is not an array, and not a collection,
+ * IterateV will do nothing, and return the value of objFn.
+ *
+ * If PreCollFn is a bool, and 'it' is not an array, IterateV will do nothing,
+ * and return the value of preCollFn.
+ *
+ * There are overloads that take 4 and 3 arguments respectively, that pass
+ * false for the trailing arguments as a convenience.
+ */
+
+// Overload for the case where we already know we have an array
+template <typename ArrFn, bool IncRef = true>
+bool IterateV(const ArrayData* adata, ArrFn arrFn) {
+  if (adata->empty()) return true;
+  if (adata->hasPackedLayout()) {
+    PackedArray::IterateV<ArrFn, IncRef>(adata, arrFn);
+  } else if (adata->hasMixedLayout()) {
+    MixedArray::IterateV<ArrFn, IncRef>(MixedArray::asMixed(adata), arrFn);
+  } else if (adata->isKeyset()) {
+    SetArray::Iterate<ArrFn, IncRef>(SetArray::asSet(adata), arrFn);
+  } else {
+    for (ArrayIter iter(adata); iter; ++iter) {
+      if (ArrayData::call_helper(arrFn, iter.secondRef().asTypedValue())) {
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+template <typename PreArrFn, typename ArrFn, typename PreCollFn, typename ObjFn>
+bool IterateV(const TypedValue& it,
+              PreArrFn preArrFn,
+              ArrFn arrFn,
+              PreCollFn preCollFn,
+              ObjFn objFn) {
+  assert(it.m_type != KindOfRef);
+  ArrayData* adata;
+  if (LIKELY(isArrayLikeType(it.m_type))) {
+    adata = it.m_data.parr;
+   do_array:
+    adata->incRefCount();
+    SCOPE_EXIT { decRefArr(adata); };
+    if (ArrayData::call_helper(preArrFn, adata)) return true;
+    return IterateV<ArrFn, false>(adata, arrFn);
+  }
+  if (std::is_same<PreCollFn, bool>::value) {
+    return ArrayData::call_helper(preCollFn, nullptr);
+  }
+  if (it.m_type != KindOfObject) return false;
+  auto odata = it.m_data.pobj;
+  if (odata->isCollection()) {
+    if (ArrayData::call_helper(preCollFn, odata)) return true;
+    adata = collections::asArray(odata);
+    if (adata) goto do_array;
+    assert(odata->collectionType() == CollectionType::Pair);
+    auto tv = make_tv<KindOfInt64>(0);
+    if (!ArrayData::call_helper(arrFn, collections::at(odata, &tv))) {
+      tv.m_data.num = 1;
+      ArrayData::call_helper(arrFn, collections::at(odata, &tv));
+    }
+    return true;
+  }
+  if (std::is_same<ObjFn, bool>::value) {
+    return ArrayData::call_helper(objFn, nullptr);
+  }
+  bool isIterable;
+  Object iterable = odata->iterableObject(isIterable);
+  if (!isIterable) return false;
+  for (ArrayIter iter(iterable.detach(), ArrayIter::noInc); iter; ++iter) {
+    if (ArrayData::call_helper(objFn, iter.second().asTypedValue())) break;
+  }
+  return true;
+}
+
+template <typename PreArrFn, typename ArrFn, typename PreCollFn>
+bool IterateV(const TypedValue& it,
+              PreArrFn preArrFn,
+              ArrFn arrFn,
+              PreCollFn preCollFn) {
+  return IterateV(it, preArrFn, arrFn, preCollFn, false);
+}
+
+template <typename PreArrFn, typename ArrFn>
+bool IterateV(const TypedValue& it,
+              PreArrFn preArrFn,
+              ArrFn arrFn) {
+  return IterateV(it, preArrFn, arrFn, false);
+}
+
+/*
+ * Iterate the keys and values of the iterable 'it'.
+ *
+ * The behavior is identical to that of IterateV, except the ArrFn and ObjFn
+ * callbacks are called with both a key and a value.
+ */
+
+// Overload for the case where we already know we have an array
+template <typename ArrFn, bool IncRef = true>
+bool IterateKV(const ArrayData* adata, ArrFn arrFn) {
+  if (adata->empty()) return true;
+  if (adata->hasMixedLayout()) {
+    MixedArray::IterateKV<ArrFn, IncRef>(MixedArray::asMixed(adata), arrFn);
+  } else if (adata->hasPackedLayout()) {
+    PackedArray::IterateKV<ArrFn, IncRef>(adata, arrFn);
+  } else if (adata->isKeyset()) {
+    auto fun = [&] (const TypedValue* v) { return arrFn(v, v); };
+    SetArray::Iterate<decltype(fun), IncRef>(SetArray::asSet(adata), fun);
+  } else {
+    for (ArrayIter iter(adata); iter; ++iter) {
+      if (ArrayData::call_helper(arrFn,
+                                 iter.first().asTypedValue(),
+                                 iter.secondRef().asTypedValue())) {
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+template <typename PreArrFn, typename ArrFn, typename PreCollFn, typename ObjFn>
+bool IterateKV(const TypedValue& it,
+               PreArrFn preArrFn,
+               ArrFn arrFn,
+               PreCollFn preCollFn,
+               ObjFn objFn) {
+  assert(it.m_type != KindOfRef);
+  ArrayData* adata;
+  if (LIKELY(isArrayLikeType(it.m_type))) {
+    adata = it.m_data.parr;
+   do_array:
+    adata->incRefCount();
+    SCOPE_EXIT { decRefArr(adata); };
+    if (preArrFn(adata)) return true;
+    return IterateKV<ArrFn, false>(adata, arrFn);
+  }
+  if (std::is_same<PreCollFn, bool>::value) {
+    return ArrayData::call_helper(preCollFn, nullptr);
+  }
+  if (it.m_type != KindOfObject) return false;
+  auto odata = it.m_data.pobj;
+  if (odata->isCollection()) {
+    if (ArrayData::call_helper(preCollFn, odata)) return true;
+    adata = collections::asArray(odata);
+    if (adata) goto do_array;
+    assert(odata->collectionType() == CollectionType::Pair);
+    auto tv = make_tv<KindOfInt64>(0);
+    if (!ArrayData::call_helper(arrFn, &tv, collections::at(odata, &tv))) {
+      tv.m_data.num = 1;
+      ArrayData::call_helper(arrFn, &tv, collections::at(odata, &tv));
+    }
+    return true;
+  }
+  if (std::is_same<ObjFn, bool>::value) {
+    return ArrayData::call_helper(objFn, nullptr, nullptr);
+  }
+  bool isIterable;
+  Object iterable = odata->iterableObject(isIterable);
+  if (!isIterable) return false;
+  for (ArrayIter iter(iterable.detach(), ArrayIter::noInc); iter; ++iter) {
+    if (ArrayData::call_helper(objFn,
+                               iter.first().asTypedValue(),
+                               iter.second().asTypedValue())) {
+      break;
+    }
+  }
+  return true;
+}
+
+template <typename PreArrFn, typename ArrFn, typename PreCollFn>
+bool IterateKV(const TypedValue& it,
+               PreArrFn preArrFn,
+               ArrFn arrFn,
+               PreCollFn preCollFn) {
+  return IterateKV(it, preArrFn, arrFn, preCollFn, false);
+}
+
+template <typename PreArrFn, typename ArrFn>
+bool IterateKV(const TypedValue& it,
+               PreArrFn preArrFn,
+               ArrFn arrFn) {
+  return IterateKV(it, preArrFn, arrFn, false);
+}
 
 //////////////////////////////////////////////////////////////////////
 

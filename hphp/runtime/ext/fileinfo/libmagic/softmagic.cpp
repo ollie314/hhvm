@@ -344,7 +344,7 @@ check_fmt(struct magic_set *ms, struct magic *m)
     return 0;
   }
   HPHP::Variant matches;
-  auto ret = HPHP::preg_match("~%[-0-9.]*s~", m->desc, matches, 0, 0);
+  auto ret = HPHP::preg_match("~%[-0-9.]*s~", m->desc, &matches, 0, 0);
   return ret.toInt64Val();
 }
 
@@ -448,7 +448,7 @@ mprint(struct magic_set *ms, struct magic *m)
       if (*m->value.s == '\0')
         str[strcspn(str, "\n")] = '\0';
 
-      if (m->str_flags & HHVM_FN(trim)) {
+      if (m->str_flags & STRING_TRIM) {
         char *last;
         while (isspace((unsigned char)*str))
           str++;
@@ -873,10 +873,18 @@ mconvert(struct magic_set *ms, struct magic *m, int flip)
     return 1;
   }
   case FILE_PSTRING: {
-    char *ptr1 = p->s, *ptr2 = ptr1 + file_pstring_length_size(m);
+    size_t sz = file_pstring_length_size(m);
+    char *ptr1 = p->s, *ptr2 = ptr1 + sz;
     size_t len = file_pstring_get_length(m, ptr1);
-    if (len >= sizeof(p->s))
-      len = sizeof(p->s) - 1;
+    if (len >= sizeof(p->s)) {
+      /*
+       * The size of the pascal string length (sz)
+       * is 1, 2, or 4. We need at least 1 byte for NUL
+       * termination, but we've already truncated the
+       * string by p->s, so we need to deduct sz.
+       */
+      len = sizeof(p->s) - sz;
+    }
     while (len--)
       *ptr1++ = *ptr2++;
     *ptr1 = '\0';
@@ -2017,7 +2025,7 @@ magiccheck(struct magic_set *ms, struct magic *m)
     auto retval = preg_match_all(
       pattern,
       HPHP::String(ms->search.s, ms->search.s_len, HPHP::CopyString),
-      matches,
+      &matches,
       PREG_OFFSET_CAPTURE,
       0
     );

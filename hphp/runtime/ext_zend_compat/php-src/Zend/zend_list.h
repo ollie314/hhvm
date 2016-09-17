@@ -5,7 +5,7 @@
    | Copyright (c) 1998-2013 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
-   | that is bundled with this package in the file LICENSE, and is        | 
+   | that is bundled with this package in the file LICENSE, and is        |
    | available through the world-wide-web at the following url:           |
    | http://www.zend.com/license/2_00.txt.                                |
    | If you did not receive a copy of the Zend license and are unable to  |
@@ -31,35 +31,46 @@ BEGIN_EXTERN_C()
 #define ZEND_RESOURCE_LIST_TYPE_EX  2
 
 #ifdef HHVM
+
 namespace HPHP {
-  class ZendResourceData : public ResourceData {
-    public:
-      ZendResourceData(void* ptr, int type) : ptr(ptr), type(type) {}
-      ZendResourceData() {}
-      ~ZendResourceData();
-      const String& o_getClassNameHook() const;
-      void* ptr;
-      int type;
-      int refcount;
-      int id;
-  };
-  class ZendNormalResourceDataHolder : public ZendResourceData {
-    public:
-      explicit ZendNormalResourceDataHolder(ResourceData* rd) :
-          ZendResourceData(nullptr, -1), m_rd(rd) {}
-      ~ZendNormalResourceDataHolder() {}
-      ResourceData* getResourceData() { return m_rd; }
-    private:
-      ResourceData* m_rd;
-  };
+// Represents a Zend resource. Does not actually contain the resource, but
+// just the index into a request local table of Zend resources. This is whats
+// passed around during program execution. When its ref-count drops to zero
+// and its released, the Zend resource it represents has its destructor
+// called. However, the Zend resource can be freed before ZendResourceData is
+// released.
+struct ZendResourceData : ResourceData {
+  ZendResourceData(void* ptr, int type) : ptr(ptr), type(type) {}
+  ~ZendResourceData();
+
+  DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(ZendResourceData)
+
+  const String& o_getClassNameHook() const override;
+  bool isInvalid() const override;
+
+  // The pointer to the Zend resource, always null except when
+  // calling the Zend destructor.
+  void* ptr;
+  TYPE_SCAN_CONSERVATIVE_FIELD(ptr);
+
+  int type;
+  int refcount;
+  int id;
 };
-typedef HPHP::ZendResourceData zend_rsrc_list_entry;
+
+};
+
+using zend_rsrc_list_entry = HPHP::ZendResourceData;
+
 #else
+#error This should only build with HHVM defined. old code follows as docs.
+
 typedef struct _zend_rsrc_list_entry {
   void *ptr;
   int type;
   int refcount;
 } zend_rsrc_list_entry;
+
 #endif
 
 typedef void (*rsrc_dtor_func_t)(zend_rsrc_list_entry *rsrc TSRMLS_DC);
@@ -117,7 +128,7 @@ ZEND_API int zend_fetch_list_dtor_id(char *type_name);
 extern ZEND_API int le_index_ptr;  /* list entry type for index pointers */
 
 #ifdef HHVM
-// For ZVAL_RESOURCE()
+// For ZVAL_RESOURCE(). The returned resource has already been inc-refd.
 HPHP::ResourceData *zend_list_id_to_resource_data(int id TSRMLS_DC);
 // for zval_get_resource_id()
 int zval_get_resource_id(const zval &z);
@@ -131,14 +142,14 @@ int zval_get_resource_id(const zval &z);
 #define ZEND_FETCH_RESOURCE(rsrc, rsrc_type, passed_id, default_id, resource_type_name, resource_type)  \
   rsrc = (rsrc_type) zend_fetch_resource(passed_id TSRMLS_CC, default_id, resource_type_name, NULL, 1, resource_type);  \
   ZEND_VERIFY_RESOURCE(rsrc);
-  
+
 #define ZEND_FETCH_RESOURCE_NO_RETURN(rsrc, rsrc_type, passed_id, default_id, resource_type_name, resource_type)  \
   (rsrc = (rsrc_type) zend_fetch_resource(passed_id TSRMLS_CC, default_id, resource_type_name, NULL, 1, resource_type))
 
 #define ZEND_FETCH_RESOURCE2(rsrc, rsrc_type, passed_id, default_id, resource_type_name, resource_type1, resource_type2)  \
   rsrc = (rsrc_type) zend_fetch_resource(passed_id TSRMLS_CC, default_id, resource_type_name, NULL, 2, resource_type1, resource_type2);  \
   ZEND_VERIFY_RESOURCE(rsrc);
-  
+
 #define ZEND_FETCH_RESOURCE2_NO_RETURN(rsrc, rsrc_type, passed_id, default_id, resource_type_name, resource_type1, resource_type2)  \
   (rsrc = (rsrc_type) zend_fetch_resource(passed_id TSRMLS_CC, default_id, resource_type_name, NULL, 2, resource_type1, resource_type2))
 
@@ -152,11 +163,3 @@ int zval_get_resource_id(const zval &z);
 END_EXTERN_C()
 
 #endif
-
-/*
- * Local variables:
- * tab-width: 4
- * c-basic-offset: 4
- * indent-tabs-mode: t
- * End:
- */

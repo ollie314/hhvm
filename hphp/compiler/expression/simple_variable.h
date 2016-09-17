@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,25 +22,23 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Symbol;
+struct Symbol;
 DECLARE_BOOST_TYPES(SimpleVariable);
 
-class SimpleVariable : public Expression {
-public:
+struct SimpleVariable : Expression {
   SimpleVariable(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                  const std::string &name,
                  const std::string &docComment = "");
 
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  virtual int getLocalEffects() const;
-  virtual bool isThis() const { return m_this;}
+  int getLocalEffects() const override;
+  bool isThis() const override { return m_this;}
   bool isSuperGlobal() const { return m_superGlobal || m_globals; }
-  virtual bool isRefable(bool checkError = false) const {
+  bool isRefable(bool checkError = false) const override {
     return checkError || !m_this;
   }
 
-  virtual bool canonCompare(ExpressionPtr e) const;
-  virtual void setContext(Context context);
+  void setContext(Context context) override;
 
   const std::string &getName() const { return m_name;}
   const std::string &getDocComment() const {
@@ -48,19 +46,15 @@ public:
   }
   Symbol *getSymbol() const { return m_sym; }
 
-  bool couldBeAliased() const;
-  bool canKill(bool unset) const;
   bool isHidden() const;
   bool checkUnused() const;
   bool getAlwaysStash() const { return m_alwaysStash; }
   void setAlwaysStash() { m_alwaysStash = true; }
   void updateSymbol(SimpleVariablePtr src);
-  void coalesce(SimpleVariablePtr other);
 private:
   std::string m_name;
   std::string m_docComment;
 
-  TypePtr m_superGlobalType;
   Symbol *m_sym;
   Symbol *m_originalSym;
 

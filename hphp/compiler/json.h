@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,22 +17,26 @@
 #ifndef incl_HPHP_JSON_H_
 #define incl_HPHP_JSON_H_
 
-#include "hphp/util/deprecated/base.h"
+#include <cassert>
 #include <map>
 #include <memory>
+#include <ostream>
 #include <set>
 #include <vector>
+
 #include "hphp/util/hash-map-typedefs.h"
 
 namespace HPHP {
+
 struct AnalysisResult;
+
 namespace JSON {
 ///////////////////////////////////////////////////////////////////////////////
 
-template <typename T> class _OutputStream;
-template <typename T> class _MapStream;
-template <typename T> class _ListStream;
-template <typename T> class _ISerializable;
+template <typename T> struct _OutputStream;
+template <typename T> struct _MapStream;
+template <typename T> struct _ListStream;
+template <typename T> struct _ISerializable;
 
 #define DEFINE_JSON_OUTPUT_TYPE(type) \
   struct type { \
@@ -48,8 +52,7 @@ DEFINE_JSON_OUTPUT_TYPE(DocTarget);
 std::string Escape(const char *s);
 
 template <typename T>
-class _ISerializable {
-public:
+struct _ISerializable {
   virtual ~_ISerializable() {}
 
   /**
@@ -58,8 +61,7 @@ public:
   virtual void serialize(_OutputStream<T> &out) const = 0;
 };
 
-class Name {
-public:
+struct Name {
   explicit Name(const char *name) {
     assert(name && *name);
     m_name = name;
@@ -78,8 +80,7 @@ private:
 enum class Null {};
 
 template <typename Type>
-class _OutputStream {
-public:
+struct _OutputStream {
   _OutputStream(std::ostream &out,
                 std::shared_ptr<AnalysisResult> ar) : m_out(out), m_ar(ar) {}
 
@@ -160,8 +161,7 @@ public:
   template<typename K, typename T, typename C>
   _OutputStream &operator<< (const std::map<K, T, C> &v) {
     m_out << "{";
-    for (typename std::map<K, T, C>::const_iterator iter = v.begin();
-         iter != v.end(); ++iter) {
+    for (auto iter = v.begin(); iter != v.end(); ++iter) {
       if (iter != v.begin()) m_out << ',';
       *this << Name(iter->first);
       *this << iter->second;
@@ -170,12 +170,10 @@ public:
     return *this;
   }
 
-  template<typename K, typename T, typename C>
-  _OutputStream &operator<<
-    (const hphp_hash_map<K, T, C> &v) {
+  template<typename K, typename T, typename H, typename E>
+  _OutputStream &operator<< (const hphp_hash_map<K, T, H, E> &v) {
     m_out << "{";
-    for (typename hphp_hash_map<K, T, C>::const_iterator
-           iter = v.begin(); iter != v.end(); ++iter) {
+    for (auto iter = v.begin(); iter != v.end(); ++iter) {
       if (iter != v.begin()) m_out << ',';
       *this << Name(iter->first);
       *this << iter->second;
@@ -192,13 +190,12 @@ private:
 
   std::ostream &raw() { return m_out;}
 
-  friend class _MapStream<Type>;
-  friend class _ListStream<Type>;
+  friend struct _MapStream<Type>;
+  friend struct _ListStream<Type>;
 };
 
 template <typename Type>
-class _MapStream {
-public:
+struct _MapStream {
   explicit _MapStream(_OutputStream<Type> &jout)
     : m_out(jout.raw()), m_jout(jout), m_first(true) {}
 
@@ -238,8 +235,7 @@ private:
 };
 
 template <typename Type>
-class _ListStream {
-public:
+struct _ListStream {
   explicit _ListStream(_OutputStream<Type> &jout)
     : m_out(jout.raw()), m_jout(jout), m_first(true) {}
 

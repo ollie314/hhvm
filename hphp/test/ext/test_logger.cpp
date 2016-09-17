@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,13 +16,15 @@
 
 #include "hphp/test/ext/test_logger.h"
 #include <pwd.h>
-#include <unistd.h>
 #include <sys/param.h>
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/http-client.h"
 #include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/mbstring/ext_mbstring.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
 #include "hphp/runtime/ext/url/ext_url.h"
+
+#include <folly/portability/Unistd.h>
 
 using namespace HPHP;
 
@@ -39,9 +41,9 @@ bool TestLogger::initializeRun() {
     return true;
 
   char buf[100];
-  std::string hostname;
   gethostname(buf, sizeof(buf));
-  hostname = buf;
+  buf[sizeof(buf) - 1] = '\0';
+  std::string hostname = buf;
 
   ArrayInit data(8, ArrayInit::Map{});
   data.set(String("startedTime"),  time(nullptr));
@@ -53,7 +55,7 @@ bool TestLogger::initializeRun() {
   data.set(String("gitRevision"),  getGitRevision());
   data.set(String("tags"),         make_packed_array("hphp", "c++"));
 
-  Array dataArr(data.create());
+  auto dataArr = data.toArray();
 
   Array response = postData(make_map_array("runData", dataArr));
 
@@ -105,14 +107,18 @@ Array TestLogger::postData(Array arr) {
   HttpClient client;
   StringBuffer response;
 
-  Array data = make_map_array("method", "recordTestResults", "args",
-                              HHVM_FN(json_encode)(make_packed_array(arr)));
+  Array data = make_map_array(
+    "method", "recordTestResults", "args",
+    Variant::attach(HHVM_FN(json_encode)(make_packed_array(arr)))
+  );
 
-  String str = HHVM_FN(http_build_query)(data, "", "");
+  auto const str = HHVM_FN(http_build_query)(data, "", "").toString();
 
   client.post(log_url, str.c_str(), str.length(), response);
 
-  return HHVM_FN(json_decode)(response.detach(), true).toArray();
+  return Variant::attach(
+    HHVM_FN(json_decode)(response.detach(), true)
+  ).toArray();
 }
 
 std::string TestLogger::getRepoRoot() {

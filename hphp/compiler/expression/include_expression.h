@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,9 +24,9 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(IncludeExpression);
 
-class IncludeExpression : public UnaryOpExpression, public IParseHandler {
-public:
+struct IncludeExpression : UnaryOpExpression, IParseHandler {
   static std::string CheckInclude(ConstructPtr includeExp,
+                                  FileScopePtr scope,
                                   ExpressionPtr fileExp,
                                   bool &documentRoot);
 
@@ -35,10 +35,10 @@ public:
                     ExpressionPtr exp, int op);
 
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
+  ExpressionPtr preOptimize(AnalysisResultConstPtr ar) override;
 
   // implementing IParseHandler
-  virtual void onParse(AnalysisResultConstPtr ar, FileScopePtr scope);
+  void onParse(AnalysisResultConstPtr ar, FileScopePtr scope) override;
 
   bool isReqLit() const;
   void setDocumentRoot() { m_documentRoot = true;}

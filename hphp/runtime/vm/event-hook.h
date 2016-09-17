@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,21 +16,17 @@
 #ifndef incl_HPHP_VM_EVENT_HOOK_H_
 #define incl_HPHP_VM_EVENT_HOOK_H_
 
-#include "hphp/util/ringbuffer.h"
 #include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/vm/bytecode.h"
-#include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/rds-header.h"
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/base/surprise-flags.h"
+#include "hphp/runtime/vm/act-rec.h"
+
+#include "hphp/util/ringbuffer.h"
 
 #include <atomic>
 
 namespace HPHP {
-
-//////////////////////////////////////////////////////////////////////
-
-inline bool checkConditionFlags() {
-  return RDS::header()->conditionFlags.load(std::memory_order_acquire);
-}
 
 //////////////////////////////////////////////////////////////////////
 
@@ -43,13 +39,21 @@ inline bool checkConditionFlags() {
  *  - pending out of memory exceptions
  *  - pending timeout exceptions
  */
-class EventHook {
- public:
+struct EventHook {
   enum {
     NormalFunc,
     PseudoMain,
     Eval,
   };
+  enum {
+    ProfileEnters = 1,
+    ProfileExits = 2,
+    ProfileDefault = 3,
+    ProfileFramePointers = 4,
+    ProfileConstructors = 8,
+    ProfileResumeAware = 16,
+  };
+
 
   static void Enable();
   static void Disable();
@@ -59,44 +63,53 @@ class EventHook {
   static void DisableDebug();
   static void EnableIntercept();
   static void DisableIntercept();
-  static ssize_t CheckSurprise();
-  static ssize_t GetConditionFlags();
+
+  static void DoMemoryThresholdCallback();
 
   /**
    * Event hooks -- interpreter entry points.
    */
   static inline bool FunctionCall(const ActRec* ar, int funcType) {
     ringbufferEnter(ar);
-    return UNLIKELY(checkConditionFlags())
+    return UNLIKELY(checkSurpriseFlags())
       ? onFunctionCall(ar, funcType) : true;
   }
-  static inline void FunctionResume(const ActRec* ar) {
+  static inline void FunctionResumeAwait(const ActRec* ar) {
     ringbufferEnter(ar);
-    if (UNLIKELY(checkConditionFlags())) { onFunctionResume(ar); }
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionResumeAwait(ar); }
   }
-  static inline void FunctionSuspend(const ActRec* ar, bool suspendingResumed) {
-    ringbufferExit(ar);
-    if (UNLIKELY(checkConditionFlags())) {
-      onFunctionSuspend(ar, suspendingResumed);
+  static inline void FunctionResumeYield(const ActRec* ar) {
+    ringbufferEnter(ar);
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionResumeYield(ar); }
+  }
+  static void FunctionSuspendE(ActRec* suspending, const ActRec* resumableAR) {
+    ringbufferExit(resumableAR);
+    if (UNLIKELY(checkSurpriseFlags())) {
+      onFunctionSuspendE(suspending, resumableAR);
     }
   }
-  static inline void FunctionReturn(ActRec* ar, const TypedValue& retval) {
-    ringbufferExit(ar);
-    if (UNLIKELY(checkConditionFlags())) { onFunctionReturn(ar, retval); }
+  static void FunctionSuspendR(ActRec* suspending, ObjectData* child) {
+    ringbufferExit(suspending);
+    if (UNLIKELY(checkSurpriseFlags())) {
+      onFunctionSuspendR(suspending, child);
+    }
   }
-  static inline void FunctionUnwind(const ActRec* ar, const Fault& fault) {
+  static inline void FunctionReturn(ActRec* ar, TypedValue retval) {
     ringbufferExit(ar);
-    if (UNLIKELY(checkConditionFlags())) { onFunctionUnwind(ar, fault); }
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionReturn(ar, retval); }
+  }
+  static inline void FunctionUnwind(ActRec* ar, ObjectData* phpException) {
+    ringbufferExit(ar);
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionUnwind(ar, phpException); }
   }
 
   /**
    * Event hooks -- JIT entry points.
    */
   static bool onFunctionCall(const ActRec* ar, int funcType);
-  static void onFunctionSuspend(const ActRec* ar, bool suspendingResumed);
-  static void onFunctionReturnJit(ActRec* ar, const TypedValue retval) {
-    onFunctionReturn(ar, retval);
-  }
+  static void onFunctionSuspendE(ActRec*, const ActRec*);
+  static void onFunctionSuspendR(ActRec*, ObjectData*);
+  static void onFunctionReturn(ActRec* ar, TypedValue retval);
 
 private:
   enum {
@@ -104,13 +117,15 @@ private:
     ProfileExit,
   };
 
-  static void onFunctionResume(const ActRec* ar);
-  static void onFunctionReturn(ActRec* ar, const TypedValue& retval);
-  static void onFunctionUnwind(const ActRec* ar, const Fault& fault);
+  static void onFunctionResumeAwait(const ActRec* ar);
+  static void onFunctionResumeYield(const ActRec* ar);
+  static void onFunctionUnwind(ActRec* ar, ObjectData* phpException);
 
-  static void onFunctionEnter(const ActRec* ar, int funcType, ssize_t flags);
+  static void onFunctionEnter(const ActRec* ar, int funcType,
+                              ssize_t flags, bool isResume);
   static void onFunctionExit(const ActRec* ar, const TypedValue* retval,
-                             const Fault* fault, ssize_t flags);
+                             bool unwind, ObjectData* phpException,
+                             size_t flags, bool isSuspend);
 
   static bool RunInterceptHandler(ActRec* ar);
   static const char* GetFunctionNameForProfiler(const Func* func,

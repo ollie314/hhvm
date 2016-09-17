@@ -1,8 +1,8 @@
-/*
+  /*
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,10 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "hphp/util/arena.h"
+
 #include "hphp/runtime/vm/jit/region-selection.h"
-#include "hphp/runtime/vm/verifier/cfg.h"
+
 #include "hphp/runtime/vm/jit/containers.h"
+#include "hphp/runtime/vm/jit/location.h"
+
+#include "hphp/runtime/vm/verifier/cfg.h"
+
+#include "hphp/util/arena.h"
 
 namespace HPHP { namespace jit {
 
@@ -33,7 +38,7 @@ bool isFuncEntry(const Func* func, Offset off) {
 int numInstrs(PC start, PC end) {
   int ret{};
   for (; start != end; ++ret) {
-    start += instrLen((Op*)start);
+    start += instrLen(start);
   }
   return ret;
 }
@@ -56,6 +61,7 @@ int numInstrs(PC start, PC end) {
  */
 RegionDescPtr selectMethod(const RegionContext& context) {
   using namespace HPHP::Verifier;
+  using HPHP::Verifier::Block;
 
   if (!isFuncEntry(context.func, context.bcOffset)) return nullptr;
   if (context.func->isPseudoMain()) return nullptr;
@@ -79,14 +85,15 @@ RegionDescPtr selectMethod(const RegionContext& context) {
    */
   sortRpo(graph);
   {
-    auto spOffset = Offset{context.spOffset};
+    auto spOffset = context.spOffset;
     for (Block* b = graph->first_linear; b != nullptr; b = b->next_rpo) {
       auto const start  = unit->offsetOf(b->start);
       auto const length = numInstrs(b->start, b->end);
       SrcKey sk{context.func, start, context.resumed};
       auto const rblock = ret->addBlock(sk, length, spOffset);
       blockMap[b] = rblock->id();
-      spOffset = -1; // flag SP offset as unknown for all but the first block
+      // flag SP offset as unknown for all but the first block
+      spOffset = FPInvOffset::invalid();
     }
   }
 
@@ -104,12 +111,19 @@ RegionDescPtr selectMethod(const RegionContext& context) {
 
   // Compute stack depths for each block.
   for (Block* b = graph->first_linear; b != nullptr; b = b->next_rpo) {
-    uint32_t sp = ret->block(blockMap[b])->initialSpOffset();
-    always_assert_flog(sp != -1, "sp wasn't negative one on block {}\n",
-      context.func->unit()->offsetOf(b->start));
+    auto const myId = blockMap[b];
+    auto rblock = ret->block(myId);
+    auto sp = rblock->initialSpOffset();
+
+    // Don't add unreachable blocks to the region.
+    if (!sp.isValid()) {
+      ret->deleteBlock(myId);
+      continue;
+    }
+
     for (InstrRange inst = blockInstrs(b); !inst.empty();) {
       auto const pc   = inst.popFront();
-      auto const info = instrStackTransInfo(reinterpret_cast<const Op*>(pc));
+      auto const info = instrStackTransInfo(pc);
       switch (info.kind) {
       case StackTransInfo::Kind::InsertMid:
         ++sp;
@@ -123,7 +137,7 @@ RegionDescPtr selectMethod(const RegionContext& context) {
     for (auto idx = uint32_t{0}; idx < numSuccBlocks(b); ++idx) {
       if (!b->succs[idx]) continue;
       auto const succ = ret->block(blockMap[b->succs[idx]]);
-      if (succ->initialSpOffset() != -1) {
+      if (succ->initialSpOffset().isValid()) {
         always_assert_flog(
           succ->initialSpOffset() == sp,
           "Stack depth mismatch in region method on {}\n"
@@ -131,8 +145,8 @@ RegionDescPtr selectMethod(const RegionContext& context) {
           context.func->fullName()->data(),
           context.func->unit()->offsetOf(b->start),
           context.func->unit()->offsetOf(b->succs[idx]->start),
-          sp,
-          succ->initialSpOffset()
+          sp.offset,
+          succ->initialSpOffset().offset
         );
         continue;
       }
@@ -140,7 +154,7 @@ RegionDescPtr selectMethod(const RegionContext& context) {
       FTRACE(2,
         "spOff for {} -> {}\n",
         context.func->unit()->offsetOf(b->succs[idx]->start),
-        sp
+        sp.offset
       );
     }
   }
@@ -148,23 +162,18 @@ RegionDescPtr selectMethod(const RegionContext& context) {
   /*
    * Fill the first block predictions with the live types.
    */
-  assert(!ret->empty());
-  auto const startSK = ret->start();
+  assertx(!ret->empty());
   for (auto& lt : context.liveTypes) {
-    typedef RegionDesc::Location::Tag LTag;
-
     switch (lt.location.tag()) {
-    case LTag::Stack:
-      break;
-    case LTag::Local:
-      if (lt.location.localId() < context.func->numParams()) {
-        // Only predict objectness, not the specific class type.
-        auto const type = lt.type.strictSubtypeOf(Type::Obj)
-                           ? Type::Obj
-                           : lt.type;
-        ret->entry()->addPredicted(startSK, {lt.location, type});
-      }
-      break;
+      case LTag::Local:
+        if (lt.location.localId() < context.func->numParams()) {
+          // Only predict objectness, not the specific class type.
+          auto const type = lt.type < TObj ? TObj : lt.type;
+          ret->entry()->addPreCondition({lt.location, type, DataTypeSpecific});
+        }
+        break;
+      case LTag::Stack:
+        break;
     }
   }
 

@@ -33,12 +33,12 @@ next
 Finished in genFoo
 Break at foo() on line 24 of %s/flow_gen_async.php
   23 function foo($a) {
-  24*  $result = genFoo($a)->join();
+  24*  $result = HH\Asio\join(genFoo($a));
   25   var_dump($result);
 
 next
 Break at foo() on line 25 of %s/flow_gen_async.php
-  24   $result = genFoo($a)->join();
+  24   $result = HH\Asio\join(genFoo($a));
   25*  var_dump($result);
   26 }
 
@@ -53,6 +53,12 @@ Break at test() on line 29 of %s/flow_gen_async.php
   28 function test($a) {
   29*  foo($a);
   30 }
+
+next
+Break at test() on line 30 of %s/flow_gen_async.php
+  29   foo($a);
+  30*}
+  31 
 
 continue
 int(1)
@@ -101,14 +107,20 @@ Finished in genBar
 Finished in genFoo
 Break at foo() on line 24 of %s/flow_gen_async.php
   23 function foo($a) {
-  24*  $result = genFoo($a)->join();
+  24*  $result = HH\Asio\join(genFoo($a));
   25   var_dump($result);
 
 next
 Break at foo() on line 25 of %s/flow_gen_async.php
-  24   $result = genFoo($a)->join();
+  24   $result = HH\Asio\join(genFoo($a));
   25*  var_dump($result);
   26 }
+
+next
+Break at foo() on line 26 of %s/flow_gen_async.php
+  25   var_dump($result);
+  26*}
+  27 
 
 continue
 int(3)
@@ -161,12 +173,12 @@ Break at genFoo() on line 20 of %s/flow_gen_async.php
 next
 Break at foo() on line 24 of %s/flow_gen_async.php
   23 function foo($a) {
-  24*  $result = genFoo($a)->join();
+  24*  $result = HH\Asio\join(genFoo($a));
   25   var_dump($result);
 
 next
 Break at foo() on line 25 of %s/flow_gen_async.php
-  24   $result = genFoo($a)->join();
+  24   $result = HH\Asio\join(genFoo($a));
   25*  var_dump($result);
   26 }
 
@@ -181,6 +193,12 @@ Break at test() on line 29 of %s/flow_gen_async.php
   28 function test($a) {
   29*  foo($a);
   30 }
+
+next
+Break at test() on line 30 of %s/flow_gen_async.php
+  29   foo($a);
+  30*}
+  31 
 
 continue
 int(4)
@@ -197,14 +215,14 @@ Breakpoint 1 reached at genFoo() on line 15 of %s/flow_gen_async.php
 out
 Break at foo() on line 24 of %s/flow_gen_async.php
   23 function foo($a) {
-  24*  $result = genFoo($a)->join();
+  24*  $result = HH\Asio\join(genFoo($a));
   25   var_dump($result);
 
 next
 Finished in genBar
 Finished in genFoo
 Break at foo() on line 25 of %s/flow_gen_async.php
-  24   $result = genFoo($a)->join();
+  24   $result = HH\Asio\join(genFoo($a));
   25*  var_dump($result);
   26 }
 

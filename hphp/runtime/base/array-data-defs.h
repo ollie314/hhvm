@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,15 +18,20 @@
 #define incl_HPHP_ARRAY_DEFS_H_
 
 #include "hphp/runtime/base/array-data.h"
+
 #include <algorithm>
-#include "hphp/runtime/base/complex-types.h"
+
+#include "hphp/runtime/base/string-data.h"
+#include "hphp/runtime/base/type-variant.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+extern const StaticString s_InvalidKeysetOperationMsg;
+
 namespace {
 inline bool isIntKey(const Cell* cell) {
-  return IS_INT_KEY_TYPE(cell->m_type);
+  return isIntKeyType(cell->m_type);
 }
 
 inline int64_t getIntKey(const Cell* cell) {
@@ -35,9 +40,13 @@ inline int64_t getIntKey(const Cell* cell) {
 }
 
 inline StringData* getStringKey(const Cell* cell) {
-  assert(IS_STRING_TYPE(cell->m_type));
+  assert(isStringType(cell->m_type));
   return cell->m_data.pstr;
 }
+}
+
+inline bool ArrayData::convertKey(const StringData* key, int64_t& i) const {
+  return key->isStrictlyInteger(i) && useWeakKeys();
 }
 
 inline bool ArrayData::exists(const String& k) const {
@@ -58,12 +67,12 @@ inline const Variant& ArrayData::get(const String& k, bool error) const {
 }
 
 inline const Variant& ArrayData::get(int64_t k, bool error) const {
-  auto tv = nvGet(k);
+  auto tv = error ? nvTryGet(k) : nvGet(k);
   return tv ? tvAsCVarRef(tv) : getNotFound(k, error);
 }
 
 inline const Variant& ArrayData::get(const StringData* k, bool error) const {
-  auto tv = nvGet(k);
+  auto tv = error ? nvTryGet(k) : nvGet(k);
   return tv ? tvAsCVarRef(tv) : getNotFound(k, error);
 }
 
@@ -77,6 +86,20 @@ inline ArrayData* ArrayData::lval(const Variant& k, Variant *&ret, bool copy) {
   auto const cell = k.asCell();
   return isIntKey(cell) ? lval(getIntKey(cell), ret, copy)
                         : lval(getStringKey(cell), ret, copy);
+}
+
+inline ArrayData*
+ArrayData::lvalRef(const String& k, Variant *&ret, bool copy) {
+  assert(IsValidKey(k));
+  return lvalRef(k.get(), ret, copy);
+}
+
+inline ArrayData*
+ArrayData::lvalRef(const Variant& k, Variant *&ret, bool copy) {
+  assert(IsValidKey(k));
+  auto const cell = k.asCell();
+  return isIntKey(cell) ? lvalRef(getIntKey(cell), ret, copy)
+                        : lvalRef(getStringKey(cell), ret, copy);
 }
 
 inline ArrayData* ArrayData::set(const String& k, const Variant& v,
@@ -140,226 +163,262 @@ inline Variant ArrayData::getKey(ssize_t pos) const {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-inline void ArrayData::release() {
-  return g_array_funcs.release[m_kind](this);
+inline void ArrayData::release() noexcept {
+  assert(hasExactlyOneRef());
+  return g_array_funcs.release[kind()](this);
 }
 
-inline ArrayData* ArrayData::append(const Variant& v, bool copy) {
-  return g_array_funcs.append[m_kind](this, v, copy);
+inline ArrayData* ArrayData::append(Cell v, bool copy) {
+  assertx(v.m_type != KindOfUninit);
+  return g_array_funcs.append[kind()](this, v, copy);
 }
 
 inline ArrayData* ArrayData::appendRef(Variant& v, bool copy) {
-  return g_array_funcs.appendRef[m_kind](this, v, copy);
+  return g_array_funcs.appendRef[kind()](this, v, copy);
 }
 
 inline ArrayData* ArrayData::appendWithRef(const Variant& v, bool copy) {
-  return g_array_funcs.appendWithRef[m_kind](this, v, copy);
+  return g_array_funcs.appendWithRef[kind()](this, v, copy);
 }
 
 inline const TypedValue* ArrayData::nvGet(int64_t ikey) const {
-  return g_array_funcs.nvGetInt[m_kind](this, ikey);
+  return g_array_funcs.nvGetInt[kind()](this, ikey);
 }
 
-inline const TypedValue* ArrayData::nvGetConverted(int64_t ikey) const {
-  return g_array_funcs.nvGetIntConverted[m_kind](this, ikey);
+inline const TypedValue* ArrayData::nvTryGet(int64_t ikey) const {
+  return g_array_funcs.nvTryGetInt[kind()](this, ikey);
 }
 
 inline const TypedValue* ArrayData::nvGet(const StringData* skey) const {
-  return g_array_funcs.nvGetStr[m_kind](this, skey);
+  return g_array_funcs.nvGetStr[kind()](this, skey);
+}
+
+inline const TypedValue* ArrayData::nvTryGet(const StringData* skey) const {
+  return g_array_funcs.nvTryGetStr[kind()](this, skey);
 }
 
 inline void ArrayData::nvGetKey(TypedValue* out, ssize_t pos) const {
-  g_array_funcs.nvGetKey[m_kind](this, out, pos);
+  g_array_funcs.nvGetKey[kind()](this, out, pos);
 }
 
 inline ArrayData* ArrayData::set(int64_t k, const Variant& v, bool copy) {
-  return g_array_funcs.setInt[m_kind](this, k, *v.asCell(), copy);
-}
-
-inline ArrayData* ArrayData::setConverted(int64_t k, const Variant& v,
-                                          bool copy) {
-  return g_array_funcs.setIntConverted[m_kind](this, k, *v.asCell(), copy);
+  return g_array_funcs.setInt[kind()](this, k, *v.asCell(), copy);
 }
 
 inline ArrayData* ArrayData::set(StringData* k, const Variant& v, bool copy) {
-  return g_array_funcs.setStr[m_kind](this, k, *v.asCell(), copy);
+  return g_array_funcs.setStr[kind()](this, k, *v.asCell(), copy);
+}
+
+inline ArrayData* ArrayData::set(int64_t k, Cell v, bool copy) {
+  return g_array_funcs.setInt[kind()](this, k, v, copy);
+}
+
+inline ArrayData* ArrayData::set(StringData* k, Cell v, bool copy) {
+  return g_array_funcs.setStr[kind()](this, k, v, copy);
 }
 
 inline ArrayData* ArrayData::zSet(int64_t k, RefData* v) {
-  return g_array_funcs.zSetInt[m_kind](this, k, v);
+  return g_array_funcs.zSetInt[kind()](this, k, v);
 }
 
 inline ArrayData* ArrayData::zSet(StringData* k, RefData* v) {
-  return g_array_funcs.zSetStr[m_kind](this, k, v);
+  return g_array_funcs.zSetStr[kind()](this, k, v);
 }
 
 inline ArrayData* ArrayData::zAppend(RefData* v, int64_t* key_ptr) {
-  return g_array_funcs.zAppend[m_kind](this, v, key_ptr);
+  return g_array_funcs.zAppend[kind()](this, v, key_ptr);
 }
 
 inline size_t ArrayData::vsize() const {
-  return g_array_funcs.vsize[m_kind](this);
+  return g_array_funcs.vsize[kind()](this);
 }
 
 inline const Variant& ArrayData::getValueRef(ssize_t pos) const {
-  return g_array_funcs.getValueRef[m_kind](this, pos);
+  return g_array_funcs.getValueRef[kind()](this, pos);
 }
 
 inline bool ArrayData::noCopyOnWrite() const {
   // GlobalsArray doesn't support COW.
-  return m_kind == kGlobalsKind;
+  return kind() == kGlobalsKind;
 }
 
 inline bool ArrayData::isVectorData() const {
-  return g_array_funcs.isVectorData[m_kind](this);
+  return g_array_funcs.isVectorData[kind()](this);
 }
 
 inline bool ArrayData::exists(int64_t k) const {
-  return g_array_funcs.existsInt[m_kind](this, k);
+  return g_array_funcs.existsInt[kind()](this, k);
 }
 
 inline bool ArrayData::exists(const StringData* k) const {
-  return g_array_funcs.existsStr[m_kind](this, k);
+  return g_array_funcs.existsStr[kind()](this, k);
 }
 
 inline ArrayData* ArrayData::lval(int64_t k, Variant*& ret, bool copy) {
-  return g_array_funcs.lvalInt[m_kind](this, k, ret, copy);
+  return g_array_funcs.lvalInt[kind()](this, k, ret, copy);
+}
+
+inline ArrayData* ArrayData::lvalRef(int64_t k, Variant*& ret, bool copy) {
+  return g_array_funcs.lvalIntRef[kind()](this, k, ret, copy);
 }
 
 inline ArrayData* ArrayData::lval(StringData* k, Variant*& ret, bool copy) {
-  return g_array_funcs.lvalStr[m_kind](this, k, ret, copy);
+  return g_array_funcs.lvalStr[kind()](this, k, ret, copy);
+}
+
+inline ArrayData* ArrayData::lvalRef(StringData* k, Variant*& ret, bool copy) {
+  return g_array_funcs.lvalStrRef[kind()](this, k, ret, copy);
 }
 
 inline ArrayData* ArrayData::lvalNew(Variant*& ret, bool copy) {
-  return g_array_funcs.lvalNew[m_kind](this, ret, copy);
+  return g_array_funcs.lvalNew[kind()](this, ret, copy);
 }
 
 inline ArrayData* ArrayData::lvalNewRef(Variant*& ret, bool copy) {
-  return g_array_funcs.lvalNewRef[m_kind](this, ret, copy);
+  return g_array_funcs.lvalNewRef[kind()](this, ret, copy);
 }
 
 inline ArrayData* ArrayData::setRef(int64_t k, Variant& v, bool copy) {
-  return g_array_funcs.setRefInt[m_kind](this, k, v, copy);
+  return g_array_funcs.setRefInt[kind()](this, k, v, copy);
 }
 
 inline ArrayData* ArrayData::setRef(StringData* k, Variant& v, bool copy) {
-  return g_array_funcs.setRefStr[m_kind](this, k, v, copy);
+  return g_array_funcs.setRefStr[kind()](this, k, v, copy);
 }
 
 inline ArrayData* ArrayData::add(int64_t k, const Variant& v, bool copy) {
-  return g_array_funcs.addInt[m_kind](this, k, *v.asCell(), copy);
+  return g_array_funcs.addInt[kind()](this, k, *v.asCell(), copy);
 }
 
 inline ArrayData* ArrayData::add(StringData* k, const Variant& v, bool copy) {
-  return g_array_funcs.addStr[m_kind](this, k, *v.asCell(), copy);
+  return g_array_funcs.addStr[kind()](this, k, *v.asCell(), copy);
 }
 
 inline ArrayData* ArrayData::remove(int64_t k, bool copy) {
-  return g_array_funcs.removeInt[m_kind](this, k, copy);
+  return g_array_funcs.removeInt[kind()](this, k, copy);
 }
 
 inline ArrayData* ArrayData::remove(const StringData* k, bool copy) {
-  return g_array_funcs.removeStr[m_kind](this, k, copy);
+  return g_array_funcs.removeStr[kind()](this, k, copy);
 }
 
 inline ssize_t ArrayData::iter_begin() const {
-  return g_array_funcs.iterBegin[m_kind](this);
+  return g_array_funcs.iterBegin[kind()](this);
 }
 
 inline ssize_t ArrayData::iter_last() const {
-  return g_array_funcs.iterLast[m_kind](this);
+  return g_array_funcs.iterLast[kind()](this);
 }
 
 inline ssize_t ArrayData::iter_end() const {
-  return g_array_funcs.iterEnd[m_kind](this);
+  return g_array_funcs.iterEnd[kind()](this);
 }
 
 inline ssize_t ArrayData::iter_advance(ssize_t pos) const {
-  return g_array_funcs.iterAdvance[m_kind](this, pos);
+  return g_array_funcs.iterAdvance[kind()](this, pos);
 }
 
 inline ssize_t ArrayData::iter_rewind(ssize_t pos) const {
-  return g_array_funcs.iterRewind[m_kind](this, pos);
+  return g_array_funcs.iterRewind[kind()](this, pos);
 }
 
 inline bool ArrayData::validMArrayIter(const MArrayIter& fp) const {
-  return g_array_funcs.validMArrayIter[m_kind](this, fp);
+  return g_array_funcs.validMArrayIter[kind()](this, fp);
 }
 
 inline bool ArrayData::advanceMArrayIter(MArrayIter& fp) {
-  return g_array_funcs.advanceMArrayIter[m_kind](this, fp);
+  return g_array_funcs.advanceMArrayIter[kind()](this, fp);
 }
 
-inline ArrayData* ArrayData::escalateForSort() {
-  return g_array_funcs.escalateForSort[m_kind](this);
+inline ArrayData* ArrayData::escalateForSort(SortFunction sf) {
+  return g_array_funcs.escalateForSort[kind()](this, sf);
 }
 
 inline void ArrayData::ksort(int sort_flags, bool ascending) {
-  return g_array_funcs.ksort[m_kind](this, sort_flags, ascending);
+  return g_array_funcs.ksort[kind()](this, sort_flags, ascending);
 }
 
 inline void ArrayData::sort(int sort_flags, bool ascending) {
-  return g_array_funcs.sort[m_kind](this, sort_flags, ascending);
+  return g_array_funcs.sort[kind()](this, sort_flags, ascending);
 }
 
 inline void ArrayData::asort(int sort_flags, bool ascending) {
-  return g_array_funcs.asort[m_kind](this, sort_flags, ascending);
+  return g_array_funcs.asort[kind()](this, sort_flags, ascending);
 }
 
 inline bool ArrayData::uksort(const Variant& compare) {
-  return g_array_funcs.uksort[m_kind](this, compare);
+  return g_array_funcs.uksort[kind()](this, compare);
 }
 
 inline bool ArrayData::usort(const Variant& compare) {
-  return g_array_funcs.usort[m_kind](this, compare);
+  return g_array_funcs.usort[kind()](this, compare);
 }
 
 inline bool ArrayData::uasort(const Variant& compare) {
-  return g_array_funcs.uasort[m_kind](this, compare);
+  return g_array_funcs.uasort[kind()](this, compare);
 }
 
 inline ArrayData* ArrayData::copy() const {
-  return g_array_funcs.copy[m_kind](this);
+  return g_array_funcs.copy[kind()](this);
 }
 
 inline ArrayData* ArrayData::copyWithStrongIterators() const {
-  return g_array_funcs.copyWithStrongIterators[m_kind](this);
+  return g_array_funcs.copyWithStrongIterators[kind()](this);
 }
 
-inline ArrayData* ArrayData::nonSmartCopy() const {
-  return g_array_funcs.nonSmartCopy[m_kind](this);
+inline ArrayData* ArrayData::copyStatic() const {
+  auto ret = g_array_funcs.copyStatic[kind()](this);
+  assert(ret != this && ret->isStatic());
+  return ret;
 }
 
 inline ArrayData* ArrayData::pop(Variant& value) {
-  return g_array_funcs.pop[m_kind](this, value);
+  return g_array_funcs.pop[kind()](this, value);
 }
 
 inline ArrayData* ArrayData::dequeue(Variant& value) {
-  return g_array_funcs.dequeue[m_kind](this, value);
+  return g_array_funcs.dequeue[kind()](this, value);
 }
 
-inline ArrayData* ArrayData::prepend(const Variant& value, bool copy) {
-  return g_array_funcs.prepend[m_kind](this, value, copy);
+inline ArrayData* ArrayData::prepend(Cell v, bool copy) {
+  assertx(v.m_type != KindOfUninit);
+  return g_array_funcs.prepend[kind()](this, v, copy);
+}
+
+inline ArrayData* ArrayData::toPHPArray(bool copy) {
+  return g_array_funcs.toPHPArray[kind()](this, copy);
+}
+
+inline ArrayData* ArrayData::toDict(bool copy) {
+  return g_array_funcs.toDict[kind()](this, copy);
+}
+
+inline ArrayData* ArrayData::toVec(bool copy) {
+  return g_array_funcs.toVec[kind()](this, copy);
+}
+
+inline ArrayData* ArrayData::toKeyset(bool copy) {
+  return g_array_funcs.toKeyset[kind()](this, copy);
 }
 
 inline void ArrayData::renumber() {
-  return g_array_funcs.renumber[m_kind](this);
+  return g_array_funcs.renumber[kind()](this);
 }
 
 inline void ArrayData::onSetEvalScalar() {
-  return g_array_funcs.onSetEvalScalar[m_kind](this);
+  return g_array_funcs.onSetEvalScalar[kind()](this);
 }
 
 inline ArrayData* ArrayData::escalate() const {
-  return g_array_funcs.escalate[m_kind](this);
+  return g_array_funcs.escalate[kind()](this);
 }
 
 inline ArrayData* ArrayData::plusEq(const ArrayData* elms) {
-  return g_array_funcs.plusEq[m_kind](this, elms);
+  return g_array_funcs.plusEq[kind()](this, elms);
 }
 
 inline ArrayData* ArrayData::merge(const ArrayData* elms) {
-  return g_array_funcs.merge[m_kind](this, elms);
+  return g_array_funcs.merge[kind()](this, elms);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

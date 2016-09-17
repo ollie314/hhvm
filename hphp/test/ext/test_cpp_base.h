@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,32 +32,21 @@
  * calling library functions, therefore we can easily run it under valgrind
  * and other tools to detect any coding problems.
  */
-class TestCppBase : public TestBase {
- public:
+struct TestCppBase : TestBase {
   TestCppBase();
 
   virtual bool RunTests(const std::string &which);
 
   // building blocks
   bool TestIpBlockMap();
-
-  /**
-   * Date types. This in turn tests StringData, ArrayData, String,
-   * ArrayIter, and other classes.
-   *
-   * Some of the classes are not tested here, including Object/ObjectData/
-   * SmartObject<T>. They are a lot more covered in TestCodeRun with better
-   * checking against PHP execution.
-   *
-   * Comparisons are not directly tested here, either, becuase TestCodeRun has
-   * a thorough list of comparisons and it's better to directly compare with
-   * PHP's results.
-   */
-  bool TestString();
-  bool TestArray();
-  bool TestObject();
-  bool TestVariant();
-  bool TestListAssignment();
+  bool TestIpBlockMapIni();
+  bool TestSatelliteServer();
+  bool TestSatelliteServerIni();
+  bool TestVirtualHost();
+  bool TestVirtualHostIni();
+  bool TestCollectionHdf();
+  bool TestCollectionIni();
+  bool TestVariantArrayRef();
 };
 
 ///////////////////////////////////////////////////////////////////////////////

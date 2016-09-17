@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,16 +30,15 @@ namespace HPHP { namespace jit {
  * Utility to keep a vector of state about each key, indexed by
  * key->id(), where key can be an IRInstruction, Block, or SSATmp.
  *
- * Takes an `init' element, which everything is defaulted to.  Calls
- * to reset() restore all entries to this state.
+ * Takes an `init' element, which everything is defaulted to.
  */
 template<class Key, class Info>
 struct StateVector {
-  typedef jit::vector<Info> InfoVector;
-  typedef typename InfoVector::iterator iterator;
-  typedef typename InfoVector::const_iterator const_iterator;
-  typedef typename InfoVector::reference reference;
-  typedef typename InfoVector::const_reference const_reference;
+  using InfoVector      = jit::vector<Info>;
+  using iterator        = typename InfoVector::iterator;
+  using const_iterator  = typename InfoVector::const_iterator;
+  using reference       = typename InfoVector::reference;
+  using const_reference = typename InfoVector::const_reference;
 
   static_assert(
     std::is_same<Key,Block>::value ||
@@ -49,28 +48,15 @@ struct StateVector {
   );
 
   StateVector(const IRUnit& unit, Info init)
-    : m_unit(unit)
-    , m_info(unit.numIds(nullKey))
-    , m_init(init) {
-  }
-
-  StateVector(const StateVector& other)
-    : m_unit(other.m_unit)
-    , m_info(other.m_info)
-    , m_init(other.m_init)
+    : m_unit(&unit)
+    , m_init(std::move(init))
+    , m_info(unit.numIds(nullKey), m_init)
   {}
 
-  StateVector& operator=(const StateVector& other) {
-    assert(&other.m_unit == &m_unit);
-    m_info = other.m_info;
-    m_init = other.m_init;
-    return *this;
-  }
-
-  void reset() {
-    m_info.assign(m_info.size(), m_init);
-    grow();
-  }
+  StateVector(const StateVector&) = default;
+  StateVector(StateVector&&) = default;
+  StateVector& operator=(const StateVector&) = delete;
+  StateVector& operator=(StateVector&&) = default;
 
   reference operator[](uint32_t id) {
     if (id >= m_info.size()) grow();
@@ -78,7 +64,7 @@ struct StateVector {
   }
 
   const_reference operator[](uint32_t id) const {
-    assert(id < m_unit.numIds(nullKey));
+    assertx(id < m_unit->numIds(nullKey));
     return id < m_info.size() ? m_info[id] : m_init;
   }
 
@@ -95,16 +81,18 @@ struct StateVector {
   const_iterator cbegin() const { return m_info.cbegin(); }
   const_iterator cend()   const { return m_info.cend(); }
 
+  const IRUnit& unit() const { return *m_unit; }
+
 private:
   void grow() {
-    m_info.resize(m_unit.numIds(nullKey), m_init);
+    m_info.resize(m_unit->numIds(nullKey), m_init);
   }
 
 private:
   static constexpr Key* nullKey { nullptr };
-  const IRUnit& m_unit;
-  InfoVector m_info;
+  const IRUnit* m_unit;
   Info m_init;
+  InfoVector m_info;
 };
 
 //////////////////////////////////////////////////////////////////////

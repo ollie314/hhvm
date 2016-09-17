@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,13 +22,19 @@
 #include <mach/mach.h>
 #endif
 
-#include <sys/time.h>
-#include <sys/resource.h>
+#include <folly/portability/SysResource.h>
+#include <folly/portability/SysTime.h>
 
 #include "hphp/util/logger.h"
 #include "hphp/util/trace.h"
+#include "hphp/util/vdso.h"
 
 namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
+
+__thread int64_t s_extra_request_microseconds;
+
+namespace {
 ///////////////////////////////////////////////////////////////////////////////
 
 #define PRINT_MSG(...)                          \
@@ -44,6 +50,29 @@ namespace HPHP {
       break;                                    \
     default: not_reached();                     \
   }
+
+int gettime_helper(clockid_t clock, timespec* ts) {
+#if defined(__CYGWIN__) || defined(_MSC_VER)
+  // Let's bypass trying to load vdso.
+  return clock_gettime(clock, ts);
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+  // XXX: OSX doesn't support realtime so we ignore 'clock'.
+  timeval tv;
+  auto const ret = gettimeofday(&tv, nullptr);
+  ts->tv_sec = tv.tv_sec;
+  ts->tv_nsec = tv.tv_usec * 1000;
+  return ret;
+#else
+  static bool vdso_usable = vdso::clock_gettime(clock, ts) == 0;
+  if (vdso_usable) {
+    return vdso::clock_gettime(clock, ts);
+  }
+  return clock_gettime(clock, ts);
+#endif
+}
+
+///////////////////////////////////////////////////////////////////////////////
+}
 
 Timer::Timer(Type type, const char *name /* = NULL */, ReportType r)
   : m_type(type), m_report(r) {
@@ -75,7 +104,7 @@ void Timer::GetMonotonicTime(timespec &ts) {
 #ifndef __APPLE__
   gettime(CLOCK_MONOTONIC, &ts);
 #else
-  struct timeval tv;
+  timeval tv;
   gettimeofday(&tv, nullptr);
   TIMEVAL_TO_TIMESPEC(&tv, &ts);
 #endif
@@ -100,20 +129,20 @@ static int64_t to_usec(const timeval& tv) {
 }
 
 int64_t Timer::GetCurrentTimeMicros() {
-  struct timeval tv;
+  timeval tv;
   gettimeofday(&tv, 0);
   return to_usec(tv);
 }
 
-int64_t Timer::GetRusageMicros(Type t, int who) {
+int64_t Timer::GetRusageMicros(Type t, Who who) {
   assert(t != WallTime);
 
-  struct rusage ru;
+  rusage ru;
   memset(&ru, 0, sizeof(ru));
   auto DEBUG_ONLY ret = getrusage(who, &ru);
   assert(ret == 0);
 
-  switch (who) {
+  switch (t) {
     case SystemCPU: return to_usec(ru.ru_stime);
     case UserCPU:   return to_usec(ru.ru_utime);
     case TotalCPU:  return to_usec(ru.ru_stime) + to_usec(ru.ru_utime);
@@ -121,12 +150,25 @@ int64_t Timer::GetRusageMicros(Type t, int who) {
   }
 }
 
+int64_t Timer::GetThreadCPUTimeNanos() {
+#ifdef CLOCK_THREAD_CPUTIME_ID
+  auto const ns = vdso::clock_gettime_ns(CLOCK_THREAD_CPUTIME_ID);
+  if (ns != -1) return ns;
+#endif
+
+#ifdef RUSAGE_THREAD
+  return GetRusageMicros(TotalCPU, Thread) * 1000;
+#else
+  return -1;
+#endif
+}
+
 int64_t Timer::measure() const {
   if (m_type == WallTime) {
     return GetCurrentTimeMicros();
   }
 
-  return GetRusageMicros(m_type, RUSAGE_SELF);
+  return GetRusageMicros(m_type, Timer::Self);
 }
 
 const char *Timer::getName() const {
@@ -158,6 +200,32 @@ SlowTimer::~SlowTimer() {
 
 int64_t SlowTimer::getTime() const {
   return m_timer.getMicroSeconds() / 1000;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+int gettime(clockid_t clock, timespec* ts) {
+  auto const ret = gettime_helper(clock, ts);
+#ifdef CLOCK_THREAD_CPUTIME_ID
+  if (clock == CLOCK_THREAD_CPUTIME_ID) {
+    always_assert(ts->tv_nsec < 1000000000);
+
+    ts->tv_sec += s_extra_request_microseconds / 1000000;
+    auto res = ts->tv_nsec + (s_extra_request_microseconds % 1000000) * 1000;
+    if (res > 1000000000) {
+      res -= 1000000000;
+      ts->tv_sec += 1;
+    }
+    ts->tv_nsec = res;
+  }
+#endif
+  return ret;
+}
+
+int64_t gettime_diff_us(const timespec& start, const timespec& end) {
+  int64_t dsec = end.tv_sec - start.tv_sec;
+  int64_t dnsec = end.tv_nsec - start.tv_nsec;
+  return dsec * 1000000 + dnsec / 1000;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,10 +21,11 @@
 
 #include <folly/ScopeGuard.h>
 
+#include "hphp/runtime/base/array-data-defs.h"
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/tv-conversions.h"
-#include "hphp/runtime/ext/ext_math.h"
+#include "hphp/runtime/ext/std/ext_std_math.h"
 #include "hphp/util/overflow.h"
 
 namespace HPHP {
@@ -33,10 +34,21 @@ namespace HPHP {
 
 namespace {
 
-NEVER_INLINE ATTRIBUTE_NORETURN
-void throw_bad_array_operand() {
-  throw ExtendedException("Invalid operand type was used: "
-                          "cannot perform this operation with arrays");
+[[noreturn]] NEVER_INLINE
+void throw_bad_array_operand(const ArrayData* ad) {
+  const char* type = [&]{
+    if (ad->isVecArray()) return "vecs";
+    if (ad->isDict()) return "dicts";
+    if (ad->isKeyset()) return "keysets";
+    assert(ad->isPHPArray());
+    return "arrays";
+  }();
+  throw ExtendedException(
+    folly::sformat(
+      "Invalid operand type was used: "
+      "cannot perform this operation with {}", type
+    )
+  );
 }
 
 Cell make_int(int64_t n) { return make_tv<KindOfInt64>(n); }
@@ -56,17 +68,24 @@ TypedNum numericConvHelper(Cell cell) {
       return make_int(cell.m_data.num);
 
     case KindOfString:
-    case KindOfStaticString:
+    case KindOfPersistentString:
       return stringToNumeric(cell.m_data.pstr);
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
-      throw_bad_array_operand();
+      throw_bad_array_operand(cell.m_data.parr);
 
     case KindOfObject:
-      return make_int(cell.m_data.pobj->o_toInt64());
+      return make_int(cell.m_data.pobj->toInt64());
 
     case KindOfResource:
-      return make_int(cell.m_data.pres->o_toInt64());
+      return make_int(cell.m_data.pres->data()->o_toInt64());
 
     case KindOfInt64:
     case KindOfDouble:
@@ -98,8 +117,8 @@ again:
     }
   }
 
-  if (c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
-    return make_tv<KindOfArray>(o(c1.m_data.parr, c2.m_data.parr));
+  if (isArrayLikeType(c1.m_type) && isArrayLikeType(c2.m_type)) {
+    return make_array_like_tv(o(c1.m_data.parr, c2.m_data.parr));
   }
 
   cellCopy(numericConvHelper(c1), c1);
@@ -111,7 +130,7 @@ again:
 // returns the overflowed value.
 template<class Op, class Check, class Over>
 Cell cellArithO(Op o, Check ck, Over ov, Cell c1, Cell c2) {
-  if (c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
+  if (isArrayLikeType(c1.m_type) && isArrayLikeType(c2.m_type)) {
     return cellArith(o, c1, c2);
   }
 
@@ -150,7 +169,7 @@ struct Sub {
   Cell operator()(int64_t a, int64_t b) const { return make_int(a - b); }
 
   ArrayData* operator()(ArrayData* a1, ArrayData* a2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(a1);
   }
 };
 
@@ -161,7 +180,7 @@ struct Mul {
   Cell operator()(int64_t a, int64_t b) const { return make_int(a * b); }
 
   ArrayData* operator()(ArrayData* a1, ArrayData* a2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(a1);
   }
 };
 
@@ -169,7 +188,29 @@ struct Div {
   Cell operator()(int64_t t, int64_t u) const {
     if (UNLIKELY(u == 0)) {
       raise_warning(Strings::DIVISION_BY_ZERO);
-      return make_tv<KindOfBoolean>(false);
+      if (RuntimeOption::PHP7_IntSemantics) {
+        // PHP 7 requires IEEE compliance (+/- INF and NAN) with the result
+        // of dividing a value by zero. MSVC warns about the direct division
+        // by zero, and the literal division may not be portable to all
+        // platforms, so abstract the division out so that we can both keep
+        // MSVC quiet, and also handle platforms that don't have the same
+        // semantics as x86_64.
+        //
+        // This has to be factored out like this in order for MSVC to actually
+        // disable the warning, as MSVC only allows this warning to be disabled
+        // at function boundaries. Disabling it for a single line in a function
+        // is impossible; it must be disabled for the entire function.
+        FOLLY_PUSH_WARNING
+        FOLLY_MSVC_DISABLE_WARNING(4723)
+        return make_dbl([](int64_t tVal) {
+          auto v = tVal / 0.0;
+          assert(std::isnan(v) || std::isinf(v));
+          return v;
+        }(t));
+        FOLLY_POP_WARNING
+      } else {
+        return make_tv<KindOfBoolean>(false);
+      }
     }
 
     // Avoid SIGFPE when dividing the miniumum respresentable integer
@@ -189,13 +230,18 @@ struct Div {
   >::type operator()(T t, U u) const {
     if (UNLIKELY(u == 0)) {
       raise_warning(Strings::DIVISION_BY_ZERO);
-      return make_tv<KindOfBoolean>(false);
+      if (RuntimeOption::PHP7_IntSemantics) {
+        // PHP7 uses the IEEE definition (+/- INF and NAN).
+        return make_dbl(t / u);
+      } else {
+        return make_tv<KindOfBoolean>(false);
+      }
     }
     return make_dbl(t / u);
   }
 
   ArrayData* operator()(ArrayData* a1, ArrayData* a2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(a1);
   }
 };
 
@@ -233,11 +279,12 @@ again:
     }
   }
 
-  if (c1.m_type == KindOfArray && c2.m_type == KindOfArray) {
+  if (isArrayLikeType(c1.m_type) && isArrayLikeType(c2.m_type)) {
     auto const ad1    = c1.m_data.parr;
     auto const newArr = op(ad1, c2.m_data.parr);
     if (newArr != ad1) {
       c1.m_data.parr = newArr;
+      c1.m_type = newArr->toDataType();
       decRefArr(ad1);
     }
     return;
@@ -271,7 +318,7 @@ struct SubEq {
   double  operator()(double  a, double  b) const { return a - b; }
 
   ArrayData* operator()(ArrayData* ad1, ArrayData* ad2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(ad1);
   }
 };
 
@@ -282,7 +329,7 @@ struct MulEq {
   double  operator()(double  a, double  b) const { return a * b; }
 
   ArrayData* operator()(ArrayData* ad1, ArrayData* ad2) const {
-    throw_bad_array_operand();
+    throw_bad_array_operand(ad1);
   }
 };
 
@@ -302,7 +349,6 @@ StringData* stringBitOp(BitOp bop, SzOp sop, StringData* s1, StringData* s2) {
   }
   newStr->setSize(newLen);
 
-  newStr->setRefCount(1);
   return newStr;
 }
 
@@ -311,7 +357,7 @@ Cell cellBitOp(StrLenOp strLenOp, Cell c1, Cell c2) {
   assert(cellIsPlausible(c1));
   assert(cellIsPlausible(c2));
 
-  if (IS_STRING_TYPE(c1.m_type) && IS_STRING_TYPE(c2.m_type)) {
+  if (isStringType(c1.m_type) && isStringType(c2.m_type)) {
     return make_tv<KindOfString>(
       stringBitOp(
         BitOp<char>(),
@@ -328,13 +374,16 @@ Cell cellBitOp(StrLenOp strLenOp, Cell c1, Cell c2) {
 template<class Op>
 void cellBitOpEq(Op op, Cell& c1, Cell c2) {
   auto const result = op(c1, c2);
-  cellSet(result, c1);
+  auto const type = c1.m_type;
+  auto const data = c1.m_data.num;
+  tvCopy(result, c1);
+  tvRefcountedDecRefHelper(type, data);
 }
 
 // Op must implement the interface described for cellIncDecOp.
 template<class Op>
 void stringIncDecOp(Op op, Cell& cell) {
-  assert(IS_STRING_TYPE(cell.m_type));
+  assert(isStringType(cell.m_type));
 
   auto const sd = cell.m_data.pstr;
   if (sd->empty()) {
@@ -345,7 +394,7 @@ void stringIncDecOp(Op op, Cell& cell) {
 
   int64_t ival;
   double dval;
-  auto const dt = sd->isNumericWithVal(ival, dval, true /* allow_errors */);
+  auto const dt = sd->isNumericWithVal(ival, dval, false /* allow_errors */);
 
   if (dt == KindOfInt64) {
     decRefStr(sd);
@@ -390,12 +439,19 @@ void cellIncDecOp(Op op, Cell& cell) {
       op.dblCase(cell);
       return;
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       stringIncDecOp(op, cell);
       return;
 
     case KindOfBoolean:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
@@ -416,7 +472,7 @@ struct IncBase {
   void nullCase(Cell& cell) const { cellCopy(make_int(1), cell); }
 
   Cell emptyString() const {
-    return make_tv<KindOfStaticString>(s_1.get());
+    return make_tv<KindOfPersistentString>(s_1.get());
   }
 
   void nonNumericString(Cell& cell) const {
@@ -425,13 +481,12 @@ struct IncBase {
       auto const tmp = StringData::Make(sd, CopyString);
       auto const tmp2 = tmp->increment();
       if (tmp2 != tmp) {
-        assert(tmp->getCount() == 0);
+        assert(tmp->hasExactlyOneRef());
         tmp->release();
         return tmp2;
       }
       return tmp;
     }();
-    newSd->incRefCount();
     decRefStr(sd);
     cellCopy(make_tv<KindOfString>(newSd), cell);
   }
@@ -514,15 +569,19 @@ Cell cellDiv(Cell c1, Cell c2) {
 }
 
 Cell cellPow(Cell c1, Cell c2) {
-  return *f_pow(tvAsVariant(&c1), tvAsVariant(&c2)).asCell();
+  return *HHVM_FN(pow)(tvAsVariant(&c1), tvAsVariant(&c2)).asCell();
 }
 
 Cell cellMod(Cell c1, Cell c2) {
   auto const i1 = cellToInt(c1);
   auto const i2 = cellToInt(c2);
   if (UNLIKELY(i2 == 0)) {
-    raise_warning(Strings::DIVISION_BY_ZERO);
-    return make_tv<KindOfBoolean>(false);
+    if (RuntimeOption::PHP7_IntSemantics) {
+      SystemLib::throwDivisionByZeroErrorObject(Strings::MODULO_BY_ZERO);
+    } else {
+      raise_warning(Strings::DIVISION_BY_ZERO);
+      return make_tv<KindOfBoolean>(false);
+    }
   }
 
   // This is to avoid SIGFPE in the case of INT64_MIN % -1.
@@ -551,11 +610,37 @@ Cell cellBitXor(Cell c1, Cell c2) {
 }
 
 Cell cellShl(Cell c1, Cell c2) {
-  return make_int(cellToInt(c1) << cellToInt(c2));
+  int64_t lhs = cellToInt(c1);
+  int64_t shift = cellToInt(c2);
+
+  if (RuntimeOption::PHP7_IntSemantics) {
+    if (UNLIKELY(shift >= 64)) {
+      return make_int(0);
+    }
+
+    if (UNLIKELY(shift < 0)) {
+      SystemLib::throwArithmeticErrorObject(Strings::NEGATIVE_SHIFT);
+    }
+  }
+
+  return make_int(lhs << (shift & 63));
 }
 
 Cell cellShr(Cell c1, Cell c2) {
-  return make_int(cellToInt(c1) >> cellToInt(c2));
+  int64_t lhs = cellToInt(c1);
+  int64_t shift = cellToInt(c2);
+
+  if (RuntimeOption::PHP7_IntSemantics) {
+    if (UNLIKELY(shift >= 64)) {
+      return make_int(lhs >= 0 ? 0 : -1);
+    }
+
+    if (UNLIKELY(shift < 0)) {
+      SystemLib::throwArithmeticErrorObject(Strings::NEGATIVE_SHIFT);
+    }
+  }
+
+  return make_int(lhs >> (shift & 63));
 }
 
 void cellAddEq(Cell& c1, Cell c2) {
@@ -570,9 +655,9 @@ void cellMulEq(Cell& c1, Cell c2) {
   cellOpEq(MulEq(), c1, c2);
 }
 
-void cellAddEqO(Cell& c1, Cell c2) { cellCopy(cellAddO(c1, c2), c1); }
-void cellSubEqO(Cell& c1, Cell c2) { cellCopy(cellSubO(c1, c2), c1); }
-void cellMulEqO(Cell& c1, Cell c2) { cellCopy(cellMulO(c1, c2), c1); }
+void cellAddEqO(Cell& c1, Cell c2) { cellSet(cellAddO(c1, c2), c1); }
+void cellSubEqO(Cell& c1, Cell c2) { cellSet(cellSubO(c1, c2), c1); }
+void cellMulEqO(Cell& c1, Cell c2) { cellSet(cellMulO(c1, c2), c1); }
 
 void cellDivEq(Cell& c1, Cell c2) {
   assert(cellIsPlausible(c1));
@@ -603,8 +688,8 @@ void cellBitXorEq(Cell& c1, Cell c2) {
   cellBitOpEq(cellBitXor, c1, c2);
 }
 
-void cellShlEq(Cell& c1, Cell c2) { cellCopy(cellShl(c1, c2), c1); }
-void cellShrEq(Cell& c1, Cell c2) { cellCopy(cellShr(c1, c2), c1); }
+void cellShlEq(Cell& c1, Cell c2) { cellSet(cellShl(c1, c2), c1); }
+void cellShrEq(Cell& c1, Cell c2) { cellSet(cellShr(c1, c2), c1); }
 
 void cellInc(Cell& cell) { cellIncDecOp(Inc(), cell); }
 void cellIncO(Cell& cell) { cellIncDecOp(IncO(), cell); }
@@ -625,13 +710,12 @@ void cellBitNot(Cell& cell) {
       break;
 
     case KindOfString:
-      if (cell.m_data.pstr->hasMultipleRefs()) {
-    case KindOfStaticString:
+      if (cell.m_data.pstr->cowCheck()) {
+    case KindOfPersistentString:
         auto const newSd = StringData::Make(
           cell.m_data.pstr->slice(),
           CopyString
         );
-        newSd->incRefCount();
         cell.m_data.pstr->decRefCount(); // can't go to zero
         cell.m_data.pstr = newSd;
         cell.m_type = KindOfString;
@@ -656,6 +740,13 @@ void cellBitNot(Cell& cell) {
     case KindOfUninit:
     case KindOfNull:
     case KindOfBoolean:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,24 +16,30 @@
 
 #include "hphp/runtime/vm/jit/region-selection.h"
 
-#include "hphp/runtime/vm/jit/analysis.h"
 #include "hphp/runtime/vm/jit/annotation.h"
-#include "hphp/runtime/vm/jit/guard-relaxation.h"
-#include "hphp/runtime/vm/jit/hhbc-translator.h"
 #include "hphp/runtime/vm/jit/inlining-decider.h"
-#include "hphp/runtime/vm/jit/ir-translator.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/location.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/punt.h"
 #include "hphp/runtime/vm/jit/ref-deps.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/analysis.h"
 
 #include "hphp/util/trace.h"
 
+#include <folly/MapUtil.h>
+
 #include <algorithm>
 #include <vector>
+
+#include "hphp/runtime/vm/jit/irgen.h"
+
+// TODO(#5710324): it seems a little odd that region-tracelet is not part of
+// irgen:: but needs access to this.  Probably we don't have the right
+// abstraction boundaries.  We'll resolve this somehow later.
+#include "hphp/runtime/vm/jit/irgen-internal.h"
 
 namespace HPHP { namespace jit {
 
@@ -42,232 +48,127 @@ TRACE_SET_MOD(region);
 typedef hphp_hash_set<SrcKey, SrcKey::Hasher> InterpSet;
 
 namespace {
+
 ///////////////////////////////////////////////////////////////////////////////
 
-struct RegionFormer {
-  RegionFormer(const RegionContext& ctx,
-               InterpSet& interp,
-               bool profiling, bool inlining);
+constexpr int MaxJmpsTracedThrough = 5;
 
-  RegionDescPtr go();
+struct Env {
+  Env(const RegionContext& ctx,
+      TransKind kind,
+      InterpSet& interp,
+      SrcKey& breakAt,
+      int32_t maxBCInstrs,
+      bool inlining)
+    : ctx(ctx)
+    , interp(interp)
+    , breakAt(breakAt)
+    , sk(ctx.func, ctx.bcOffset, ctx.resumed)
+    , startSk(sk)
+    , region(std::make_shared<RegionDesc>())
+    , curBlock(region->addBlock(sk, 0, ctx.spOffset))
+    , blockFinished(false)
+    // TODO(#5703534): this is using a different TransContext than actual
+    // translation will use.
+    , unit(TransContext{kInvalidTransID, kind, TransFlags{}, sk, ctx.spOffset})
+    , irgs(unit)
+    , arStates(1)
+    , numJmps(0)
+    , numBCInstrs(maxBCInstrs)
+    , profiling(kind == TransKind::Profile)
+    , inlining(inlining)
+  {}
 
-private:
-  const RegionContext& m_ctx;
-  InterpSet& m_interp;
-  SrcKey m_sk;
-  const SrcKey m_startSk;
-  NormalizedInstruction m_inst;
-  RegionDescPtr m_region;
-  RegionDesc::Block* m_curBlock;
-  bool m_blockFinished;
-  IRTranslator m_irTrans;
-  HhbcTranslator& m_ht;
-  jit::vector<ActRecState> m_arStates;
-  RefDeps m_refDeps;
-  uint32_t m_numJmps;
-  uint32_t m_numBCInstrs{0};
+  const RegionContext& ctx;
+  InterpSet& interp;
+  SrcKey& breakAt;
+  SrcKey sk;
+  const SrcKey startSk;
+  NormalizedInstruction inst;
+  RegionDescPtr region;
+  RegionDesc::Block* curBlock;
+  bool blockFinished;
+  IRUnit unit;
+  irgen::IRGS irgs;
+  jit::vector<ActRecState> arStates;
+  RefDeps refDeps;
+  uint32_t numJmps;
+  int32_t numBCInstrs;
+  SrcKey minstrStart;
+  // This map memoizes reachability of IR blocks during tracelet
+  // formation.  A block won't have it's reachability stored in this
+  // map until it's been computed.
+  jit::hash_map<unsigned,bool> irReachableBlocks;
 
-  const bool m_profiling;
-  const bool m_inlining;
-  InliningDecider m_inl;
+  const bool profiling;
+  const bool inlining;
 
-  const Func* curFunc() const;
-  const Unit* curUnit() const;
-  Offset curSpOffset() const;
-  bool resumed() const;
-
-  bool prepareInstruction();
-  void addInstruction();
-  bool consumeInput(int i, const InputInfo& ii);
-  bool traceThroughJmp();
-  void maybeConstrainForInlining();
-  void recordDependencies();
-  void truncateLiterals();
+ private:
+  Env(const Env&) = delete;
+  Env& operator=(const Env&) = delete;
 };
 
-RegionFormer::RegionFormer(const RegionContext& ctx,
-                           InterpSet& interp,
-                           bool profiling, bool inlining)
-  : m_ctx(ctx)
-  , m_interp(interp)
-  , m_sk(ctx.func, ctx.bcOffset, ctx.resumed)
-  , m_startSk(m_sk)
-  , m_region(std::make_shared<RegionDesc>())
-  , m_curBlock(m_region->addBlock(m_sk, 0, ctx.spOffset))
-  , m_blockFinished(false)
-  , m_irTrans(TransContext { kInvalidTransID,
-                             ctx.bcOffset,
-                             ctx.spOffset,
-                             ctx.resumed,
-                             ctx.func })
-  , m_ht(m_irTrans.hhbcTrans())
-  , m_arStates(1)
-  , m_numJmps(0)
-  , m_profiling(profiling)
-  , m_inlining(inlining)
-  , m_inl(ctx.func)
-{}
-
-const Func* RegionFormer::curFunc() const {
-  return m_ht.curFunc();
+const Func* curFunc(const Env& env) {
+  return irgen::curFunc(env.irgs);
 }
 
-const Unit* RegionFormer::curUnit() const {
-  return m_ht.curUnit();
+const Unit* curUnit(const Env& env) {
+  return irgen::curUnit(env.irgs);
 }
 
-Offset RegionFormer::curSpOffset() const {
-  return m_ht.spOffset();
+FPInvOffset curSpOffset(const Env& env) {
+  return env.irgs.irb->fs().bcSPOff();
 }
 
-bool RegionFormer::resumed() const {
-  return m_ht.resumed();
-}
-
-RegionDescPtr RegionFormer::go() {
-  for (auto const& lt : m_ctx.liveTypes) {
-    auto t = lt.type;
-    if (t <= Type::Cls) {
-      m_ht.assertTypeStack(lt.location.stackOffset(), t);
-      m_curBlock->addPredicted(m_sk, RegionDesc::TypePred{lt.location, t});
-    } else {
-      m_ht.guardTypeLocation(lt.location, t, true /* outerOnly */);
-    }
-  }
-
-  while (true) {
-    assert(m_numBCInstrs <= RuntimeOption::EvalJitMaxRegionInstrs);
-    if (m_numBCInstrs == RuntimeOption::EvalJitMaxRegionInstrs) {
-      FTRACE(1, "selectTracelet: breaking region due to size limit ({})\n",
-             m_numBCInstrs);
+bool irBlockReachable(Env& env, Block* block) {
+  auto const blockId = block->id();
+  auto it = env.irReachableBlocks.find(blockId);
+  if (it != env.irReachableBlocks.end()) return it->second;
+  bool result = block == env.irgs.irb->unit().entry();
+  for (auto& pred : block->preds()) {
+    if (irBlockReachable(env, pred.from())) {
+      result = true;
       break;
     }
-
-    if (!prepareInstruction()) break;
-
-    if (traceThroughJmp()) continue;
-
-    m_curBlock->setKnownFunc(m_sk, m_inst.funcd);
-
-    m_inst.interp = m_interp.count(m_sk);
-    auto const doPrediction =
-      m_profiling ? false : outputIsPredicted(m_inst);
-
-    maybeConstrainForInlining();
-
-    try {
-      m_irTrans.translateInstr(m_inst);
-    } catch (const FailedIRGen& exn) {
-      FTRACE(1, "ir generation for {} failed with {}\n",
-             m_inst.toString(), exn.what());
-      always_assert(!m_interp.count(m_sk));
-      m_interp.insert(m_sk);
-      m_region.reset();
-      break;
-    }
-
-    // We successfully translated the instruction, so update m_sk.
-    m_sk.advance(m_curBlock->unit());
-
-    auto const endsRegion = m_inst.endsRegion;
-
-    if (endsRegion) {
-      FTRACE(1, "selectTracelet: tracelet broken after {}\n", m_inst);
-      break;
-    } else {
-      assert(m_sk.func() == m_ht.curFunc());
-    }
-
-    if (isFCallStar(m_inst.op())) m_arStates.back().pop();
-
-    // Since the current instruction is over, advance HhbcTranslator's sk
-    // before emitting the prediction (if any).
-    if (doPrediction &&
-        m_ht.topType(0, DataTypeGeneric).maybe(m_inst.outPred)) {
-      m_ht.setBcOff(m_sk.offset(), false);
-      m_ht.checkTypeStack(0, m_inst.outPred, m_sk.offset());
-    }
   }
-
-  printUnit(kTraceletLevel, m_ht.unit(),
-            m_inlining ? " after inlining tracelet formation "
-                       : " after tracelet formation ",
-            nullptr, m_ht.irBuilder().guards());
-
-  if (m_region && !m_region->empty()) {
-    m_ht.end(m_sk.offset());
-    recordDependencies();
-    truncateLiterals();
-  }
-
-  return std::move(m_region);
+  env.irReachableBlocks[blockId] = result;
+  return result;
 }
 
 /*
- * Populate most fields of the NormalizedInstruction, assuming its sk
- * has already been set. Returns false iff the region should be
- * truncated before inst's SrcKey.
+ * Check if the current predicted type for the location in ii is specific
+ * enough for what the current opcode wants. If not, return false.
  */
-bool RegionFormer::prepareInstruction() {
-  m_inst.~NormalizedInstruction();
-  new (&m_inst) NormalizedInstruction(m_sk, curUnit());
-  auto const breaksBB =
-    (m_profiling && instrBreaksProfileBB(&m_inst)) ||
-    (mcg->useLLVM() ? opcodeChangesPC(m_inst.op())
-                    : opcodeBreaksBB(m_inst.op()));
-  m_inst.endsRegion = breaksBB ||
-    (dontGuardAnyInputs(m_inst.op()) && opcodeChangesPC(m_inst.op()));
-  m_inst.funcd = m_arStates.back().knownFunc();
-  m_ht.setBcOff(m_sk.offset(), false);
+bool consumeInput(Env& env, const InputInfo& input) {
+  if (input.dontGuard) return true;
+  auto const type = irgen::predictedType(env.irgs, input.loc);
 
-  auto const inputInfos = getInputs(m_startSk, m_inst);
-
-  // Read types for all the inputs and apply MetaData.
-  auto newDynLoc = [&](const InputInfo& ii) {
-    auto dl = m_inst.newDynLoc(ii.loc, m_ht.predictedTypeFromLocation(ii.loc));
-    FTRACE(2, "predictedTypeFromLocation: {} -> {}\n",
-           ii.loc.pretty(), dl->rtt);
-    return dl;
-  };
-
-  for (auto const& ii : inputInfos) m_inst.inputs.push_back(newDynLoc(ii));
-
-  // This reads valueClass from the inputs so it used to need to
-  // happen after readMetaData.  But now readMetaData is gone ...
-  annotate(&m_inst);
-
-  // Check all the inputs for unknown values.
-  assert(inputInfos.size() == m_inst.inputs.size());
-  for (unsigned i = 0; i < inputInfos.size(); ++i) {
-    if (!consumeInput(i, inputInfos[i])) {
-      FTRACE(2, "Stopping tracelet consuming {} input {}\n",
-        opcodeToName(m_inst.op()), i);
-      return false;
-    }
+  if (env.profiling && type <= TBoxedCell &&
+      (env.region->blocks().size() > 1 || !env.region->entry()->empty())) {
+    // We don't want side exits when profiling, so only allow instructions that
+    // consume refs at the beginning of the region.
+    return false;
   }
 
-  if (inputInfos.needsRefCheck) {
-    // Reffiness guards are always at the beginning of the trace for now, so
-    // calculate the delta from the original sp to the ar.
-    auto argNum = m_inst.imm[0].u_IVA;
-    size_t entryArDelta = instrSpToArDelta((Op*)m_inst.pc()) -
-      (m_ht.spOffset() - m_ctx.spOffset);
-    try {
-      m_inst.preppedByRef = m_arStates.back().checkByRef(argNum, entryArDelta,
-                                                         &m_refDeps);
-    } catch (const UnknownInputExc& exn) {
-      // We don't have a guess for the current ActRec.
-      FTRACE(1, "selectTracelet: don't have reffiness guess for {}\n",
-             m_inst.toString());
-      return false;
-    }
-    addInstruction();
-    m_curBlock->setParamByRef(m_inst.source, m_inst.preppedByRef);
-  } else {
-    addInstruction();
+  if (!input.dontBreak && !type.isKnownDataType()) {
+    // Trying to consume a value without a precise enough type.
+    FTRACE(1, "selectTracelet: {} tried to consume {}\n",
+           env.inst.toString(), show(input.loc));
+    return false;
   }
 
-  if (isFPush(m_inst.op())) m_arStates.back().pushFunc(m_inst);
+  if (!(type <= TBoxedCell) ||
+      env.inst.ignoreInnerType ||
+      input.dontGuardInner) {
+    return true;
+  }
+
+  if (!type.inner().isKnownDataType()) {
+    // Trying to consume a boxed value without a guess for the inner type.
+    FTRACE(1, "selectTracelet: {} tried to consume ref {}\n",
+           env.inst.toString(), show(input.loc));
+    return false;
+  }
 
   return true;
 }
@@ -275,139 +176,306 @@ bool RegionFormer::prepareInstruction() {
 /*
  * Add the current instruction to the region.
  */
-void RegionFormer::addInstruction() {
-  if (m_blockFinished) {
+void addInstruction(Env& env) {
+  if (env.blockFinished) {
     FTRACE(2, "selectTracelet adding new block at {} after:\n{}\n",
-           showShort(m_sk), show(*m_curBlock));
-    always_assert(m_sk.func() == curFunc());
-    RegionDesc::Block* newCurBlock = m_region->addBlock(m_sk, 0, curSpOffset());
-    m_region->addArc(m_curBlock->id(), newCurBlock->id());
-    m_curBlock = newCurBlock;
-    m_blockFinished = false;
+           showShort(env.sk), show(*env.curBlock));
+    always_assert(env.sk.func() == curFunc(env));
+    auto newCurBlock = env.region->addBlock(env.sk, 0, curSpOffset(env));
+    env.region->addArc(env.curBlock->id(), newCurBlock->id());
+    env.curBlock = newCurBlock;
+    env.blockFinished = false;
   }
 
-  FTRACE(2, "selectTracelet adding instruction {}\n", m_inst.toString());
-  m_curBlock->addInstruction();
-  m_numBCInstrs++;
+  FTRACE(2, "selectTracelet adding instruction {}\n", env.inst.toString());
+  env.curBlock->addInstruction();
+  env.numBCInstrs--;
 }
 
-bool RegionFormer::traceThroughJmp() {
+/*
+ * Populate most fields of the NormalizedInstruction, assuming its sk
+ * has already been set. Returns false iff the region should be
+ * truncated before inst's SrcKey.
+ */
+bool prepareInstruction(Env& env) {
+  env.inst.~NormalizedInstruction();
+  new (&env.inst) NormalizedInstruction(env.sk, curUnit(env));
+  if (RuntimeOption::EvalFailJitPrologs && env.inst.op() == Op::FCallAwait) {
+    return false;
+  }
+  auto const breaksBB =
+    (env.profiling && instrBreaksProfileBB(&env.inst)) ||
+    opcodeBreaksBB(env.inst.op());
+  env.inst.endsRegion = breaksBB ||
+    (dontGuardAnyInputs(env.inst.op()) && opcodeChangesPC(env.inst.op()));
+  env.inst.funcd = env.arStates.back().knownFunc();
+  irgen::prepareForNextHHBC(env.irgs, &env.inst, env.sk, false);
+
+  auto const inputInfos = getInputs(env.inst, env.irgs.irb->fs().bcSPOff());
+
+  // This reads valueClass from the inputs so it used to need to
+  // happen after readMetaData.  But now readMetaData is gone ...
+  annotate(&env.inst);
+
+  // Check all the inputs for unknown values.
+  for (auto const& input : inputInfos) {
+    if (!consumeInput(env, input)) {
+      FTRACE(2, "Stopping tracelet consuming {} input {}\n",
+             opcodeToName(env.inst.op()), show(input.loc));
+      return false;
+    }
+  }
+
+  if (inputInfos.needsRefCheck) {
+    // Reffiness guards are always at the beginning of the trace for now, so
+    // calculate the delta from the original sp to the ar. The FPI delta from
+    // instrFpToArDelta includes locals and iterators, so when we're in a
+    // resumed context we have to adjust for the fact that they're in a
+    // different place.
+    auto argNum = env.inst.imm[0].u_IVA;
+    auto entryArDelta = env.ctx.spOffset.offset -
+      instrFpToArDelta(curFunc(env), env.inst.pc());
+    if (env.sk.resumed()) entryArDelta += curFunc(env)->numSlotsInFrame();
+
+    try {
+      env.inst.preppedByRef =
+        env.arStates.back().checkByRef(argNum, entryArDelta, &env.refDeps);
+    } catch (const UnknownInputExc& exn) {
+      // We don't have a guess for the current ActRec.
+      FTRACE(1, "selectTracelet: don't have reffiness guess for {}\n",
+             env.inst.toString());
+      return false;
+    }
+    addInstruction(env);
+    env.curBlock->setParamByRef(env.inst.source, env.inst.preppedByRef);
+  } else {
+    addInstruction(env);
+  }
+
+  if (isFPush(env.inst.op())) env.arStates.back().pushFunc(env.inst);
+
+  return true;
+}
+
+bool traceThroughJmp(Env& env) {
   // We only trace through unconditional jumps and conditional jumps with const
   // inputs while inlining.
-  if (!isUnconditionalJmp(m_inst.op()) &&
-      !(m_inlining && isConditionalJmp(m_inst.op()) &&
-        m_ht.topType(0, DataTypeGeneric).isConst())) {
+  if (!isUnconditionalJmp(env.inst.op()) &&
+      !(env.inlining && isConditionalJmp(env.inst.op()) &&
+        irgen::publicTopType(env.irgs, BCSPRelOffset{0}).hasConstVal())) {
     return false;
   }
 
-  // Normally we want to keep profiling translations to basic blocks, but if
-  // we're inlining we want to analyze as much of the callee as possible.
-  if (m_profiling && !m_inlining) return false;
+  // We want to keep profiling translations to basic blocks, inlining shouldn't
+  // happen in profiling translations
+  if (env.profiling) {
+    assert(!env.inlining);
+    return false;
+  }
 
   // Don't trace through too many jumps, unless we're inlining. We want to make
   // sure we don't break a tracelet in the middle of an inlined call; if the
   // inlined callee becomes too big that's caught in shouldIRInline.
-  if (m_numJmps == Translator::MaxJmpsTracedThrough && !m_inlining) {
+  if (env.numJmps == MaxJmpsTracedThrough && !env.inlining) {
     return false;
   }
 
-  auto offset = m_inst.imm[0].u_BA;
+  auto offset = env.inst.imm[0].u_BA;
   // Only trace through backwards jumps if it's a JmpNS and we're
   // inlining. This is to get DV funclets.
-  if (offset <= 0 && (m_inst.op() != OpJmpNS || !m_inlining)) {
+  if (offset <= 0 && (env.inst.op() != OpJmpNS || !env.inlining)) {
     return false;
   }
 
-  // Ok we're good. For unconditional jumps, just set m_sk to the dest. For
+  // Ok we're good. For unconditional jumps, just set env.sk to the dest. For
   // known conditional jumps we have to consume the const value on the top of
   // the stack and figure out which branch to go to.
-  if (isUnconditionalJmp(m_inst.op())) {
-    m_sk.setOffset(m_sk.offset() + offset);
+  if (isUnconditionalJmp(env.inst.op())) {
+    env.sk.setOffset(env.sk.offset() + offset);
   } else {
-    auto value = m_ht.popC();
+    auto value = irgen::popC(env.irgs);
     auto taken =
-      value->variantVal().toBoolean() == (m_inst.op() == OpJmpNZ);
+      value->variantVal().toBoolean() == (env.inst.op() == OpJmpNZ);
     FTRACE(2, "Tracing through {}taken Jmp(N)Z on constant {}\n",
            taken ? "" : "not ", *value->inst());
 
-    m_sk.setOffset(taken ? m_sk.offset() + offset
-                         : m_sk.advanced().offset());
+    env.sk.setOffset(taken ? env.sk.offset() + offset
+                           : env.sk.advanced().offset());
   }
 
-  m_numJmps++;
-  m_blockFinished = true;
+  env.numJmps++;
+  env.blockFinished = true;
   return true;
 }
 
-/*
- * If we are at the FCall of a potentially inlinable callee, we constrain the
- * types of all arguments to the function in order to ensure that type
- * informational necessary for inlining is not lost by translation time due to
- * guard relaxation.
- *
- * TODO(#5656429): Once it's possible to turn off guard relaxation during
- * tracelet formation, and leave Translator to handle it, we should be able to
- * remove this call.
- */
-void RegionFormer::maybeConstrainForInlining() {
-  if (m_sk.op() != Op::FCall &&
-      m_sk.op() != Op::FCallD) {
-    return;
-  }
-  auto const callee = m_inst.funcd;
+bool isLiteral(Op op) {
+  switch (op) {
+    case OpNull:
+    case OpNullUninit:
+    case OpTrue:
+    case OpFalse:
+    case OpInt:
+    case OpDouble:
+    case OpString:
+    case OpArray:
+    case OpDict:
+    case OpVec:
+    case OpKeyset:
+      return true;
 
-  if (!m_region || m_region->empty()) return;
-  if (!m_inl.canInlineAt(m_sk, callee, *m_region)) return;
-
-  // Make sure the FPushOp wasn't interpreted.
-  auto const sframe = findSpillFrame(m_ht.irBuilder().sp());
-  if (!sframe) return;
-
-  auto calleeRegion = selectCalleeRegion(m_sk, callee, m_ht, m_profiling);
-  if (!calleeRegion) return;
-
-  if (!m_inl.shouldInline(callee, *calleeRegion)) return;
-  m_inl.registerEndInlining(callee);
-
-  auto const op = reinterpret_cast<const Op*>(m_sk.pc());
-  auto const numArgs = getImm(op, 0).u_IVA;
-
-  auto tcFor = [] (const Type& t) {
-    if (t.canSpecializeArray()) {
-      return TypeConstraint(DataTypeSpecialized).setWantArrayKind();
-    }
-    if (t.canSpecializeClass() && t.getClass()) {
-      return TypeConstraint(t.getClass());
-    }
-    if (t < Type::Cls && t.isConst()) {
-      return TypeConstraint(t.clsVal());
-    }
-    if (t < Type::Cctx && t.isConst()) {
-      return TypeConstraint(t.cctxVal().cls());
-    }
-    return TypeConstraint(DataTypeSpecific);
-  };
-
-  // Constrain all the argument types.
-  for (unsigned i = 0; i < numArgs; ++i) {
-    auto const tc = tcFor(m_ht.topType(i));
-    if (tc != DataTypeSpecific) m_ht.topType(i, tc);
-  }
-
-  // Constrain the this, class, or context class type if there is one.
-  if (auto const ssa = sframe->src(2)) {
-    m_ht.irBuilder().constrainValue(ssa, tcFor(ssa->type()));
+    default:
+      return false;
   }
 }
 
-void RegionFormer::truncateLiterals() {
-  if (!m_region || m_region->empty() ||
-      m_region->blocks().back()->empty()) return;
+bool isThisSelfOrParent(Op op) {
+  switch (op) {
+    case OpThis:
+    case OpSelf:
+    case OpParent:
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+/*
+ * For every instruction in trace representing a tracelet guard, call func with
+ * its location and type, and whether or not it's an inner hint.
+ */
+template<typename F>
+void visitGuards(IRUnit& unit, F func) {
+  auto blocks = rpoSortCfg(unit);
+
+  for (auto const block : blocks) {
+    for (auto const& inst : *block) {
+      switch (inst.op()) {
+        case EndGuards:
+          return;
+        case HintLocInner:
+        case CheckLoc:
+          func(&inst,
+               Location::Local{inst.extra<LocalId>()->locId},
+               inst.typeParam(),
+               inst.is(HintLocInner));
+          break;
+        case HintStkInner:
+        case CheckStk: {
+          auto const irSPRel = inst.extra<IRSPRelOffsetData>()->offset;
+
+          auto const defSP = inst.src(0)->inst();
+          assertx(defSP->is(DefSP));
+          auto const irSPOff = defSP->extra<DefSP>()->offset;
+
+          func(&inst,
+               Location::Stack{irSPRel.to<FPInvOffset>(irSPOff)},
+               inst.typeParam(),
+               inst.is(HintStkInner));
+          break;
+        }
+        default: break;
+      }
+    }
+  }
+}
+
+/*
+ * Records any type/reffiness predictions we depend on in the region.
+ */
+void recordDependencies(Env& env) {
+  // Record the incrementally constructed reffiness predictions.
+  assertx(!env.region->empty());
+  auto& frontBlock = *env.region->blocks().front();
+  for (auto const& dep : env.refDeps.m_arMap) {
+    frontBlock.addReffinessPred({dep.second.m_mask, dep.second.m_vals,
+                                 dep.first});
+  }
+
+  // Relax guards and record the ones that survived.
+  auto& firstBlock = *env.region->blocks().front();
+  auto& unit = env.irgs.unit;
+  auto guardMap = std::map<Location,Type>{};
+  ITRACE(2, "Visiting guards\n");
+  auto hintMap = std::map<Location,Type>{};
+  auto catMap = std::map<Location,DataTypeCategory>{};
+  const auto& guards = env.irgs.irb->guards()->guards;
+  auto predictionMap = std::map<Location,Type>{};
+  visitGuards(unit, [&] (const IRInstruction* guard,
+                         const Location& loc,
+                         Type type, bool hint) {
+    Trace::Indent indent;
+    ITRACE(3, "{}: {}\n", show(loc), type);
+    if (type <= TCls) return;
+    auto& whichMap = hint ? hintMap : guardMap;
+    auto inret = whichMap.insert(std::make_pair(loc, type));
+    // Unconstrained pseudo-main guards will be relaxed to Gen by the guard
+    // relaxation pass. Since we don't allow loading TGen locals
+    // in pseudo-main, save the predicted type here.
+    if (guard->marker().func()->isPseudoMain()) {
+      auto ret = predictionMap.insert(std::make_pair(loc,type));
+      if (ret.second) {
+        FTRACE(1, "selectTracelet saving prediction for PseudoMain {}\n",
+            show(RegionDesc::TypedLocation {loc, type}));
+      } else {
+        auto& oldTy = ret.first->second;
+        oldTy &= type;
+      }
+    }
+    if (inret.second) {
+      if (!hint) {
+        catMap[loc] = folly::get_default(guards, guard).category;
+      }
+      return;
+    }
+    auto& oldTy = inret.first->second;
+    oldTy &= type;
+    if (!hint) {
+      auto& oldCat = catMap[loc];
+      auto newCat = folly::get_default(guards, guard).category;
+      oldCat = std::max(oldCat, newCat);
+    }
+  });
+
+  for (auto& kv : guardMap) {
+    auto const hint_it = hintMap.find(kv.first);
+    // If we have a hinted type that's better than the guarded type, we want to
+    // keep it around.  This can really only when a guard is relaxed away to
+    // Gen because we knew something was a BoxedCell statically, but we may
+    // need to keep information about what inner type we were predicting.
+    if (hint_it != end(hintMap) && hint_it->second < kv.second) {
+      FTRACE(1, "selectTracelet adding prediction {}\n",
+            show(RegionDesc::TypedLocation {hint_it->first, hint_it->second}));
+      predictionMap.insert(*hint_it);
+    }
+    if (kv.second == TGen) {
+      // Guard was relaxed to Gen---don't record it.  But if there's a hint, we
+      // may have needed that (recorded already above).
+      continue;
+    }
+    auto const preCond = RegionDesc::GuardedLocation {
+      kv.first, kv.second,
+      catMap[kv.first]
+    };
+    ITRACE(1, "selectTracelet adding guard {}\n", show(preCond));
+    firstBlock.addPreCondition(preCond);
+  }
+
+  // Predictions are already sorted by location, so we can simply compare
+  // the type-prediction vectors for different blocks later.
+  for (auto& pred : predictionMap) {
+    firstBlock.addPredicted(RegionDesc::TypedLocation{pred.first, pred.second});
+  }
+}
+
+void truncateLiterals(Env& env) {
+  if (!env.region || env.region->empty() ||
+      env.region->blocks().back()->empty()) return;
 
   // Don't finish a region with literal values or values that have a class
   // related to the current context class. They produce valuable information
   // for optimizations that's lost across region boundaries.
-  auto& lastBlock = *m_region->blocks().back();
+  auto& lastBlock = *env.region->blocks().back();
   auto sk = lastBlock.start();
   auto endSk = sk;
   auto unit = lastBlock.unit();
@@ -418,133 +486,203 @@ void RegionFormer::truncateLiterals() {
       endSk = sk;
     }
   }
-  FTRACE(1, "selectTracelet truncating block after offset {}:\n{}\n",
-         endSk.offset(), show(lastBlock));
-  lastBlock.truncateAfter(endSk);
+  // Don't truncate if we've decided we want to truncate the entire block.
+  // That'll mean we'll chop off the trailing N-1 opcodes, then in the next
+  // region we'll select N-1 opcodes and chop off N-2 opcodes, and so forth...
+  if (endSk != lastBlock.start()) {
+    FTRACE(1, "selectTracelet truncating block after offset {}:\n{}\n",
+           endSk.offset(), show(lastBlock));
+    lastBlock.truncateAfter(endSk);
+  }
 }
 
-/*
- * Check if the current type for the location in ii is specific enough for what
- * the current opcode wants. If not, return false.
- */
-bool RegionFormer::consumeInput(int i, const InputInfo& ii) {
-  auto& rtt = m_inst.inputs[i]->rtt;
-  if (ii.dontGuard) return true;
+RegionDescPtr form_region(Env& env) {
+  SCOPE_ASSERT_DETAIL("Tracelet Selector") {
+    return folly::sformat("Region:\n{}\n\nUnit:\n{}\n",
+                          *env.region, show(env.irgs.irb->unit()));
+  };
 
-  if (m_profiling && rtt.isBoxed() &&
-      (m_region->blocks().size() > 1 || !m_region->entry()->empty())) {
-    // We don't want side exits when profiling, so only allow instructions that
-    // consume refs at the beginning of the region.
-    return false;
-  }
-
-  if (!ii.dontBreak && !rtt.isKnownDataType()) {
-    // Trying to consume a value without a precise enough type.
-    FTRACE(1, "selectTracelet: {} tried to consume {}\n",
-           m_inst.toString(), m_inst.inputs[i]->pretty());
-    return false;
-  }
-
-  if (!rtt.isBoxed() || m_inst.ignoreInnerType || ii.dontGuardInner) {
-    return true;
-  }
-
-  if (!rtt.innerType().isKnownDataType()) {
-    // Trying to consume a boxed value without a guess for the inner type.
-    FTRACE(1, "selectTracelet: {} tried to consume ref {}\n",
-           m_inst.toString(), m_inst.inputs[i]->pretty());
-    return false;
-  }
-
-  return true;
-}
-
-/*
- * Records any type/reffiness predictions we depend on in the region. Guards
- * for locals and stack cells that are not used will be eliminated by the call
- * to relaxGuards.
- */
-void RegionFormer::recordDependencies() {
-  // Record the incrementally constructed reffiness predictions.
-  assert(!m_region->empty());
-  auto& frontBlock = *m_region->blocks().front();
-  for (auto const& dep : m_refDeps.m_arMap) {
-    frontBlock.addReffinessPred(m_startSk, {dep.second.m_mask,
-                                            dep.second.m_vals,
-                                            dep.first});
-  }
-
-  // Relax guards and record the ones that survived.
-  auto& firstBlock = *m_region->blocks().front();
-  auto blockStart = firstBlock.start();
-  auto& unit = m_ht.unit();
-  auto const doRelax = RuntimeOption::EvalHHIRRelaxGuards;
-  bool changed = false;
-  if (doRelax) {
-    Timer _t(Timer::selectTracelet_relaxGuards);
-    // The IR is going to be discarded immediately, so skip reflowing
-    // the types in relaxGuards to save JIT time.
-    RelaxGuardsFlags flags = m_profiling ? RelaxSimple : RelaxNormal;
-    changed = relaxGuards(unit, *m_ht.irBuilder().guards(), flags);
-  }
-
-  auto guardMap = std::map<RegionDesc::Location,Type>{};
-  visitGuards(unit, [&](const RegionDesc::Location& loc, Type type) {
-    if (type <= Type::Cls) return;
-    auto inret = guardMap.insert(std::make_pair(loc, type));
-    if (inret.second) return;
-    auto& oldTy = inret.first->second;
-    if (oldTy == Type::Gen) {
-      // This is the case that we see an inner type prediction for a GuardLoc
-      // that got relaxed to Gen.
-      return;
+  for (auto const& lt : env.ctx.liveTypes) {
+    auto t = lt.type;
+    if (t <= TCls) {
+      irgen::assertTypeLocation(env.irgs, lt.location, t);
+      env.curBlock->addPreCondition({lt.location, t, DataTypeGeneric});
+    } else {
+      irgen::checkType(env.irgs, lt.location, t, env.ctx.bcOffset,
+                       true /* outerOnly */);
     }
-    oldTy &= type;
-  });
+  }
 
-  for (auto& kv : guardMap) {
-    if (kv.second == Type::Gen) {
-      // Guard was relaxed to Gen---don't record it.
-      continue;
+  irgen::gen(env.irgs, EndGuards);
+
+  for (bool firstInst = true; true; firstInst = false) {
+    assertx(env.numBCInstrs >= 0);
+    if (env.numBCInstrs == 0) {
+      FTRACE(1, "selectTracelet: breaking region due to size limit\n");
+      break;
     }
-    auto const pred = RegionDesc::TypePred { kv.first, kv.second };
-    FTRACE(1, "selectTracelet adding guard {}\n", show(pred));
-    firstBlock.addPredicted(blockStart, pred);
+
+    if (!firstInst && env.sk == env.breakAt) {
+      FTRACE(1, "selectTracelet: breaking region at breakAt: {}\n",
+             show(env.sk));
+      break;
+    }
+
+    if (!prepareInstruction(env)) break;
+
+    // Until the rest of the pipeline can handle it without regressing, try to
+    // not break tracelets in the middle of new minstr sequences. Note that
+    // this is just an optimization; we can generate correct code regardless of
+    // how the minstrs are chopped up.
+    if (!firstInst && isMemberBaseOp(env.inst.op())) {
+      env.minstrStart = env.sk;
+    } else if (isMemberFinalOp(env.inst.op())) {
+      env.minstrStart = SrcKey{};
+    }
+
+    env.curBlock->setKnownFunc(env.sk, env.inst.funcd);
+
+    if (traceThroughJmp(env)) continue;
+
+    env.inst.interp = env.interp.count(env.sk);
+
+    try {
+      translateInstr(env.irgs, env.inst, true /* checkOuterTypeOnly */,
+                     firstInst);
+    } catch (const FailedIRGen& exn) {
+      FTRACE(1, "ir generation for {} failed with {}\n",
+             env.inst.toString(), exn.what());
+      always_assert_flog(
+        !env.interp.count(env.sk),
+        "Double PUNT trying to translate {}\n", env.inst
+      );
+      env.interp.insert(env.sk);
+      env.region.reset();
+      break;
+    }
+
+    irgen::finishHHBC(env.irgs);
+
+    if (!instrAllowsFallThru(env.inst.op())) {
+      FTRACE(1, "selectTracelet: tracelet broken after instruction with no "
+             "fall-through {}\n", env.inst);
+      break;
+    }
+
+    // We successfully translated the instruction, so update env.sk.
+    env.sk.advance(env.curBlock->unit());
+
+    auto const endsRegion = env.inst.endsRegion;
+
+    if (endsRegion) {
+      FTRACE(1, "selectTracelet: tracelet broken after {}\n", env.inst);
+      break;
+    } else {
+      assertx(env.sk.func() == curFunc(env));
+    }
+
+    auto const curIRBlock = env.irgs.irb->curBlock();
+    if (!irBlockReachable(env, curIRBlock)) {
+      FTRACE(1,
+             "selectTracelet: tracelet broken due "
+             "to unreachable code (block {})\n",
+             curIRBlock->id());
+      break;
+    }
+
+    if (curIRBlock->isExitNoThrow()) {
+      FTRACE(1, "selectTracelet: tracelet broken due to exiting IR instruction:"
+             "{}\n", curIRBlock->back());
+      break;
+    }
+
+    if (isFCallStar(env.inst.op())) env.arStates.back().pop();
   }
 
-  if (changed) {
-    printUnit(3, unit, " after guard relaxation ", nullptr,
-              m_ht.irBuilder().guards());
+  // Return an empty region to restart region formation at env.minstrStart.
+  if (env.minstrStart.valid()) {
+    env.breakAt = env.minstrStart;
+    env.region.reset();
   }
 
+  if (env.region && !env.region->empty()) {
+    // Make sure we end the region before trying to print the IRUnit.
+    irgen::endRegion(env.irgs, env.sk);
+
+    printUnit(
+      kTraceletLevel, env.irgs.irb->unit(),
+      env.inlining ? " after inlining tracelet formation "
+                   : " after tracelet formation ",
+      nullptr,
+      env.irgs.irb->guards()
+    );
+
+    recordDependencies(env);
+
+    auto const truncate = [&] () -> bool {
+      // Make sure that the IR unit contains a main exit corresponding
+      // to the last bytecode instruction in the region.  Note that this
+      // check has to happen before the call to truncateLiterals()
+      // because that updates the region but not the IR unit.
+      if (env.region->blocks().back()->empty()) return true;
+      auto lastSk = env.region->lastSrcKey();
+      auto const mainExit = findMainExitBlock(env.irgs.irb->unit(), lastSk);
+      always_assert_flog(mainExit, "No main exits found!");
+      /*
+       * If the last instruction is a Halt, its probably due to
+       * unreachable code. We don't want to truncate the tracelet
+       * in that case, because we could lose the assertion (eg
+       * if the Halt is due to a failed AssertRAT).
+       */
+      return !mainExit->back().is(Halt);
+    }();
+
+    if (truncate) {
+      truncateLiterals(env);
+    }
+  }
+
+  return std::move(env.region);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 }
 
-RegionDescPtr selectTracelet(const RegionContext& ctx, bool profiling,
-                             bool inlining /* = false */) {
+RegionDescPtr selectTracelet(const RegionContext& ctx, TransKind kind,
+                             int32_t maxBCInstrs, bool inlining /* = false */) {
   Timer _t(Timer::selectTracelet);
   InterpSet interp;
+  SrcKey breakAt;
   RegionDescPtr region;
-  uint32_t tries = 1;
+  uint32_t tries = 0;
 
-  while (!(region = RegionFormer(ctx, interp, profiling, inlining).go())) {
+  FTRACE(1, "selectTracelet: starting with maxBCInstrs = {}\n", maxBCInstrs);
+
+  do {
+    Env env{ctx, kind, interp, breakAt, maxBCInstrs, inlining};
+    region = form_region(env);
     ++tries;
-  }
+  } while (!region);
 
   if (region->empty() || region->blocks().front()->length() == 0) {
     FTRACE(1, "selectTracelet giving up after {} tries\n", tries);
-    return RegionDescPtr { nullptr };
+    return nullptr;
   }
 
-  FTRACE(1, "selectTracelet returning, {}, {} tries:\n{}\n",
-         inlining ? "inlining" : "not inlining", tries, show(*region));
   if (region->blocks().back()->length() == 0) {
     // If the final block is empty because it would've only contained
     // instructions producing literal values, kill it.
     region->deleteBlock(region->blocks().back()->id());
   }
+
+  if (RuntimeOption::EvalRegionRelaxGuards) {
+    FTRACE(1, "selectTracelet: before optimizeGuards:\n{}\n",
+           show(*region));
+    optimizeGuards(*region, kind == TransKind::Profile);
+  }
+
+  FTRACE(1, "selectTracelet returning, {}, {} tries:\n{}\n",
+         inlining ? "inlining" : "not inlining", tries, show(*region));
   return region;
 }
 

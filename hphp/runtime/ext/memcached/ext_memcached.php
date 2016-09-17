@@ -6,6 +6,8 @@
  */
 <<__NativeData("MemcachedData")>>
 class Memcached {
+  // Signifies we have provide a session handler
+  const HAVE_SESSION = true;
   /**
    * Create a Memcached instance
    *
@@ -30,7 +32,7 @@ class Memcached {
    */
   public function add(mixed $key,
                       mixed $value,
-                      mixed $expiration = 0): bool {
+                      int $expiration = 0): bool {
     return $this->addByKey('', $key, $value, $expiration);
   }
 
@@ -82,6 +84,7 @@ class Memcached {
   public function addServers(array<array<mixed>> $servers): bool {
     $servers_vals = array_values($servers);
     foreach($servers_vals as $i => $server) {
+      $server = array_values($server);
       if (!is_array($server)) {
         trigger_error(
           sprintf('Server list entry #%d is not an array', $i + 1),
@@ -198,18 +201,18 @@ class Memcached {
    * @param string $key - The key of the item to decrement.
    * @param int $offset - The amount by which to decrement the item's
    *   value.
-   * @param int $initial_value - The value to set the item to if it
-   *   doesn't currently exist.
+   * @param mixed $initial_value - The value to set the item to if it
+   *   doesn't currently exist. False to fail if the key does not exist
    * @param int $expiry - The expiry time to set on the item.
    *
-   * @return int - Returns item's new value on success.
+   * @return mixed - Returns item's new value on success. False if the key
+   *   doesn't exist and no initial_value was provided.
    */
+  <<__Native>>
   public function decrement(string $key,
                             int $offset = 1,
-                            int $initial_value = 0,
-                            int $expiry = 0): mixed {
-    return $this->decrementByKey('', $key, $offset, $initial_value, $expiry);
-  }
+                            mixed $initial_value = false,
+                            int $expiry = 0): mixed;
 
   /**
    * Decrement numeric item's value, stored on a specific server
@@ -219,16 +222,17 @@ class Memcached {
    * @param int $offset - The amount by which to decrement the item's
    *   value.
    * @param int $initial_value - The value to set the item to if it
-   *   doesn't currently exist.
+   *   doesn't currently exist. False to fail if the key does not exist.
    * @param int $expiry - The expiry time to set on the item.
    *
-   * @return int - Returns item's new value on success.
+   * @return int - Returns item's new value on success. False if the key
+   *   doesn't exist and no initial_value was provided.
    */
   <<__Native>>
   public function decrementByKey(string $server_key,
                                  string $key,
                                  int $offset = 1,
-                                 int $initial_value = 0,
+                                 mixed $initial_value = false,
                                  int $expiry = 0): mixed;
 
   /**
@@ -242,8 +246,39 @@ class Memcached {
    *   Memcached::RES_NOTFOUND if the key does not exist.
    */
   public function delete(mixed $key,
-                         mixed $time = 0): bool {
+                         int $time = 0): bool {
     return $this->deleteByKey('', $key, $time);
+  }
+
+  /**
+   * Add an item under a new key on a specific server
+   *
+   * @param string $server_key - The key identifying the server to store the value on
+   * or retrieve it from. Instead of hashing on the actual key for the item, we
+   * hash on the server key when deciding which memcached server to talk to.
+   * This allows related items to be grouped together on a single server for
+   * efficiency with multi operations..
+   * @param array $keys - The keys to be deleted.
+   * @param int $time - The amount of time the server will wait to delete
+   *   the items.
+   *
+   * @return array
+   */
+  <<__Native>>
+  public function deleteMultiByKey(string $server_key, array $keys,
+                                   int $time = 0): mixed;
+
+  /**
+   * Add an item under a new key on a specific server
+   *
+   * @param array $keys - The keys to be deleted.
+   * @param int $time - The amount of time the server will wait to delete
+   *   the items.
+   *
+   * @return array
+   */
+  public function deleteMulti(array $keys, int $time = 0): mixed {
+    return $this->deleteMultiByKey('', $keys, $time);
   }
 
   /**
@@ -376,7 +411,7 @@ class Memcached {
    */
   public function getMulti(mixed $keys,
                            mixed &$cas_tokens = null,
-                           mixed $flags = 0): mixed {
+                           int $flags = 0): mixed {
     return $this->getMultiByKey('', $keys, $cas_tokens, $flags);
   }
 
@@ -474,16 +509,17 @@ class Memcached {
    * @param string $key - The key of the item to increment.
    * @param int $offset - The amount by which to increment the item's
    *   value.
-   * @param int $initial_value - The value to set the item to if it
-   *   doesn't currently exist.
+   * @param mixed $initial_value - The value to set the item to if it
+   *   doesn't currently exist. False to fail if the key does not exist.
    * @param int $expiry - The expiry time to set on the item.
    *
-   * @return int - Returns new item's value on success.
+   * @return mixed - Returns new item's value on success. False if the key
+   * doesn't exist.
    */
   <<__Native>>
   public function increment(string $key,
                             int $offset = 1,
-                            int $initial_value = 0,
+                            mixed $initial_value = false,
                             int $expiry = 0): mixed;
 
   /**
@@ -493,18 +529,37 @@ class Memcached {
    * @param string $key - The key of the item to increment.
    * @param int $offset - The amount by which to increment the item's
    *   value.
-   * @param int $initial_value - The value to set the item to if it
-   *   doesn't currently exist.
+   * @param mixed $initial_value - The value to set the item to if it
+   *   doesn't currently exist. False to fail if the key does not exist.
    * @param int $expiry - The expiry time to set on the item.
    *
-   * @return int - Returns new item's value on success.
+   * @return mixed - Returns new item's value on success. False if the key
+   *   doesn't exist and no initial_value was provided.
    */
   <<__Native>>
   public function incrementByKey(string $server_key,
                                  string $key,
                                  int $offset = 1,
-                                 int $initial_value = 0,
+                                 mixed $initial_value = false,
                                  int $expiry = 0): mixed;
+
+  /**
+   * Check if a persitent connection to memcache is being used.
+   *
+   * @return bool - Returns true if Memcache instance uses a persistent
+   * connection, false otherwise.
+   */
+  <<__Native>>
+  public function isPersistent(): bool;
+
+  /**
+   * Check if the instance was recently created
+   *
+   * @return bool - Returns the true if instance is recently created,
+   * false otherwise.
+   */
+  <<__Native>>
+  public function isPristine(): bool;
 
   /**
    * Prepend data to an existing item
@@ -536,6 +591,13 @@ class Memcached {
                                string $value): bool;
 
   /**
+   * Memcached::quit() closes any open connections to the memcache servers. 
+   * @return bool TRUE on success or FALSE on failure
+  */
+  <<__Native>>
+  public function quit(): bool;
+
+  /**
    * Replace the item under an existing key
    *
    * @param string $key -
@@ -547,7 +609,7 @@ class Memcached {
    */
   public function replace(mixed $key,
                           mixed $value,
-                          mixed $expiration = 0): bool {
+                          int $expiration = 0): bool {
     return $this->replaceByKey('', $key, $value, $expiration);
   }
 
@@ -579,7 +641,7 @@ class Memcached {
    */
   public function set(mixed $key,
                       mixed $value,
-                      mixed $expiration = 0): bool {
+                      int $expiration = 0): bool {
     return $this->setByKey('', $key, $value, $expiration);
   }
 
@@ -663,7 +725,163 @@ class Memcached {
     return true;
   }
 
+  /**
+   * Set a new expiration on an item
+   *
+   * @param string $key - The key under which to store the value.
+   * @param int $expiration - The expiration time, defaults to 0.
+   *
+   * @return bool - Returns TRUE on success or FALSE on failure.
+   */
+  public function touch(string $key,
+                        int $expiration = 0): bool {
+    return $this->touchByKey('', $key, $expiration);
+  }
+
+  /**
+   * Set a new expiration on an item on a specific server
+   *
+   * @param string $server_key - The key identifying the server to store the
+   *   value on or retrieve it from. Instead of hashing on the actual key for
+   *   the item, we hash on the server key when deciding which memcached server
+   *   to talk to. This allows related items to be grouped together on a single
+   *   server for efficiency with multi operations.
+   * @param string $key - The key under which to store the value.
+   * @param int $expiration - The expiration time, defaults to 0.
+   *
+   * @return bool - Returns TRUE on success or FALSE on failure.
+   */
+  <<__Native>>
+  public function touchByKey(string $server_key,
+                             string $key,
+                             int $expiration = 0): bool;
+
 }
 
 class MemcachedException {
+}
+
+
+class MemcachedSessionModule implements SessionHandlerInterface {
+
+  const CONFIG_PERSISTENT = 'PERSISTENT=';
+
+  private $memcached;
+  private $persistentKey;
+
+  public function close() {
+    $this->memcached = null;
+    $this->persistentKey = null;
+    return true;
+  }
+
+  public function destroy($sessionId) {
+    $this->memcached->delete($sessionId);
+    return true;
+  }
+
+  public function gc($maxLifetime) {
+    return true;
+  }
+
+  public function open($savePath, $name) {
+    $serverList = self::parseSavePath($savePath);
+    if (!$serverList) {
+      return false;
+    }
+
+    $keyPrefix = trim((string)ini_get('memcached.sess_prefix'));
+    // Validate non-empty values (empty values are accepted)
+    if (strlen($keyPrefix) == 0 ||
+        strlen($keyPrefix) > 218 ||
+        !ctype_graph($keyPrefix)) {
+        trigger_error("Bad memcached key prefix in memcached.sess_prefix",
+                      E_WARNING);
+        return false;
+    }
+
+    $memcached = new Memcached($this->persistentKey);
+    foreach ($serverList as $serverInfo) {
+      $memcached->addServer($serverInfo['host'], $serverInfo['port']);
+    }
+
+    if (!$memcached->setOption(Memcached::OPT_PREFIX_KEY,
+                               $keyPrefix)) {
+      // setOption already throws a warning for bad values
+      return false;
+    }
+
+    $this->memcached = $memcached;
+
+    return true;
+  }
+
+  public function read($sessionId) {
+    $data = $this->memcached->get($sessionId);
+    if (!$data) {
+      // Return an empty string instead of false for new sessions as
+      // false values cause sessions to fail to init
+      return '';
+    }
+    return $data;
+  }
+
+  public function write($sessionId, $data) {
+    return $this->memcached->set($sessionId,
+                                 $data,
+                                 (int)ini_get('session.gc_maxlifetime'));
+  }
+
+  private static function parseSavePath($savePath) {
+    $savePath = trim($savePath);
+    if (empty($savePath)) {
+      trigger_error("Failed to initialize memcached session storage",
+                    E_WARNING);
+      return false;
+    }
+
+    // Handle persistent key at front of save_path
+    if (strncasecmp($savePath,
+                    self::CONFIG_PERSISTENT,
+                    strlen(self::CONFIG_PERSISTENT)) === 0) {
+      $savePath = substr($savePath, strlen(self::CONFIG_PERSISTENT) - 1);
+      if (empty($savePath)) {
+        trigger_error("Invalid persistent id for session storage",
+                      E_WARNING);
+        return false;
+      }
+
+      $explode = explode(' ', $savePath, 2);
+      if (count($explode) !== 2) {
+        trigger_error("Invalid persistent id for session storage",
+                      E_WARNING);
+        return false;
+      }
+
+      $this->persistentKey = $explode[0];
+      $savePath = $explode[1];
+    }
+
+    $serverList = explode(',', $savePath);
+
+    $return = array();
+    foreach ($serverList as $url) {
+      $url = trim($url);
+
+      // Skip empty servers
+      if (empty($url)) {
+        continue;
+      }
+      $explode = explode(':', $url, 2);
+
+      $serverInfo = array('host' => $explode[0]);
+
+      // When port is missing (e.g. unix socket) use port of 0
+      $serverInfo['port'] = (isset($explode[1])) ? (int)$explode[1] : 0;
+
+      $return[] = $serverInfo;
+    }
+
+    return $return;
+  }
 }

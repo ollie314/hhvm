@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,30 +17,31 @@
 #ifndef incl_HPHP_VM_CG_X64_H_
 #define incl_HPHP_VM_CG_X64_H_
 
-#include "hphp/runtime/vm/jit/code-gen.h"
 #include "hphp/runtime/vm/jit/arg-group.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers.h"
+#include "hphp/runtime/vm/jit/irlower.h"
+#include "hphp/runtime/vm/jit/target-cache.h"
 #include "hphp/runtime/vm/jit/target-profile.h"
-#include "hphp/runtime/vm/jit/vasm-x64.h"
+#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/vasm.h"
 
 namespace HPHP { namespace jit {
-namespace NativeCalls { struct CallInfo; }
-namespace arm { struct CodeGenerator; }
-namespace x64 {
 
-// Cache alignment is required for mutable instructions to make sure
-// mutations don't "tear" on remote cpus.
-constexpr size_t kCacheLineSize = 64;
-constexpr size_t kCacheLineMask = kCacheLineSize - 1;
+///////////////////////////////////////////////////////////////////////////////
+
+struct Vout;
+
+namespace NativeCalls { struct CallInfo; }
+
+///////////////////////////////////////////////////////////////////////////////
+
+namespace irlower {
+
+///////////////////////////////////////////////////////////////////////////////
 
 struct CodeGenerator {
-  friend struct arm::CodeGenerator;
-
-  CodeGenerator(CodegenState& state, Vout& main, Vout& cold)
-    : m_state(state)
-    , m_vmain(main)
-    , m_vcold(cold)
-  {}
+  explicit CodeGenerator(IRLS& state) : m_state(state) {}
 
   void cgInst(IRInstruction* inst);
 
@@ -61,139 +62,40 @@ private:
   CallDest callDest(const IRInstruction*) const;
   CallDest callDestTV(const IRInstruction*) const;
   CallDest callDestDbl(const IRInstruction*) const;
-  template<class Arg>
-  CppCall arrayCallIfLowMem(const IRInstruction* inst, Arg vtable) const;
 
-  // Main call helper:
-  void cgCallHelper(Vout& v, CppCall call, const CallDest& dstInfo,
-                    SyncOptions sync, ArgGroup& args);
+  void cgCallHelper(Vout& v, CallSpec call, const CallDest& dstInfo,
+                    SyncOptions sync, const ArgGroup& args);
   void cgInterpOneCommon(IRInstruction* inst);
-
-  enum class Width { Value, Full };
-  void emitStore(Vptr dst, SSATmp* src, Vloc src_loc, Width);
-  void emitStoreTypedValue(Vptr dst, SSATmp* src, Vloc src_loc);
-
-  void emitLoad(SSATmp* dst, Vloc dstLoc, Vptr base);
-  void emitLoadTypedValue(SSATmp* dst, Vloc dstLoc, Vptr ref);
 
   template <class JmpFn>
   void emitReffinessTest(IRInstruction* inst, Vreg sf, JmpFn doJcc);
 
-  template<class Loc1, class Loc2, class JmpFn>
-  void emitTypeTest(Type type, Loc1 typeSrc, Loc2 dataSrc, Vreg sf,
-                    JmpFn doJcc);
-
-  template<class DataLoc, class JmpFn>
-  void emitSpecializedTypeTest(Type type, DataLoc data, Vreg sf, JmpFn doJcc);
-
-  template<class Loc>
-  void emitTypeCheck(Type type, Loc typeSrc,
-                     Loc dataSrc, Block* taken);
-  template<class Loc>
-  void emitTypeGuard(const BCMarker& marker, Type type, Loc typeLoc,
-                     Loc dataLoc);
-
-  void cgIncRefWork(Type type, SSATmp* src, Vloc srcLoc);
-  void cgDecRefWork(IRInstruction* inst, bool genZeroCheck);
-
-  template<class Emit> void cgBinaryDblOp(IRInstruction*, Emit);
-  template<class Op, class Opi> void cgShiftCommon(IRInstruction*);
-
   void emitVerifyCls(IRInstruction* inst);
 
-  void emitGetCtxFwdCallWithThis(Vreg srcCtx, Vreg dstCtx, bool staticCallee);
-
-  Vreg emitGetCtxFwdCallWithThisDyn(Vreg destCtxReg, Vreg thisReg,
-                                    RDS::Handle ch);
-
-  void cgJcc(IRInstruction* inst);          // helper
-  void cgReqBindJcc(IRInstruction* inst);   // helper
-  void cgExitJcc(IRInstruction* inst);      // helper
-  void cgJccInt(IRInstruction* inst);         // helper
-  void cgReqBindJccInt(IRInstruction* inst);  // helper
-  void cgExitJccInt(IRInstruction* inst); // helper
-  void emitCmpInt(IRInstruction* inst, ConditionCode cc);
-  void emitCmpEqDbl(IRInstruction* inst, ComparisonPred pred);
-  void emitCmpRelDbl(IRInstruction* inst, ConditionCode cc, bool flipOperands);
-  void cgCmpHelper(IRInstruction* inst, ConditionCode cc,
-                   int64_t (*str_cmp_str)(StringData*, StringData*),
-                   int64_t (*str_cmp_int)(StringData*, int64_t),
-                   int64_t (*str_cmp_obj)(StringData*, ObjectData*),
-                   int64_t (*obj_cmp_obj)(ObjectData*, ObjectData*),
-                   int64_t (*obj_cmp_int)(ObjectData*, int64_t),
-                   int64_t (*arr_cmp_arr)(ArrayData*, ArrayData*));
-
-  template<class Loc>
-  void emitSideExitGuard(const IRInstruction* inst, Type type, Loc typeLoc,
-                         Loc dataLoc, Offset taken);
-  void emitReqBindJcc(Vout& v, ConditionCode cc, Vreg sf,
-                      const ReqBindJccData*);
-
-  Vreg emitCompare(Vout& v, IRInstruction* inst);
-  Vreg emitCompareInt(Vout& v, IRInstruction* inst);
+  void cgCoerceHelper(IRInstruction* inst, Vreg base, int offset,
+                      Func const* callee, int argNum);
+  void cgCastHelper(IRInstruction* inst, Vreg base, int offset);
   Vreg emitTestZero(Vout& v, SSATmp* src, Vloc srcLoc);
   template<class Inst>
   bool emitIncDec(Vout& v, Vloc dst, SSATmp* src0, Vloc loc0,
                   SSATmp* src1, Vloc loc1, Vreg& sf);
-  Vreg emitAddInt(Vout& v, IRInstruction* inst);
-  Vreg emitSubInt(Vout& v, IRInstruction* inst);
-  Vreg emitMulInt(Vout& v, IRInstruction* inst);
+
+  Vptr emitPackedLayoutAddr(SSATmp* idx, Vloc idxLoc, Vloc arrLoc);
 
 private:
   Vreg selectScratchReg(IRInstruction* inst);
   RegSet findFreeRegs(IRInstruction* inst);
-  void emitSetCc(IRInstruction*, ConditionCode cc, Vreg sf);
-  template<class JmpFn>
-  void emitIsTypeTest(IRInstruction* inst, Vreg sf, JmpFn doJcc);
-  void cgIsTypeCommon(IRInstruction* inst, bool negate);
-  void cgIsTypeMemCommon(IRInstruction*, bool negate);
-  Vreg emitInstanceBitmaskCheck(Vout& v, IRInstruction* inst);
   void emitInitObjProps(const IRInstruction* inst, Vreg dstReg,
                         const Class* cls, size_t nProps);
 
-  bool decRefDestroyIsUnlikely(const IRInstruction* inst,
-                               OptDecRefProfile& profile, Type type);
-  template <typename F>
-  void cgCheckStaticBitAndDecRef(Vout& v, const IRInstruction* inst,
-                                 Vlabel done, Type type,
-                                 Vreg dataReg, F destroyImpl);
-  void cgCheckStaticBitAndDecRef(Vout& v, const IRInstruction* inst,
-                                 Vlabel done, Type type,
-                                 Vreg dataReg);
-  void cgCheckRefCountedType(Vreg typeReg, Vlabel done);
-  void cgCheckRefCountedType(Vreg baseReg, int64_t offset, Vlabel done);
-  void cgDecRefStaticType(Vout&, const IRInstruction* inst, Type type,
-                          Vreg dataReg, bool genZeroCheck);
-  void cgDecRefDynamicType(const IRInstruction* inst, Vreg typeReg,
-                           Vreg dataReg, bool genZeroCheck);
-  void cgDecRefDynamicTypeMem(const IRInstruction* inst, Vreg baseReg,
-                              int64_t offset);
-  void cgDecRefMem(const IRInstruction* inst, Type type, Vreg baseReg,
-                   int64_t offset);
-
-  void cgIterNextCommon(IRInstruction* inst);
-  void cgIterInitCommon(IRInstruction* inst);
-  void cgMIterNextCommon(IRInstruction* inst);
-  void cgMIterInitCommon(IRInstruction* inst);
-  Vreg cgLdFuncCachedCommon(IRInstruction* inst, Vreg dst);
-  void cgLookupCnsCommon(IRInstruction* inst);
-  RDS::Handle cgLdClsCachedCommon(Vout& v, IRInstruction* inst, Vreg dst,
-                                  Vreg sf);
-  void cgDefineModifiedStkPtr(IRInstruction*);
   void cgPropImpl(IRInstruction*);
-  void cgVGetPropImpl(IRInstruction*);
-  void cgBindPropImpl(IRInstruction*);
-  void cgSetPropImpl(IRInstruction*);
-  void cgSetOpPropImpl(IRInstruction*);
-  void cgIncDecPropImpl(IRInstruction*);
   void cgIssetEmptyPropImpl(IRInstruction*);
   void cgElemImpl(IRInstruction*);
   void cgElemArrayImpl(IRInstruction*);
-  void cgVGetElemImpl(IRInstruction*);
   void cgArraySetImpl(IRInstruction*);
-  void cgSetElemImpl(IRInstruction*);
-  void cgUnsetElemImpl(IRInstruction*);
   void cgIssetEmptyElemImpl(IRInstruction*);
+
+  void arrayLikeCountImpl(IRInstruction*);
 
   Vlabel label(Block*);
   void emitFwdJcc(Vout& v, ConditionCode cc, Vreg sf, Block* target);
@@ -211,83 +113,20 @@ private:
     return marker.resumed();
   };
 
-  Fixup makeFixup(const BCMarker& marker,
-                  SyncOptions sync = SyncOptions::kSyncPoint);
   int iterOffset(const BCMarker& marker, uint32_t id);
 
   void emitConvBoolOrIntToDbl(IRInstruction* inst);
-  void cgLdClsMethodCacheCommon(IRInstruction* inst, Offset offset);
   void emitLdRaw(IRInstruction* inst, size_t extraOff);
   void emitStRaw(IRInstruction* inst, size_t offset, int size);
-  void resumableStResumeImpl(IRInstruction*, ptrdiff_t, ptrdiff_t);
 
-  void emitStoreTypedValue(Vout& v, Vreg base, ptrdiff_t offset,
-    Vloc src, Type srcType);
-
-  /*
-   * Execute the code emitted by 'taken' only if the given condition code is
-   * true.
-   */
-  template <class Block>
-  void ifBlock(Vout& v, Vout& vcold, ConditionCode cc, Vreg sf, Block taken,
-             bool unlikely = false);
-
-  /*
-   * Generate an if-block that branches around some unlikely code, handling
-   * the cases when a == acold and a != acold.  cc is the branch condition
-   * to run the unlikely block.
-   *
-   * Passes the proper assembler to use to the unlikely function.
-   */
-  template <class Then>
-  void unlikelyIfBlock(Vout& v, Vout& vcold, ConditionCode cc, Vreg sf,
-                       Then then);
-
-  // Generate an if-then-else block
-  template <class Then, class Else>
-  void ifThenElse(Vout& v, ConditionCode cc, Vreg sf, Then thenBlock,
-                  Else elseBlock);
-
-  // Generate an if-then-else block into m_as.
-  template <class Then, class Else>
-  void ifThenElse(Vout& v, Vout& vcold, ConditionCode cc, Vreg sf,
-                  Then thenBlock, Else elseBlock, bool unlikely = false);
-
-  /*
-   * Same as ifThenElse except the first block is off in acold
-   */
-  template <class Then, class Else>
-  void unlikelyIfThenElse(Vout& v, Vout& vcold, ConditionCode cc, Vreg sf,
-                          Then unlikelyBlock, Else elseBlock);
-
-  // This is for printing partially-generated traces when debugging
-  void print() const;
-
-  Vout& vmain() { return m_vmain; }
-  Vout& vcold() { return m_vcold; }
+  Vout& vmain() { assert(m_state.vmain); return *m_state.vmain; }
+  Vout& vcold() { assert(m_state.vcold); return *m_state.vcold; }
 
 private:
-  CodegenState&       m_state;
-  Vout&               m_vmain;
-  Vout&               m_vcold;
+  IRLS& m_state;
 };
 
-// Helpers to compute a reference to a TypedValue type and data
-inline Vptr refTVType(Vreg reg) {
-  return reg[TVOFF(m_type)];
-}
-
-inline Vptr refTVData(Vreg reg) {
-  return reg[TVOFF(m_data)];
-}
-
-inline Vptr refTVType(Vptr ref) {
-  return ref + TVOFF(m_type);
-}
-
-inline Vptr refTVData(Vptr ref) {
-  return ref + TVOFF(m_data);
-}
+///////////////////////////////////////////////////////////////////////////////
 
 }}}
 

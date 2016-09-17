@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,63 +29,53 @@ namespace HPHP {
 StaticClassName::StaticClassName(ExpressionPtr classExp)
     : m_class(classExp),
       m_self(false), m_parent(false), m_static(false),
-      m_redeclared(false), m_present(false), m_forcePresent(false),
-      m_unknown(true) {
+      m_redeclared(false), m_present(false), m_unknown(true) {
   updateClassName();
-  if (m_origClassName == "parent") {
+  auto const isame = [](const std::string& a, const std::string& b) {
+    return (a.size() == b.size()) &&
+           !strncasecmp(a.c_str(), b.c_str(), a.size());
+  };
+  if (isame(m_origClassName, "parent")) {
     m_parent = true;
-  } else if (m_origClassName == "self") {
+  } else if (isame(m_origClassName, "self")) {
     m_self = true;
-  } else if (m_origClassName == "static") {
+  } else if (isame(m_origClassName, "static")) {
     m_static = true;
     m_present = true;
     m_class = classExp;
-    m_className = m_origClassName = "";
+    m_origClassName = "";
   }
 }
 
 void StaticClassName::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
-  if (!m_self && !m_parent && !m_static && !m_className.empty()) {
-    ar->parseOnDemandByClass(m_className);
+  if (!m_self && !m_parent && !m_static && hasStaticClass()) {
+    ar->parseOnDemandByClass(m_origClassName);
   }
+}
+
+bool StaticClassName::isNamed(folly::StringPiece clsName) const {
+  return bstrcasecmp(m_origClassName, clsName) == 0;
 }
 
 void StaticClassName::updateClassName() {
   if (m_class && m_class->is(Expression::KindOfScalarExpression) &&
       !m_static) {
-    ScalarExpressionPtr s(dynamic_pointer_cast<ScalarExpression>(m_class));
-    const string &className = s->getString();
-    m_className = toLower(className);
+    auto s = dynamic_pointer_cast<ScalarExpression>(m_class);
+    auto const& className = s->getString();
     m_origClassName = className;
     m_class.reset();
   } else {
-    m_className = "";
+    m_origClassName = "";
   }
-}
-
-static BlockScopeRawPtr originalScope(StaticClassName *scn) {
-  Expression *e = dynamic_cast<Expression*>(scn);
-  if (e) return e->getOriginalScope();
-  return dynamic_cast<Statement*>(scn)->getScope();
-}
-
-void StaticClassName::resolveStatic(const string &name) {
-  always_assert(isStatic());
-  m_static = m_self = m_parent = false;
-  m_present = false;
-  m_class.reset();
-  m_origClassName = name;
-  m_className = toLower(name);
 }
 
 ClassScopePtr StaticClassName::resolveClass() {
   m_present = false;
   m_unknown = true;
   if (m_class) return ClassScopePtr();
-  BlockScopeRawPtr scope = originalScope(this);
+  auto scope = dynamic_cast<Construct*>(this)->getScope();
   if (m_self) {
     if (ClassScopePtr self = scope->getContainingClass()) {
-      m_className = self->getName();
       m_origClassName = self->getOriginalName();
       m_present = true;
       m_unknown = false;
@@ -94,7 +84,6 @@ ClassScopePtr StaticClassName::resolveClass() {
   } else if (m_parent) {
     if (ClassScopePtr self = scope->getContainingClass()) {
       if (!self->getOriginalParent().empty()) {
-        m_className = toLower(self->getOriginalParent());
         m_origClassName = self->getOriginalParent();
         m_present = true;
       }
@@ -102,16 +91,15 @@ ClassScopePtr StaticClassName::resolveClass() {
       m_parent = false;
     }
   }
-  ClassScopePtr cls = scope->getContainingProgram()->findClass(m_className);
+  ClassScopePtr cls = scope->getContainingProgram()->findClass(m_origClassName);
   if (cls) {
     m_unknown = false;
     if (cls->isVolatile()) {
-      ClassScopeRawPtr c = scope->getContainingFile()->resolveClass(cls);
-      if (!c) {
-        c = scope->getContainingClass();
-        if (c && c->getName() != m_className) c.reset();
+      ClassScopeRawPtr c = scope->getContainingClass();
+      if (c && c->isNamed(m_origClassName)) {
+        c.reset();
       }
-      m_present = c.get() != 0;
+      m_present = c.get() != nullptr;
       if (cls->isRedeclaring()) {
         cls = c;
         if (!m_present) m_redeclared = true;
@@ -121,66 +109,6 @@ ClassScopePtr StaticClassName::resolveClass() {
     }
   }
   return cls;
-}
-
-ClassScopePtr StaticClassName::resolveClassWithChecks() {
-  ClassScopePtr cls = resolveClass();
-  if (!m_class && !cls) {
-    Construct *self = dynamic_cast<Construct*>(this);
-    BlockScopeRawPtr scope = self->getScope();
-    if (isRedeclared()) {
-      scope->getVariables()->setAttribute(VariableTable::NeedGlobalPointer);
-    } else if (scope->isFirstPass()) {
-      ClassScopeRawPtr cscope = scope->getContainingClass();
-      if (!cscope ||
-          !cscope->isTrait() ||
-          (!isSelf() && !isParent())) {
-        Compiler::Error(Compiler::UnknownClass, self->shared_from_this());
-      }
-    }
-  }
-  return cls;
-}
-
-bool StaticClassName::checkPresent() {
-  if (m_self || m_parent || m_static) return true;
-  BlockScopeRawPtr scope = originalScope(this);
-  FileScopeRawPtr currentFile = scope->getContainingFile();
-  if (currentFile) {
-    AnalysisResultPtr ar = currentFile->getContainingProgram();
-    ClassScopeRawPtr cls = ar->findClass(m_className);
-    if (!cls) return false;
-    if (!cls->isVolatile()) return true;
-    if (currentFile->resolveClass(cls)) return true;
-    if (currentFile->checkClass(m_className)) return true;
-  }
-
-  if (ClassScopePtr self = scope->getContainingClass()) {
-    if (m_className == self->getName() ||
-        self->derivesFrom(scope->getContainingProgram(), m_className,
-                          true, false)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void StaticClassName::outputCodeModel(CodeGenerator &cg) {
-  if (isStatic() || !m_origClassName.empty()) {
-    cg.printPropertyHeader("class");
-  } else {
-    cg.printPropertyHeader("classExpression");
-  }
-  if (isStatic()) {
-    cg.printTypeExpression("static");
-  } else if (!m_origClassName.empty()) {
-    cg.printTypeExpression(m_origClassName);
-  } else {
-    m_class->outputCodeModel(cg);
-  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

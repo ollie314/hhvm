@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,14 +8,19 @@
  *
  *)
 
-(*****************************************************************************)
+(****************************************************************************)
 (* Moduling Making buckets.
  * When we parallelize, we need to create "buckets" of tasks for the
  * workers.
- *)
-(*****************************************************************************)
+ * Given a list of files, we want to split it up into buckets such that
+ * every worker is busy long enough. If the bucket is too big, it hurts
+ * load balancing, if it is too small, the overhead in synchronization time
+ * hurts *)
+(****************************************************************************)
 
-let make nbr_procs bucket_size jobs =
+type 'a t = unit -> 'a list
+
+let make_ bucket_size jobs =
   let i = ref 0 in
   fun () ->
     let bucket_size = min (Array.length jobs - !i) bucket_size in
@@ -23,14 +28,11 @@ let make nbr_procs bucket_size jobs =
     i := bucket_size + !i;
     Array.to_list result
 
-let max_bucket_size = 500
-
-let make jobs = 
+let make ~num_workers ?(max_size=500) jobs =
   let jobs = Array.of_list jobs in
-  let nbr_procs = ServerConfig.nbr_procs in
-  let bucket_size = 
-    if Array.length jobs < ServerConfig.nbr_procs * max_bucket_size
-    then max 1 (1 + ((Array.length jobs) / nbr_procs))
-    else max_bucket_size
+  let bucket_size =
+    if Array.length jobs < num_workers * max_size
+    then max 1 (1 + ((Array.length jobs) / num_workers))
+    else max_size
   in
-  make ServerConfig.nbr_procs bucket_size jobs
+  make_ bucket_size jobs

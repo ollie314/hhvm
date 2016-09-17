@@ -5,8 +5,10 @@ from __future__ import print_function
 from __future__ import unicode_literals
 import benchy_config as config
 import benchy_utils as utils
+import multiprocessing
 import os
 import shlex
+import shutil
 import subprocess
 
 
@@ -17,7 +19,7 @@ class Platform(object):
     def __init__(self):
         self.name = "fb"
         self.build_internal_path = os.path.join(
-            config.SRCROOT_PATH[1:], '_build', 'opt', 'hphp')
+            config.SRCROOT_PATH[1:], '_build', 'USE_LOWPTR-opt', 'hphp')
 
     def switch_to_branch(self, branch):
         """Switches the current repository to the specified branch.
@@ -34,8 +36,13 @@ class Platform(object):
 
         """
         build_dir = branch.build_dir()
-        utils.run_command('fbmake clean')
+        build_link = os.path.join(config.SRCROOT_PATH, '_build')
+        if os.path.islink(build_link):
+            os.remove(build_link)
+        else:
+            shutil.rmtree(build_link, ignore_errors=True)
         env = os.environ.copy()
         env['FBMAKE_BUILD_ROOT'] = build_dir
+        cpus = multiprocessing.cpu_count()
         utils.run_command('/usr/local/bin/fbmake --build-root "%s" '
-                     '--ccache=off --distcc=on opt -j9000' % build_dir, env=env)
+                        '--build-flag USE_LOWPTR --distcc=off opt -j%d' % (build_dir, cpus), env=env)

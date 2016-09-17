@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,20 +17,19 @@
 #ifndef incl_HPHP_CPP_BASE_SHARED_SHARED_STRING_H_
 #define incl_HPHP_CPP_BASE_SHARED_SHARED_STRING_H_
 
-#include "hphp/runtime/base/smart-ptr.h"
-#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/atomic-shared-ptr.h"
 #include <tbb/concurrent_hash_map.h>
 #include <tbb/atomic.h>
 #include "hphp/util/atomic.h"
 #include "hphp/util/hash.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 /**
  * Interned immutable strings sharable across threads.
  */
-class SharedStringData {
-public:
+struct SharedStringData {
   explicit SharedStringData(const std::string &data);
   void incAtomicCount() const {
     m_count.fetch_and_increment();
@@ -47,13 +46,12 @@ protected:
   static InternMap s_intern;
 };
 
-class SharedString : public AtomicSmartPtr<SharedStringData> {
-public:
+struct SharedString : AtomicSharedPtr<SharedStringData> {
   SharedString() {}
   /* implicit */ SharedString(SharedStringData *px)
-    : AtomicSmartPtr<SharedStringData>(px) {}
+    : AtomicSharedPtr<SharedStringData>(px) {}
   /* implicit */ SharedString(const SharedString &src)
-    : AtomicSmartPtr<SharedStringData>(src) {}
+    : AtomicSharedPtr<SharedStringData>(src) {}
   /* implicit */ SharedString(const std::string &data) {
     operator=(data);
   }
@@ -81,10 +79,8 @@ struct shared_string_hash {
 };
 
 template<typename T>
-class hphp_shared_string_map :
-    public hphp_hash_map<SharedString, T, shared_string_hash,
-                         shared_string_eq> {
-};
+using hphp_shared_string_map =
+  hphp_hash_map<SharedString, T, shared_string_hash, shared_string_eq>;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

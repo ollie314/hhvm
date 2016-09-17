@@ -18,6 +18,8 @@ string(3) "ABC"
 string(3) "Abc"
 string(3) "aBC"
 string(7) "Abc Def"
+string(7) "Abc def"
+string(9) "Abc%cD%ce%cF"
 string(26) "Test paragraph. Other text"
 string(57) "<p>Test paragraph.</p> <a href="#fragment">Other text</a>"
 string(3) "abc"
@@ -128,6 +130,8 @@ string(28) "0=&5S=`IT97AT('1E>'0-"@``
 "
 string(9) "CUC 4.3.0"
 int(2191738434)
+
+Notice: crypt(): No salt parameter was specified. You must use a randomly generated salt and a strong hash function to produce a secure hash. in %s on line %s
 int(34)
 string(32) "1f3870be274f6c49b3e31a0c6728957f"
 string(40) "d0be2dc421be4fcd0172e5afceea3970e2f3d940"
@@ -184,8 +188,8 @@ int(1)
 int(1)
 int(0)
 int(-1)
-int(-1)
-int(32)
+bool(true)
+bool(true)
 int(0)
 int(0)
 int(0)
@@ -208,7 +212,7 @@ int(0)
 int(7)
 bool(false)
 
-Warning: Empty delimiter in %s on line 378
+Warning: Empty delimiter in %s on line 379
 bool(false)
 int(7)
 int(7)

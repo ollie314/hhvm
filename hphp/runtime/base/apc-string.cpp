@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,32 +18,35 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-APCHandle* APCString::MakeShared(
-    DataType type, StringData* data, size_t& size) {
-  auto const len = data->size();
-  auto const cap = roundUpPackedCap(static_cast<uint32_t>(len));
-  auto const apcStr = new (cap + 1) APCString(type);
-  auto const capCode = packedCapToCode(cap);
-  size = cap + 1 + sizeof(APCString);
+APCHandle::Pair
+APCString::MakeSharedString(APCKind kind, StringData* data) {
+  auto const len    = static_cast<uint32_t>(data->size());
+  auto const cc     = CapCode::ceil(len);
+  auto const cap    = cc.decode();
+  auto const size   = cap + 1 + sizeof(APCString);
+  auto const mem    = std::malloc(size);
+  auto apcStr       = new (mem) APCString(kind);
 
-  apcStr->m_data.m_data        = reinterpret_cast<char*>(apcStr + 1);
-  apcStr->m_data.m_capAndCount = HeaderKind::String << 24 | capCode; // count=0
-  apcStr->m_data.m_len         = len; // don't store hash
+  auto const chars  = reinterpret_cast<char*>(apcStr + 1);
+#ifndef NO_M_DATA
+  apcStr->m_str.m_data = chars;
+#endif
+  apcStr->m_str.m_hdr.init(cc, HeaderKind::String, UncountedValue);
+  apcStr->m_str.m_len         = len; // don't store hash
 
-  apcStr->m_data.m_data[len] = 0;
-  auto const mcret = memcpy(apcStr->m_data.m_data, data->data(), len);
-  auto const ret   = reinterpret_cast<APCString*>(mcret) - 1;
-  // Recalculating ret from mcret avoids a spill.
+  assert(apcStr == reinterpret_cast<APCString*>(chars) - 1);
+  auto const mcret = memcpy(chars, data->data(), len + 1);
+  apcStr = reinterpret_cast<APCString*>(mcret) - 1;
+  // Recalculating apcStr from mcret avoids a spill.
 
-  ret->m_data.preCompute();
+  apcStr->m_str.preCompute();
 
-  assert(ret == apcStr);
-  assert(apcStr->m_data.m_hash != 0);
-  assert(ret->m_data.m_data[len] == 0);
-  assert(ret->m_data.m_count == 0);
-  assert(ret->m_data.isFlat());
-  assert(ret->m_data.checkSane());
-  return ret->getHandle();
+  assert(apcStr->m_str.m_hash != 0);
+  assert(apcStr->m_str.data()[len] == 0);
+  assert(apcStr->m_str.isUncounted());
+  assert(apcStr->m_str.isFlat());
+  assert(apcStr->m_str.checkSane());
+  return {&apcStr->m_handle, size};
 }
 
 ///////////////////////////////////////////////////////////////////////////////

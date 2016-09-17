@@ -1,7 +1,7 @@
 <?hh
 
 async function block() {
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
 }
 
 async function foo() {
@@ -16,4 +16,4 @@ async function foo() {
   return await $awaitable;
 }
 
-var_dump(foo()->join());
+var_dump(HH\Asio\join(foo()));

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,17 +17,21 @@
 
 #include "hphp/runtime/ext/xenon/ext_xenon.h"
 
-#include "hphp/runtime/ext/std/ext_std_function.h"
+
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/request-injection-data.h"
-#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/surprise-flags.h"
+#include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/backtrace.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/vm/vm-regs.h"
 
 #include <signal.h>
 #include <time.h>
 
-#include <iostream>
+#include <folly/Random.h>
 
 namespace HPHP {
 
@@ -36,13 +40,17 @@ TRACE_SET_MOD(xenon);
 void *s_waitThread(void *arg) {
   TRACE(1, "s_waitThread Starting\n");
   sem_t* sem = static_cast<sem_t*>(arg);
-  while (sem_wait(sem) == 0) {
-    TRACE(1, "s_waitThread Fired\n");
-    if (Xenon::getInstance().m_stopping) {
-      TRACE(1, "s_waitThread is exiting\n");
-      return nullptr;
+  while (true) {
+    if (sem_wait(sem) == 0) {
+      TRACE(1, "s_waitThread Fired\n");
+      if (Xenon::getInstance().m_stopping) {
+        TRACE(1, "s_waitThread is exiting\n");
+        return nullptr;
+      }
+      Xenon::getInstance().surpriseAll();
+    } else if (errno != EINTR) {
+      break;
     }
-    Xenon::getInstance().surpriseAll();
   }
   TRACE(1, "s_waitThread Ending\n");
   return nullptr;
@@ -52,22 +60,25 @@ void *s_waitThread(void *arg) {
 
 // Data that is kept per request and is only valid per request.
 // This structure gathers a php and async stack trace when log is called.
-// These logged stacks can be then gathered via php a call, xenon_get_data.
+// These logged stacks can be then gathered via a php call, xenon_get_data.
 // It needs to allocate and free its Array per request, because Array lifetime
 // is per-request.  So the flow for these objects are:
 // allocated when a web request begins (if Xenon is enabled)
 // grab snapshots of the php and async stack when log is called
 // detach itself from its snapshots when the request is ending.
 namespace {
-struct XenonRequestLocalData : public RequestEventHandler  {
+struct XenonRequestLocalData final : RequestEventHandler  {
   XenonRequestLocalData();
-  virtual ~XenonRequestLocalData();
-  void log(Xenon::SampleType t);
+  ~XenonRequestLocalData();
+  void log(Xenon::SampleType t, c_WaitableWaitHandle* wh = nullptr);
   Array createResponse();
 
-  // virtual from RequestEventHandler
+  // implement RequestEventHandler
   void requestInit() override;
   void requestShutdown() override;
+  void vscan(IMarker& mark) const override {
+    mark(m_stackSnapshots);
+  }
 
   // an array of php stacks
   Array m_stackSnapshots;
@@ -83,8 +94,10 @@ const StaticString
   s_function("function"),
   s_file("file"),
   s_line("line"),
+  s_metadata("metadata"),
   s_time("time"),
   s_isWait("ioWaitSample"),
+  s_stack("stack"),
   s_phpStack("phpStack");
 
 namespace {
@@ -94,27 +107,35 @@ Array parsePhpStack(const Array& bt) {
   for (ArrayIter it(bt); it; ++it) {
     const auto& frame = it.second().toArray();
     if (frame.exists(s_function)) {
+      bool fileline = frame.exists(s_file) && frame.exists(s_line);
+      bool metadata = frame.exists(s_metadata);
+
+      ArrayInit element(
+        1 + (fileline ? 2 : 0) + (metadata ? 1 : 0),
+        ArrayInit::Map{}
+      );
+
       if (frame.exists(s_class)) {
         auto func = folly::to<std::string>(
           frame[s_class].toString().c_str(),
           "::",
           frame[s_function].toString().c_str()
         );
-        stack.append(make_map_array(
-          s_function, func,
-          s_file, frame[s_file],
-          s_line, frame[s_line]
-        ));
+        element.set(s_function, func);
       } else {
-        bool fileline = frame.exists(s_file) && frame.exists(s_line);
-        ArrayInit element(fileline ? 3 : 1, ArrayInit::Map{});
         element.set(s_function, frame[s_function].toString());
-        if (fileline) {
-          element.set(s_file, frame[s_file]);
-          element.set(s_line, frame[s_line]);
-        }
-        stack.append(element.toArray());
       }
+
+      if (fileline) {
+        element.set(s_file, frame[s_file]);
+        element.set(s_line, frame[s_line]);
+      }
+
+      if (metadata) {
+        element.set(s_metadata, frame[s_metadata]);
+      }
+
+      stack.append(element.toArray());
     }
   }
   return stack.toArray();
@@ -135,7 +156,7 @@ Xenon& Xenon::getInstance() noexcept {
 }
 
 Xenon::Xenon() noexcept : m_stopping(false) {
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_MSC_VER)
   m_timerid = 0;
 #endif
 }
@@ -146,7 +167,7 @@ Xenon::Xenon() noexcept : m_stopping(false) {
 // We need to create a semaphore and a thread.
 // If all of those happen, then we need a timer attached to a signal handler.
 void Xenon::start(uint64_t msec) {
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_MSC_VER)
   TRACE(1, "XenonForceAlwaysOn %d\n", RuntimeOption::XenonForceAlwaysOn);
   if (!RuntimeOption::XenonForceAlwaysOn
       && m_timerid == 0
@@ -160,12 +181,11 @@ void Xenon::start(uint64_t msec) {
     TRACE(1, "Xenon::start periodic %ld seconds, %ld nanoseconds\n", sec, nsec);
 
     // for the initial timer, we want to stagger time for large installations
-    unsigned int seed = time(nullptr);
-    uint64_t msecInit = msec * (1.0 + rand_r(&seed) / (double)RAND_MAX);
-    time_t fSec = msecInit / 1000;
-    long fNsec = (msecInit % 1000) * 1000000;
-    TRACE(1, "Xenon::start initial %ld seconds, %ld nanoseconds\n",
-       fSec, fNsec);
+    auto const msecInit = folly::Random::rand32(static_cast<uint32_t>(msec));
+    auto const fSec = msecInit / 1000;
+    auto const fNsec = (msecInit % 1000) * 1000000;
+    TRACE(1, "Xenon::start initial %d seconds, %d nanoseconds\n",
+          fSec, fNsec);
 
     sigevent sev={};
     sev.sigev_notify = SIGEV_SIGNAL;
@@ -185,7 +205,7 @@ void Xenon::start(uint64_t msec) {
 
 // If Xenon owns a pthread, tell it to stop, also clean up anything from start.
 void Xenon::stop() {
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_MSC_VER)
   if (m_timerid) {
     m_stopping = true;
     sem_post(&m_timerTriggered);
@@ -203,14 +223,13 @@ void Xenon::stop() {
 // the Surprise flag.  The data is gathered in thread local storage.
 // If the sample is Enter, then do not record this function name because it
 // hasn't done anything.  The sample belongs to the previous function.
-void Xenon::log(SampleType t) const {
-  RequestInjectionData *rid = &ThreadInfo::s_threadInfo->m_reqInjectionData;
-  if (rid->checkXenonSignalFlag()) {
+void Xenon::log(SampleType t, c_WaitableWaitHandle* wh) const {
+  if (getSurpriseFlag(XenonSignalFlag)) {
     if (!RuntimeOption::XenonForceAlwaysOn) {
-      rid->clearXenonSignalFlag();
+      clearSurpriseFlag(XenonSignalFlag);
     }
     TRACE(1, "Xenon::log %s\n", (t == IOWaitSample) ? "IOWait" : "Normal");
-    s_xenonData->log(t);
+    s_xenonData->log(t, wh);
   }
 }
 
@@ -224,7 +243,8 @@ void Xenon::onTimer() {
 void Xenon::surpriseAll() {
   TRACE(1, "Xenon::surpriseAll\n");
   ThreadInfo::ExecutePerThread(
-    [](ThreadInfo *t) {t->m_reqInjectionData.setXenonSignalFlag();} );
+    [] (ThreadInfo* t) { t->m_reqInjectionData.setFlag(XenonSignalFlag); }
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -249,23 +269,25 @@ Array XenonRequestLocalData::createResponse() {
     const auto& frame = it.second().toArray();
     stacks.append(make_map_array(
       s_time, frame[s_time],
-      s_phpStack, parsePhpStack(frame[s_phpStack].toArray()),
+      s_stack, frame[s_stack].toArray(),
+      s_phpStack, parsePhpStack(frame[s_stack].toArray()),
       s_isWait, frame[s_isWait]
     ));
   }
   return stacks.toArray();
 }
 
-void XenonRequestLocalData::log(Xenon::SampleType t) {
+void XenonRequestLocalData::log(Xenon::SampleType t, c_WaitableWaitHandle* wh) {
   TRACE(1, "XenonRequestLocalData::log\n");
   time_t now = time(nullptr);
   auto bt = createBacktrace(BacktraceArgs()
                              .skipTop(t == Xenon::EnterSample)
-                             .withSelf()
+                             .fromWaitHandle(wh)
+                             .withMetadata()
                              .ignoreArgs());
   m_stackSnapshots.append(make_map_array(
     s_time, now,
-    s_phpStack, bt,
+    s_stack, bt,
     s_isWait, (t == Xenon::IOWaitSample)
   ));
 }
@@ -274,18 +296,18 @@ void XenonRequestLocalData::requestInit() {
   TRACE(1, "XenonRequestLocalData::requestInit\n");
   m_stackSnapshots = Array::Create();
   if (RuntimeOption::XenonForceAlwaysOn) {
-    ThreadInfo::s_threadInfo->m_reqInjectionData.setXenonSignalFlag();
+    setSurpriseFlag(XenonSignalFlag);
   } else {
-    // clear any Xenon flags that might still be on in this thread so
-    // that we do not have a bias towards the first function
-    ThreadInfo::s_threadInfo->m_reqInjectionData.clearXenonSignalFlag();
+    // Clear any Xenon flags that might still be on in this thread so that we do
+    // not have a bias towards the first function.
+    clearSurpriseFlag(XenonSignalFlag);
   }
 }
 
 void XenonRequestLocalData::requestShutdown() {
   TRACE(1, "XenonRequestLocalData::requestShutdown\n");
-  ThreadInfo::s_threadInfo->m_reqInjectionData.clearXenonSignalFlag();
-  m_stackSnapshots.detach();
+  clearSurpriseFlag(XenonSignalFlag);
+  m_stackSnapshots.reset();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -303,8 +325,7 @@ Array HHVM_FUNCTION(xenon_get_data, void) {
 
 } // namespace
 
-class xenonExtension : public Extension {
- public:
+struct xenonExtension final : Extension {
   xenonExtension() : Extension("xenon", "1.0") { }
 
   void moduleInit() override {

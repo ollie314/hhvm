@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,12 +8,15 @@
  *
  *)
 
-open Utils
+open Core
 
 module Env = Typing_env
+open Env
 module TUtils = Typing_utils
 module Type = Typing_ops
 module Reason = Typing_reason
+
+module LMap = Local_id.Map
 
 (*****************************************************************************)
 (* Module dealing with local environments. *)
@@ -27,10 +30,7 @@ module Reason = Typing_reason
  *)
 let intersect_fake fake1 fake2 =
   let valid = SSet.inter fake1.Env.valid fake2.Env.valid in
-  let fake_members = {
-    fake1 with
-                      Env.valid = valid;
-                    } in
+  let fake_members = { fake1 with Env.valid = valid } in
   fake_members
 
 (* Used when we want the new local environment to be the intersection
@@ -44,29 +44,39 @@ let intersect_fake fake1 fake2 =
  * If the type is missing in either of the branches, we fall back on
  * the type that was defined in the parent environment.
  *)
-let intersect env parent_lenv (fake1, locals1) (fake2, locals2) =
-  let fake_members = intersect_fake fake1 fake2 in
-  let _, parent_locals = parent_lenv in
-  let env, locals =
-    IMap.fold begin fun local_id (all_types1, ty1) (env, locals) ->
-      match IMap.get local_id locals2 with
+let intersect env parent_lenv lenv1 lenv2 =
+  let fake_members = intersect_fake lenv1.fake_members lenv2.fake_members in
+  let tpenv = env.lenv.tpenv in
+  let parent_locals = parent_lenv.local_types in
+  let env, new_locals =
+    LMap.fold begin fun local_id (all_types1, ty1, eid1) (env, locals) ->
+      match LMap.get local_id lenv2.local_types with
       | None -> env, locals
-      | Some (all_types2, ty2) ->
+      | Some (all_types2, ty2, eid2) ->
+          (* If the local has different expression ids then we generate a
+           * new one when interecting
+           *)
+          let eid = if eid1 = eid2 then eid1 else Ident.tmp() in
           let env, ty1 = TUtils.unresolved env ty1 in
           let env, ty2 = TUtils.unresolved env ty2 in
           let (all_small, all_large) =
-            if (List.length all_types1) < (List.length all_types2)
+            if List.length all_types1 < List.length all_types2
             then (all_types1, all_types2)
             else (all_types2, all_types1) in
           let all_types =
-            List.fold_left begin fun acc ty ->
-              if List.mem ty acc then acc else ty::acc
-            end all_large all_small in
-          let env, ty = Type.unify Pos.none Reason.URnone env ty1 ty2 in
-          env, IMap.add local_id (all_types, ty) locals
-    end locals1 (env, parent_locals)
+            List.fold_left ~f:begin fun acc ty ->
+              if List.mem acc ty then acc else ty::acc
+            end ~init:all_large all_small in
+          let env, ty = Type.unify env.Env.pos Reason.URnone env ty1 ty2 in
+          env, LMap.add local_id (all_types, ty, eid) locals
+    end lenv1.local_types (env, parent_locals)
   in
-  { env with Env.lenv = fake_members, locals }
+  { env with Env.lenv =
+    { fake_members;
+      local_types = new_locals;
+      tpenv;
+    }
+  }
 
 (* Integration is subtle. It consists in remembering all the types that
  * a local has had in a branch.
@@ -101,36 +111,47 @@ let intersect env parent_lenv (fake1, locals1) (fake2, locals2) =
  * local environment where $x is of type Tunresolved[int, string].
  * The conservative local environment is built with fully_integrate.
  *)
-let integrate env (parent_fake, parent_locals) (child_fake, child_locals) =
-  let locals =
-    IMap.fold begin fun local_id (child_all_types, child_ty) locals ->
-      match IMap.get local_id locals with
-      | None -> IMap.add local_id (child_all_types, child_ty) locals
-      | Some (parent_all_types, _) when child_all_types == parent_all_types ->
-          IMap.add local_id (child_all_types, child_ty) locals
-      | Some (parent_all_types, parent_ty) ->
-          let all_types = List.fold_left begin fun all_types ty ->
-            if List.exists ((=) ty) all_types then all_types else ty::all_types
-          end child_all_types parent_all_types in
-          IMap.add local_id (all_types, child_ty) locals
-    end child_locals parent_locals
+let integrate env parent_lenv child_lenv =
+  let new_locals =
+    LMap.fold begin fun local_id (child_all_types, child_ty, child_eid) locals ->
+      match LMap.get local_id locals with
+      | None ->
+          LMap.add local_id (child_all_types, child_ty, child_eid) locals
+      | Some (parent_all_types, _, parent_eid)
+            when child_all_types == parent_all_types ->
+          let eid = if child_eid = parent_eid then child_eid else Ident.tmp() in
+          LMap.add local_id (child_all_types, child_ty, eid) locals
+      | Some (parent_all_types, _, parent_eid) ->
+          let eid = if child_eid = parent_eid then child_eid else Ident.tmp() in
+          let all_types = List.fold_left ~f:begin fun all_types ty ->
+            if List.exists all_types ((=) ty) then all_types else ty::all_types
+          end ~init:child_all_types parent_all_types in
+          LMap.add local_id (all_types, child_ty, eid) locals
+    end child_lenv.local_types parent_lenv.local_types
   in
-  { env with Env.lenv = child_fake, locals }
+  { env with Env.lenv =
+    { fake_members = child_lenv.fake_members;
+      local_types = new_locals;
+      tpenv = env.lenv.tpenv;
+    }
+  }
 
 (* Same as intersect, but with a list of local environments *)
-let intersect_list env parent_lenv envl terml =
-  let env, lenvl = List.fold_right2 begin fun lenv is_term (env, lenv_acc) ->
-    if is_term
-    then integrate env parent_lenv lenv, lenv_acc
-    else env, lenv :: lenv_acc
-  end envl terml (env, []) in
-  (match lenvl with
+let intersect_list env parent_lenv term_lenv_l =
+  let to_integrate, to_intersect =
+    List.partition_map term_lenv_l begin fun (term, lenv) ->
+      if term then `Fst lenv else `Snd lenv
+    end in
+  let env = List.fold_left to_integrate ~f:begin fun env lenv ->
+    integrate env parent_lenv lenv
+  end ~init:env in
+  (match to_intersect with
   | [] -> env
   | [x] -> { env with Env.lenv = x }
   | lenv1 :: rl ->
-      List.fold_left begin fun env lenv2 ->
+      List.fold_left ~f:begin fun env lenv2 ->
         intersect env parent_lenv env.Env.lenv lenv2
-      end { env with Env.lenv = lenv1 } rl
+      end ~init:{ env with Env.lenv = lenv1 } rl
   )
 
 (* Function that changes the types of locals to a more conservative value.
@@ -138,30 +159,48 @@ let intersect_list env parent_lenv envl terml =
  * "natural" control-flow, we need to be more conservative with the
  * values of locals (cf: integrate).
  *)
-let fully_integrate env (parent_fake_members, parent_locals) =
-  let child_fake_members, child_locals = env.Env.lenv in
-  let fake_members = intersect_fake parent_fake_members child_fake_members in
+let fully_integrate env parent_lenv =
+  let child_lenv = env.Env.lenv in
+  let fake_members =
+    intersect_fake parent_lenv.fake_members child_lenv.fake_members in
   let env, locals =
-    IMap.fold begin fun local_id (child_all_types, _) (env, locals) ->
-      let parent_all_types =
-        match IMap.get local_id parent_locals with
-        | None -> []
-        | Some (parent_all_types, _) -> parent_all_types
+    LMap.fold begin fun local_id (child_all_types,_, child_eid) (env, locals) ->
+      let parent_all_types, parent_eid =
+        match LMap.get local_id parent_lenv.local_types with
+        | None -> [], -1
+        | Some (parent_all_types, _, parent_eid) ->
+            parent_all_types, parent_eid
       in
-      if child_all_types == parent_all_types
+      if child_all_types == parent_all_types && parent_eid = child_eid
       then env, locals
+      else if child_all_types == parent_all_types
+      then
+        match LMap.get local_id parent_lenv.local_types with
+        | None -> env, locals
+        | Some (_, parent_ty, _) ->
+            let lcl = parent_all_types, parent_ty, Ident.tmp() in
+            env, LMap.add local_id lcl locals
       else
-        let env, child_all_types = lfold TUtils.unresolved env child_all_types in
+        let eid = if child_eid = parent_eid then child_eid else Ident.tmp() in
+        let env, child_all_types =
+          List.map_env env child_all_types TUtils.unresolved in
         let env, ty =
           match child_all_types with
           | [] -> assert false
           | [first] -> env, first
           | first :: rest ->
-              List.fold_left begin fun (env, ty_acc) ty ->
-                Type.unify Pos.none Reason.URnone env ty_acc ty
-              end (env, first) rest
+              List.fold_left ~f:begin fun (env, ty_acc) ty ->
+                Type.unify env.Env.pos Reason.URnone env ty_acc ty
+              end ~init:(env, first) rest
         in
-        env, IMap.add local_id (ty :: parent_all_types, ty) locals
-    end child_locals (env, parent_locals)
+        env, LMap.add local_id (ty :: parent_all_types, ty, eid) locals
+    end child_lenv.local_types (env, parent_lenv.local_types)
   in
-  { env with Env.lenv = fake_members, locals }
+  { env with Env.lenv =
+    { fake_members; local_types=locals; tpenv=child_lenv.tpenv } }
+
+let env_with_empty_fakes env =
+  { env with Env.lenv = {
+      env.Env.lenv with Env.fake_members = Env.empty_fake_members;
+    }
+  }

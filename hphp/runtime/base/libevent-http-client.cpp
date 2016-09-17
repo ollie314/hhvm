@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -200,7 +200,7 @@ bool LibEventHttpClient::send(const std::string &url,
   }
   if (addHost) {
     // REVIEW: libevent never sends a Host header (nor does it properly send
-    // HTTP 400 for HTTP/1.1 requests without such a header), in blatent
+    // HTTP 400 for HTTP/1.1 requests without such a header), in blatant
     // violation of RFC2616; this should perhaps be fixed in the library
     // proper.  For now, add it if it wasn't set by the caller.
     if (m_port == 80) {

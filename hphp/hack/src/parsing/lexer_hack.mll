@@ -1,6 +1,6 @@
 {
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -9,27 +9,42 @@
  *
  *)
 
-open Utils
-
 (*****************************************************************************)
 (* Comments accumulator. *)
 (*****************************************************************************)
 
 let (comment_list: (Pos.t * string) list ref) = ref []
+let include_line_comments: bool ref = ref false
+
+let save_comment file lexbuf = function
+  | None -> ()
+  | Some buf ->
+    comment_list := (Pos.make file lexbuf, Buffer.contents buf) :: !comment_list
+
+let opt_buffer_add_string opt_buf str =
+  match opt_buf with
+  | None -> ()
+  | Some buf -> Buffer.add_string buf str
+
+let create_line_comment_buf () =
+  if !include_line_comments then
+    Some (Buffer.create 256)
+  else
+    None
 
 (*****************************************************************************)
 (* Fixmes accumulators *)
 (*****************************************************************************)
-let (fixmes: Pos.t IMap.t IMap.t ref) = ref IMap.empty
+let fixmes: (Pos.t IMap.t IMap.t ref) = ref IMap.empty
 
-let add_fixme err_nbr pos =
+let add_fixme err_nbr fixmepos pos =
   let line, _, _ = Pos.info_pos pos in
   let line_value =
     match IMap.get line !fixmes with
     | None -> IMap.empty
     | Some x -> x
   in
-  fixmes := IMap.add line (IMap.add err_nbr pos line_value) !fixmes;
+  fixmes := IMap.add line (IMap.add err_nbr fixmepos line_value) !fixmes;
   ()
 
 (*****************************************************************************)
@@ -99,6 +114,7 @@ type token =
   | Tlambda
   | Tem
   | Tqm
+  | Tqmqm
   | Tamp
   | Ttild
   | Tincr
@@ -107,7 +123,9 @@ type token =
   | Trequired
   | Tellipsis
   | Tdollar
+  | Tdollardollar
   | Tpercent
+  | Tpipe
   | Teof
   | Tquote
   | Tdquote
@@ -213,6 +231,7 @@ let token_to_string = function
   | Tlambda       -> "==>"
   | Tem           -> "!"
   | Tqm           -> "?"
+  | Tqmqm         -> "??"
   | Tamp          -> "&"
   | Ttild         -> "~"
   | Tincr         -> "++"
@@ -220,7 +239,9 @@ let token_to_string = function
   | Tunderscore   -> "_"
   | Tellipsis     -> "..."
   | Tdollar       -> "$"
+  | Tdollardollar -> "$$"
   | Tpercent      -> "%"
+  | Tpipe         -> "|>"
   | Tquote        -> "'"
   | Tdquote       -> "\""
   | Tclose_php    -> "?>"
@@ -268,10 +289,11 @@ let alphanumeric = digit | letter
 let varname = letter alphanumeric*
 let word_part = (letter alphanumeric*) | (['a'-'z'] (alphanumeric | '-')* alphanumeric)
 let word = ('\\' | word_part)+ (* Namespaces *)
-let xhpname = ('%')? letter (alphanumeric | ':' [^':''>'] | '-')*
+let xhpname = ('%')? varname ([':' '-'] varname)*
 let otag = '<' ['a'-'z''A'-'Z'] (alphanumeric | ':' | '-')*
 let ctag = '<' '/' (alphanumeric | ':' | '-')+ '>'
-let lvar = '$' varname
+(** More than one $ is PHP's variable variable feature. *)
+let lvar = ['$']+ varname
 let ws = [' ' '\t' '\r' '\x0c']
 let hex = digit | ['a'-'f''A'-'F']
 let hex_number = '0' 'x' hex+
@@ -285,26 +307,23 @@ let float =
   (digit+ ('e'|'E') ('+'?|'-') digit+)
 let unsafe = "//" ws* "UNSAFE" [^'\n']*
 let unsafeexpr_start = "/*" ws* "UNSAFE_EXPR"
-let fixme_start = "/*" ws* "HH_FIXME"
+let fixme_start = "/*" ws* ("HH_FIXME" | "HH_IGNORE_ERROR")
 let fallthrough = "//" ws* "FALLTHROUGH" [^'\n']*
 
 rule token file = parse
   (* ignored *)
   | ws+                { token file lexbuf }
   | '\n'               { Lexing.new_line lexbuf; token file lexbuf }
-  | unsafeexpr_start   { let buf = Buffer.create 256 in
-                         let start = lexbuf.Lexing.lex_start_p in
-                         ignore (comment buf file lexbuf);
-                         (* unsafeexpr is technically made up of multiple
-                          * tokens, but we want to treat it as a single token
-                          * as far as start / end positions are concerned *)
-                         lexbuf.Lexing.lex_start_p <- start;
+  | unsafeexpr_start   { (* Only process the start of the comment. The parser
+                          * should then consume the remaining comment. *)
                          Tunsafeexpr
                        }
-  | fixme_start        { let fixme = fixme_state0 file lexbuf in
+  | fixme_start        { let fixme_pos = Pos.make file lexbuf in
+                         let fixme = fixme_state0 file lexbuf in
+                         let end_fixme_pos = Pos.make file lexbuf in
                          let tok = token file lexbuf in
                          (match fixme with
-                           | Some err_nbr -> add_fixme err_nbr (Pos.make file lexbuf)
+                           | Some err_nbr -> add_fixme err_nbr (Pos.btw fixme_pos end_fixme_pos) (Pos.make file lexbuf)
                            | None -> ());
                          tok
                        }
@@ -312,8 +331,10 @@ rule token file = parse
                          comment_list := comment buf file lexbuf :: !comment_list;
                          token file lexbuf
                        }
-  | "//"               { line_comment lexbuf; token file lexbuf }
-  | "#"                { line_comment lexbuf; token file lexbuf }
+  | "//"               { line_comment (create_line_comment_buf ()) file lexbuf;
+                         token file lexbuf }
+  | "#"                { line_comment (create_line_comment_buf ()) file lexbuf;
+                         token file lexbuf }
   | '\"'               { Tdquote      }
   | '''                { Tquote       }
   | "<<<"              { Theredoc     }
@@ -324,6 +345,7 @@ rule token file = parse
   | word               { Tword        }
   | lvar               { Tlvar        }
   | '$'                { Tdollar      }
+  | "$$"               { Tdollardollar }
   | '`'                { Tbacktick    }
   | "<?php"            { Tphp         }
   | "<?hh"             { Thh          }
@@ -359,6 +381,7 @@ rule token file = parse
   | '/'                { Tslash       }
   | '^'                { Txor         }
   | '%'                { Tpercent     }
+  | "|>"               { Tpipe        }
   | '{'                { Tlcb         }
   | '}'                { Trcb         }
   | '['                { Tlb          }
@@ -376,6 +399,7 @@ rule token file = parse
   | "==>"              { Tlambda      }
   | '!'                { Tem          }
   | '?'                { Tqm          }
+  | "??"               { Tqmqm        }
   | '&'                { Tamp         }
   | '~'                { Ttild        }
   | "++"               { Tincr        }
@@ -395,8 +419,10 @@ and xhpname file = parse
   | "/*"               { ignore (comment (Buffer.create 256) file lexbuf);
                          xhpname file lexbuf
                        }
-  | "//"               { line_comment lexbuf; xhpname file lexbuf }
-  | "#"                { line_comment lexbuf; xhpname file lexbuf }
+  | "//"               { line_comment (create_line_comment_buf ()) file lexbuf;
+                         xhpname file lexbuf }
+  | "#"                { line_comment (create_line_comment_buf ()) file lexbuf;
+                         xhpname file lexbuf }
   | word               { Txhpname    }
   | xhpname            { Txhpname    }
   | _                  { Terror      }
@@ -411,24 +437,29 @@ and xhptoken file = parse
   | '/'                { Tslash      }
   | '\"'               { Tdquote     }
   | word               { Tword       }
-  | "<!--"             { xhp_comment file lexbuf; xhptoken file lexbuf }
+  (* Signal when we've hit a comment so that literal text regions
+   * get broken up by them. *)
+  | "<!--"             { Topen_xhp_comment }
   | _                  { xhptoken file lexbuf }
 
 and xhpattr file = parse
   | eof                { Teof        }
   | ws+                { xhpattr file lexbuf }
   | '\n'               { Lexing.new_line lexbuf; xhpattr file lexbuf }
-  | fixme_start        { let fixme = fixme_state0 file lexbuf in
+  | fixme_start        { let fixme_pos = Pos.make file lexbuf in
+                         let fixme = fixme_state0 file lexbuf in
+                         let end_fixme_pos = Pos.make file lexbuf in
                          let tok = xhpattr file lexbuf in
                          (match fixme with
-                           | Some err_nbr -> add_fixme err_nbr (Pos.make file lexbuf)
+                           | Some err_nbr -> add_fixme err_nbr (Pos.btw fixme_pos end_fixme_pos) (Pos.make file lexbuf)
                            | None -> ());
                          tok
                        }
   | "/*"               { ignore (comment (Buffer.create 256) file lexbuf);
                          xhpattr file lexbuf
                        }
-  | "//"               { line_comment lexbuf; xhpattr file lexbuf }
+  | "//"               { line_comment (create_line_comment_buf ()) file lexbuf;
+                         xhpattr file lexbuf }
   | '\n'               { Lexing.new_line lexbuf; xhpattr file lexbuf }
   | '<'                { Tlt         }
   | '>'                { Tgt         }
@@ -468,7 +499,7 @@ and fixme_state0 file = parse
                        }
   | ws+                { fixme_state0 file lexbuf
                        }
-  | '\n'               { Lexing.new_line lexbuf;                        
+  | '\n'               { Lexing.new_line lexbuf;
                          fixme_state0 file lexbuf
                        }
   | '['                { fixme_state1 file lexbuf }
@@ -502,7 +533,7 @@ and fixme_state2 err_nbr file = parse
                          None
                        }
   | "*/" ws* '\n'      { Lexing.new_line lexbuf;
-                         Some err_nbr
+                         fixme_state3 err_nbr file lexbuf
                        }
   | "*/"               { Some err_nbr }
   | '\n'               { Lexing.new_line lexbuf;
@@ -510,10 +541,16 @@ and fixme_state2 err_nbr file = parse
                        }
   | _                  { fixme_state2 err_nbr file lexbuf }
 
-and line_comment = parse
-  | eof                { () }
-  | '\n'               { Lexing.new_line lexbuf }
-  | _                  { line_comment lexbuf }
+and fixme_state3 err_nbr file = parse
+  | ws*                { Some err_nbr }
+
+and line_comment opt_buf file = parse
+  | eof                { save_comment file lexbuf opt_buf }
+  | '\n'               { opt_buffer_add_string opt_buf "\n";
+                         save_comment file lexbuf opt_buf;
+                         Lexing.new_line lexbuf }
+  | _                  { opt_buffer_add_string opt_buf (Lexing.lexeme lexbuf);
+                         line_comment opt_buf file lexbuf }
 
 and xhp_comment file = parse
   | eof                { let pos = Pos.make file lexbuf in
@@ -531,7 +568,8 @@ and gt_or_comma file = parse
   | "/*"               { ignore (comment (Buffer.create 256) file lexbuf);
                          gt_or_comma file lexbuf
                        }
-  | "//"               { line_comment lexbuf; gt_or_comma file lexbuf }
+  | "//"               { line_comment (create_line_comment_buf ()) file lexbuf;
+                         gt_or_comma file lexbuf }
   | '\n'               { Lexing.new_line lexbuf; gt_or_comma file lexbuf }
   | '>'                { Tgt  }
   | ','                { Tcomma  }
@@ -559,8 +597,9 @@ and string_backslash file = parse
 
 and string2 file = parse
   | eof                { Teof }
-  | '\n'               { Lexing.new_line lexbuf; string2 file lexbuf }
-  | '\\'               { string_backslash file lexbuf; string2 file lexbuf }
+  | '\n'               { Lexing.new_line lexbuf; Tany }
+  | "\\\n"             { Lexing.new_line lexbuf; Tany }
+  | '\\' _             { Tany }
   | '\"'               { Tdquote }
   | '{'                { Tlcb }
   | '}'                { Trcb }
@@ -578,11 +617,13 @@ and header file = parse
   | eof                         { `error }
   | ws+                         { header file lexbuf }
   | '\n'                        { Lexing.new_line lexbuf; header file lexbuf }
-  | "//"                        { line_comment lexbuf; header file lexbuf }
+  | "//"                        { line_comment (create_line_comment_buf ()) file lexbuf;
+                                  header file lexbuf }
   | "/*"                        { ignore (comment (Buffer.create 256) file lexbuf);
                                   header file lexbuf
                                 }
-  | "#"                         { line_comment lexbuf; header file lexbuf }
+  | "#"                         { line_comment (create_line_comment_buf ()) file lexbuf;
+                                  header file lexbuf }
   | "<?hh"                      { `default_mode }
   | "<?hh" ws* "//"             { `explicit_mode }
   | "<?php" ws* "//" ws* "decl" { `php_decl_mode }
@@ -601,11 +642,29 @@ and look_for_open_cb = parse
   | '{'                { () }
   | _                  { look_for_open_cb lexbuf }
 
-and format_token = parse
-  | ' '                { Tspace        }
-  | '\n'               { Tnewline      }
-  | "/*"               { Topen_comment }
+(* Normally you can just use "token" and get back Tlvar, but specifically for
+ * member variable accesses, the part to the right of the "->" isn't a word
+ * (cannot contain '-' for example) but doesn't start with '$' so isn't an lvar
+ * either. *)
+and varname = parse
+  | varname            { Tword  }
+  | _                  { Terror }
+
+(****************************************************************************)
+(* hh_format tokenizers. *)
+(****************************************************************************)
+
+and format_comment = parse
+  | [' '  '\t']        { Tspace         }
+  | ws* '\n'           { Tnewline       } (* eat up trailing spaces *)
+  | eof                { Teof           }
   | "*/"               { Tclose_comment }
+  | _                  { Tany           }
+
+and format_token = parse
+  | [' '  '\t']        { Tspace        }
+  | ws* '\n'           { Tnewline      } (* eat up trailing spaces *)
+  | "/*"               { Topen_comment }
   | "//"               { Tline_comment }
   | "#"                { Tline_comment }
   | '\"'               { Tdquote       }
@@ -618,6 +677,7 @@ and format_token = parse
   | word_part          { Tword         }
   | lvar               { Tlvar         }
   | '$'                { Tdollar       }
+  | "$$"               { Tdollardollar }
   | '`'                { Tbacktick     }
   | "<?php"            { Tphp          }
   | "<?hh"             { Thh           }
@@ -654,6 +714,7 @@ and format_token = parse
   | '\\'               { Tbslash       }
   | '^'                { Txor          }
   | '%'                { Tpercent      }
+  | "|>"               { Tpipe         }
   | '{'                { Tlcb          }
   | '}'                { Trcb          }
   | '['                { Tlb           }
@@ -670,6 +731,7 @@ and format_token = parse
   | "==>"              { Tlambda       }
   | '!'                { Tem           }
   | '?'                { Tqm           }
+  | "??"               { Tqmqm         }
   | '&'                { Tamp          }
   | '~'                { Ttild         }
   | "++"               { Tincr         }
@@ -681,7 +743,7 @@ and format_token = parse
 
 and format_xhptoken = parse
   | eof                { Teof        }
-  | '\n'               { Tnewline    }
+  | ws* '\n'           { Tnewline    } (* eat up trailing spaces *)
   | ' '                { Tspace      }
   | '<'                { Tlt         }
   | '>'                { Tgt         }
@@ -696,11 +758,3 @@ and format_xhptoken = parse
   | "<!--"             { Topen_xhp_comment  }
   | "-->"              { Tclose_xhp_comment }
   | _                  { Terror             }
-
-(* Normally you can just use "token" and get back Tlvar, but specifically for
- * member variable accesses, the part to the right of the "->" isn't a word
- * (cannot contain '-' for example) but doesn't start with '$' so isn't an lvar
- * either. *)
-and varname = parse
-  | varname            { Tword  }
-  | _                  { Terror }

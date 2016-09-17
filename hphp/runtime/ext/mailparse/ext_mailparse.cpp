@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,7 +15,7 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/temp-file.h"
 #include "hphp/runtime/ext/mailparse/mime.h"
 #include "hphp/runtime/ext/mailparse/rfc822.h"
@@ -24,8 +24,19 @@ namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+static req::ptr<File> get_valid_file_resource(const Resource& fp) {
+  auto f = dyn_cast_or_null<File>(fp);
+  if (f == nullptr || f->isClosed()) {
+    raise_warning("Not a valid stream resource");
+    return nullptr;
+  }
+  return f;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 Resource HHVM_FUNCTION(mailparse_msg_create) {
-  return newres<MimePart>();
+  return Resource(req::make<MimePart>());
 }
 
 bool HHVM_FUNCTION(mailparse_msg_free, const Resource& mimemail) {
@@ -33,12 +44,10 @@ bool HHVM_FUNCTION(mailparse_msg_free, const Resource& mimemail) {
 }
 
 Variant HHVM_FUNCTION(mailparse_msg_parse_file, const String& filename) {
-  Resource resource = File::Open(filename, "rb");
-  File *f = resource.getTyped<File>(true);
+  auto f = File::Open(filename, "rb");
   if (!f) return false;
 
-  MimePart *p = newres<MimePart>();
-  Resource ret(p);
+  auto p = req::make<MimePart>();
   while (!f->eof()) {
     String line = f->readLine();
     if (!line.isNull()) {
@@ -47,20 +56,20 @@ Variant HHVM_FUNCTION(mailparse_msg_parse_file, const String& filename) {
       }
     }
   }
-  return ret;
+  return Variant(std::move(p));
 }
 
 bool HHVM_FUNCTION(mailparse_msg_parse,
                    const Resource& mimemail,
                    const String& data) {
-  return mimemail.getTyped<MimePart>()->parse(data.data(), data.size());
+  return cast<MimePart>(mimemail)->parse(data.data(), data.size());
 }
 
 Variant HHVM_FUNCTION(mailparse_msg_extract_part_file,
                       const Resource& mimemail,
                       const Variant& filename,
                       const Variant& callbackfunc /* = "" */) {
-  return mimemail.getTyped<MimePart>()->
+  return cast<MimePart>(mimemail)->
     extract(filename, callbackfunc,
             MimePart::Decode8Bit | MimePart::DecodeNoHeaders, true);
 }
@@ -69,7 +78,7 @@ Variant HHVM_FUNCTION(mailparse_msg_extract_whole_part_file,
                       const Resource& mimemail,
                       const Variant& filename,
                       const Variant& callbackfunc /* = "" */) {
-  return mimemail.getTyped<MimePart>()->
+  return cast<MimePart>(mimemail)->
     extract(filename, callbackfunc, MimePart::DecodeNone, true);
 }
 
@@ -77,20 +86,20 @@ Variant HHVM_FUNCTION(mailparse_msg_extract_part,
                       const Resource& mimemail,
                       const Variant& msgbody,
                       const Variant& callbackfunc /* = "" */) {
-  return mimemail.getTyped<MimePart>()->
+  return cast<MimePart>(mimemail)->
     extract(msgbody, callbackfunc,
             MimePart::Decode8Bit | MimePart::DecodeNoHeaders, false);
 }
 
 Array HHVM_FUNCTION(mailparse_msg_get_part_data, const Resource& mimemail) {
-  return mimemail.getTyped<MimePart>()->getPartData().toArray();
+  return cast<MimePart>(mimemail)->getPartData().toArray();
 }
 
 Variant HHVM_FUNCTION(mailparse_msg_get_part,
                       const Resource& mimemail,
                       const String& mimesection) {
   Resource part =
-    mimemail.getTyped<MimePart>()->findByName(mimesection.c_str());
+    cast<MimePart>(mimemail)->findByName(mimesection.c_str());
   if (part.isNull()) {
     raise_warning("cannot find section %s in message", mimesection.data());
     return false;
@@ -99,7 +108,7 @@ Variant HHVM_FUNCTION(mailparse_msg_get_part,
 }
 
 Array HHVM_FUNCTION(mailparse_msg_get_structure, const Resource& mimemail) {
-  return mimemail.getTyped<MimePart>()->getStructure();
+  return cast<MimePart>(mimemail)->getStructure();
 }
 
 const StaticString
@@ -145,9 +154,12 @@ bool HHVM_FUNCTION(mailparse_stream_encode,
                    const Resource& sourcefp,
                    const Resource& destfp,
                    const String& encoding) {
-  File *srcstream = sourcefp.getTyped<File>(true, true);
-  File *deststream = destfp.getTyped<File>(true, true);
-  if (srcstream == NULL || deststream == NULL) {
+  auto srcstream = get_valid_file_resource(sourcefp);
+  if (!srcstream) {
+    return false;
+  }
+  auto deststream = get_valid_file_resource(destfp);
+  if (!deststream) {
     return false;
   }
 
@@ -160,7 +172,7 @@ bool HHVM_FUNCTION(mailparse_stream_encode,
   mbfl_convert_filter *conv =
     mbfl_convert_filter_new(mbfl_no_encoding_8bit, enc,
                             mailparse_stream_output, mailparse_stream_flush,
-                            deststream);
+                            deststream.get());
 
   if (enc == mbfl_no_encoding_qprint) {
     /* If the qp encoded section is going to be digitally signed,
@@ -207,7 +219,8 @@ bool HHVM_FUNCTION(mailparse_stream_encode,
   if (line[x] == '\0' || line[x] == '\r' || line[x] == '\n') break; \
   v = line[x++]; v = UUDEC(v)
 
-static size_t mailparse_do_uudecode(File *instream, File *outstream) {
+static size_t mailparse_do_uudecode(const req::ptr<File>& instream,
+                                    const req::ptr<File>& outstream) {
   int A, B, C, D, n;
   size_t file_size = 0;
   if (outstream) {
@@ -260,11 +273,13 @@ const StaticString
   s_origfilename("origfilename");
 
 Variant HHVM_FUNCTION(mailparse_uudecode_all, const Resource& fp) {
-  File *instream = fp.getTyped<File>();
+  auto instream = get_valid_file_resource(fp);
+  if (!instream) {
+    return false;
+  }
   instream->rewind();
 
-  File *outstream = newres<TempFile>(false);
-  Resource deleter(outstream);
+  auto outstream = req::make<TempFile>(false);
 
   Array return_value;
   int nparts = 0;
@@ -274,14 +289,19 @@ Variant HHVM_FUNCTION(mailparse_uudecode_all, const Resource& fp) {
 
     /* Look for the "begin " sequence that identifies a uuencoded file */
     if (strncmp(line.data(), "begin ", 6) == 0) {
-      /* parse out the file name.
-       * The next 4 bytes are an octal number for perms; ignore it */
-       // TODO: Update gcc and get rid of this dumb workaround.
-      char *origfilename = (char *)((size_t)line.data() + (10 * sizeof(char)));
-      /* NUL terminate the filename */
-      int len = strlen(origfilename);
-      while (isspace(origfilename[len-1])) {
-        origfilename[--len] = '\0';
+
+      /*
+       * The next 4 bytes are an octal number for perms and a space; ignore them
+       * If for some reason they aren't found treat it as an empty filename.
+       */
+      const char *origfilename = "";
+      size_t namelen = 0;
+      if (line.size() >= 10) {
+        origfilename = line.data() + 10;
+        namelen = line.size() - 10;
+        while (namelen > 0 && isspace(origfilename[namelen-1])) {
+          --namelen;
+        }
       }
 
       /* make the return an array */
@@ -290,20 +310,19 @@ Variant HHVM_FUNCTION(mailparse_uudecode_all, const Resource& fp) {
         /* create an initial item representing the file with all uuencoded
            parts removed */
         Array item = Array::Create();
-        item.set(s_filename, String(((TempFile*)outstream)->getName()));
+        item.set(s_filename, String(outstream->getName()));
         return_value.append(item);
       }
 
       /* add an item */
       Array item = Array::Create();
-      item.set(s_origfilename, String(origfilename, CopyString));
+      item.set(s_origfilename, String(origfilename, namelen, CopyString));
 
       /* create a temp file for the data */
-      File *partstream = newres<TempFile>(false);
-      Resource deleter(partstream);
+      auto partstream = req::make<TempFile>(false);
       if (partstream)  {
         nparts++;
-        item.set(s_filename, String(((TempFile*)partstream)->getName()));
+        item.set(s_filename, String(partstream->getName()));
         return_value.append(item);
 
         /* decode it */
@@ -324,7 +343,10 @@ Variant HHVM_FUNCTION(mailparse_uudecode_all, const Resource& fp) {
 
 Variant HHVM_FUNCTION(mailparse_determine_best_xfer_encoding,
                       const Resource& fp) {
-  File *stream = fp.getTyped<File>();
+  auto stream = get_valid_file_resource(fp);
+  if (!stream) {
+    return false;
+  }
   stream->rewind();
 
   int linelen = 0;
@@ -357,10 +379,9 @@ Variant HHVM_FUNCTION(mailparse_determine_best_xfer_encoding,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class MailparseExtension : public Extension {
- public:
+struct MailparseExtension final : Extension {
   MailparseExtension() : Extension("mailparse") { }
-  void moduleInit() {
+  void moduleInit() override {
     HHVM_FE(mailparse_msg_create);
     HHVM_FE(mailparse_msg_free);
     HHVM_FE(mailparse_msg_parse_file);

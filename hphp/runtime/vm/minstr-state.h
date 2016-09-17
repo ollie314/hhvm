@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,24 +17,51 @@
 #ifndef incl_HPHP_RUNTIME_VM_MINSTR_STATE_H_
 #define incl_HPHP_RUNTIME_VM_MINSTR_STATE_H_
 
+#include "hphp/runtime/base/typed-value.h"
+
 namespace HPHP {
 
 /*
- * MInstrState is used as scratch space by the VM while executing member
- * instructions. It lives with the other VM registers in the RDS header, and is
- * also saved and restored with them when we reenter the VM.
+ * MInstrState contains VM registers used while executing member instructions.
+ * It lives with the other VM registers in the RDS header, and is also saved and
+ * restored with them when we reenter the VM.
  */
 struct MInstrState {
+
+  /*
+   * This space is used for the return value of builtin functions that return by
+   * reference, and for storing $this as the base for the BaseH bytecode,
+   * without needing to acquire a reference to it.  Since we don't ever use the
+   * two at the same time, it is okay to use a union.
+   */
   union {
-    // This space is used for both vector instructions and
-    // the return value of builtin functions that return by reference.
-    // Since we don't ever use the two at the same time, it is
-    // OK to use a union.
-    TypedValue tvScratch;
     TypedValue tvBuiltinReturn;
+    TypedValue tvTempBase;
   };
+
   TypedValue tvRef;
   TypedValue tvRef2;
+  TypedValue* base;
+
+  // legacy-style scanner
+  template<class F> void scan(F& mark) const {
+    // tvBuiltinReturn sometimes holds live references across safepoints.
+    // Base can point to objects but shouldn't keep them alive (weak ptr).
+    // Conservatively scan things for now. TODO t9853106
+    mark(this, uintptr_t(&base) - uintptr_t(this));
+  }
+
+  // type-scan driven scanner
+  //TYPE_SCAN_CONSERVATIVE_FIELD(tvBuiltinReturn);
+  //TYPE_SCAN_CONSERVATIVE_FIELD(tvRef);
+  //TYPE_SCAN_CONSERVATIVE_FIELD(tvRef2);
+  //TYPE_SCAN_IGNORE_FIELD(base);
+
+  // fixme - #11145696 full custom scanner to work around unnamed union
+  TYPE_SCAN_CUSTOM() {
+    // Workaroun
+    scanner.conservative(this, uintptr_t(&base) - uintptr_t(this));
+  }
 };
 
 }

@@ -16,12 +16,12 @@ async function dead() {
 }
 
 async function foo() {
-  await RescheduleWaitHandle::create(0,0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT,0);
   await dead();
 }
 
 try {
-  foo()->join();
+  HH\Asio\join(foo());
 } catch (Exception $e) {
   echo "caught {$e->getMessage()}\n";
 }

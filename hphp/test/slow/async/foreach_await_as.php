@@ -18,7 +18,7 @@ function l($obj, $where) {
 }
 
 async function block() {
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
 }
 
 async function foo($from, $to) {
@@ -53,4 +53,4 @@ async function baz($from, $to) {
   echo "end baz\n";
 }
 
-baz(42, 100)->join();
+HH\Asio\join(baz(42, 100));

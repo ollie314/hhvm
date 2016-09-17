@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,19 +24,15 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(NewObjectExpression);
 
-class NewObjectExpression : public FunctionCall {
-public:
+struct NewObjectExpression : FunctionCall {
   NewObjectExpression(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                       ExpressionPtr variable, ExpressionListPtr params);
 
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;
 
-  virtual bool isRefable(bool checkError = false) const { return checkError; }
-  bool isTemporary() const { return true; }
+  bool isRefable(bool checkError = false) const override { return checkError; }
 private:
   bool m_dynamic;
-  std::string m_receiverTemp;
-  int m_objectTemp;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

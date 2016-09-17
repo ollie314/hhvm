@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,6 @@
 #include "hphp/runtime/server/upload.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/hphp-system.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/zend-printf.h"
 #include "hphp/runtime/base/php-globals.h"
@@ -27,6 +26,7 @@
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/util/text-util.h"
 #include "hphp/runtime/base/request-event-handler.h"
+#include <folly/FileUtil.h>
 
 using std::set;
 
@@ -35,6 +35,7 @@ namespace HPHP {
 
 static void destroy_uploaded_files();
 
+namespace {
 struct Rfc1867Data final : RequestEventHandler {
   std::set<std::string> rfc1867ProtectedVariables;
   std::set<std::string> rfc1867UploadedFiles;
@@ -51,7 +52,9 @@ struct Rfc1867Data final : RequestEventHandler {
   void requestShutdown() override {
     if (!rfc1867UploadedFiles.empty()) destroy_uploaded_files();
   }
+  void vscan(IMarker&) const override {}
 };
+}
 IMPLEMENT_STATIC_REQUEST_LOCAL(Rfc1867Data, s_rfc1867_data);
 
 /*
@@ -73,7 +76,7 @@ static void safe_php_register_variable(char *var, const Variant& val,
 #define MAX_SIZE_ANONNAME 33
 
 /* Errors */
-#define UPLOAD_ERROR_OK   0  /* File upload succesful */
+#define UPLOAD_ERROR_OK   0  /* File upload successful */
 #define UPLOAD_ERROR_A    1  /* Uploaded file exceeded upload_max_filesize */
 #define UPLOAD_ERROR_B    2  /* Uploaded file exceeded MAX_FILE_SIZE */
 #define UPLOAD_ERROR_C    3  /* Partially uploaded */
@@ -182,23 +185,23 @@ static void destroy_uploaded_files() {
   rfc1867UploadedFiles.clear();
 }
 
-
 /*
  *  Following code is based on apache_multipart_buffer.c from
  *  libapreq-0.33 package.
  *
  */
 
-#define FILLUNIT (1024 * 5)
+constexpr size_t FILLUNIT = 1024 * 5;
 
-typedef struct {
+namespace {
+struct multipart_buffer {
   Transport *transport;
 
   /* read buffer */
   char *buffer;
   char *buf_begin;
-  uint32_t  bufsize;
-  int64_t   bytes_in_buffer; // signed to catch underflow errors
+  size_t bufsize;
+  int64_t bytes_in_buffer; // signed to catch underflow errors
 
   /* boundary info */
   char *boundary;
@@ -211,9 +214,10 @@ typedef struct {
   uint64_t throw_size; // sum of all previously read chunks
   char *cursor;
   uint64_t read_post_bytes;
-} multipart_buffer;
+};
+}
 
-typedef std::list<std::pair<std::string, std::string> > header_list;
+using header_list = std::list<std::pair<std::string, std::string>>;
 
 static uint32_t read_post(multipart_buffer *self, char *buf,
                           uint32_t bytes_to_read) {
@@ -236,7 +240,7 @@ static uint32_t read_post(multipart_buffer *self, char *buf,
   always_assert(self->cursor == (char *)self->post_data +
                         (self->post_size - self->throw_size));
   while (bytes_to_read > 0 && self->transport->hasMorePostData()) {
-    int extra_byte_read = 0;
+    size_t extra_byte_read = 0;
     const void *extra = self->transport->getMorePostData(extra_byte_read);
     if (extra_byte_read == 0) break;
     if (RuntimeOption::AlwaysPopulateRawPostData) {
@@ -259,6 +263,7 @@ static uint32_t read_post(multipart_buffer *self, char *buf,
     memcpy(buf + bytes_read, self->cursor, extra_byte_read);
     bytes_to_read -= extra_byte_read;
     bytes_read += extra_byte_read;
+    self->cursor += extra_byte_read;
   }
   return bytes_read;
 }
@@ -317,13 +322,13 @@ static int multipart_buffer_eof(multipart_buffer *self) {
 
 /* create new multipart_buffer structure */
 static multipart_buffer *multipart_buffer_new(Transport *transport,
-                                              const char *data, int size,
+                                              const char *data, size_t size,
                                               std::string boundary) {
   multipart_buffer *self =
     (multipart_buffer *)calloc(1, sizeof(multipart_buffer));
 
   self->transport = transport;
-  int minsize = boundary.length() + 6;
+  auto minsize = boundary.length() + 6;
   if (minsize < FILLUNIT) minsize = FILLUNIT;
 
   self->buffer = (char *) calloc(1, minsize + 1);
@@ -425,7 +430,8 @@ static int find_boundary(multipart_buffer *self, char *boundary) {
 static int multipart_buffer_headers(multipart_buffer *self,
                                     header_list &header) {
   char *line;
-  std::pair<std::string, std::string> prev_entry;
+  std::string key;
+  std::string buf_value;
   std::pair<std::string, std::string> entry;
 
   /* didn't find boundary, abort */
@@ -438,8 +444,6 @@ static int multipart_buffer_headers(multipart_buffer *self,
   while( (line = get_line(self)) && strlen(line) > 0 )
   {
     /* add header to table */
-
-    char *key = line;
     char *value = nullptr;
 
     /* space in the beginning means same header */
@@ -448,19 +452,27 @@ static int multipart_buffer_headers(multipart_buffer *self,
     }
 
     if (value) {
-      *value = 0;
+      if (!buf_value.empty() && !key.empty() ) {
+        entry = std::make_pair(key, buf_value);
+        header.push_back(entry);
+        buf_value.erase();
+        key.erase();
+      }
+      *value = '\0';
       do { value++; } while(isspace(*value));
-      entry = std::make_pair(key, value);
-    } else if (!header.empty()) {
+      key.assign(line);
+      buf_value.append(value);
+    } else if (!buf_value.empty() ) {
       /* If no ':' on the line, add to previous line */
-      entry = std::make_pair(prev_entry.first, prev_entry.second + line);
-      header.pop_back();
+      buf_value.append(line);
     } else {
       continue;
     }
+  }
 
+  if (!buf_value.empty() && !key.empty()) {
+    entry = std::make_pair(key, buf_value);
     header.push_back(entry);
-    prev_entry = entry;
   }
 
   return 1;
@@ -698,8 +710,8 @@ static char *multipart_buffer_read_body(multipart_buffer *self,
 void rfc1867PostHandler(Transport* transport,
                         Array& post,
                         Array& files,
-                        int content_length,
-                        const void*& data, int& size,
+                        size_t content_length,
+                        const void*& data, size_t& size,
                         const std::string boundary) {
   char *s=nullptr, *start_arr=nullptr;
   std::string array_index, abuf;
@@ -968,8 +980,7 @@ void rfc1867PostHandler(Transport* transport,
           cancel_upload = UPLOAD_ERROR_B;
         } else if (blen > 0) {
 
-          wlen = write(fd, buff, blen);
-
+          wlen = folly::writeFull(fd, buff, blen);
           if (wlen < blen) {
             Logger::Verbose("Only %zd bytes were written, expected to "
                             "write %zd", wlen, blen);

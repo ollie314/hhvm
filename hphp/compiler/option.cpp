@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,81 +15,79 @@
 */
 
 #include "hphp/compiler/option.h"
-#include "hphp/compiler/analysis/analysis_result.h"
-#include "hphp/compiler/analysis/file_scope.h"
-#include "hphp/compiler/analysis/class_scope.h"
-#include "hphp/compiler/analysis/variable_table.h"
-#include "hphp/runtime/base/ini-setting.h"
-#include "hphp/parser/scanner.h"
-#include "hphp/util/logger.h"
-#include "hphp/util/text-util.h"
-#include "hphp/util/process.h"
-#include "hphp/hhbbc/hhbbc.h"
-#include <boost/algorithm/string/trim.hpp>
+
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
-#include "hphp/runtime/base/preg.h"
+
+#include "hphp/compiler/analysis/analysis_result.h"
+#include "hphp/compiler/analysis/class_scope.h"
+#include "hphp/compiler/analysis/file_scope.h"
+#include "hphp/compiler/analysis/variable_table.h"
+
+#include "hphp/parser/scanner.h"
+
 #include "hphp/runtime/base/config.h"
+#include "hphp/runtime/base/ini-setting.h"
+#include "hphp/runtime/base/preg.h"
+
+#include "hphp/util/hdf.h"
+#include "hphp/util/logger.h"
+#include "hphp/util/process.h"
+#include "hphp/util/text-util.h"
+
+#include "hphp/hhbbc/hhbbc.h"
 
 namespace HPHP {
-
-using std::set;
-using std::map;
-using std::map;
-
 ///////////////////////////////////////////////////////////////////////////////
 
 std::string Option::RootDirectory;
-set<string> Option::PackageDirectories;
-set<string> Option::PackageFiles;
-set<string> Option::PackageExcludeDirs;
-set<string> Option::PackageExcludeFiles;
-set<string> Option::PackageExcludePatterns;
-set<string> Option::PackageExcludeStaticDirs;
-set<string> Option::PackageExcludeStaticFiles;
-set<string> Option::PackageExcludeStaticPatterns;
+std::set<std::string> Option::PackageDirectories;
+std::set<std::string> Option::PackageFiles;
+std::set<std::string> Option::PackageExcludeDirs;
+std::set<std::string> Option::PackageExcludeFiles;
+std::set<std::string> Option::PackageExcludePatterns;
+std::set<std::string> Option::PackageExcludeStaticDirs;
+std::set<std::string> Option::PackageExcludeStaticFiles;
+std::set<std::string> Option::PackageExcludeStaticPatterns;
 bool Option::CachePHPFile = false;
 
-vector<string> Option::ParseOnDemandDirs;
+std::vector<std::string> Option::ParseOnDemandDirs;
 
-map<string, string> Option::IncludeRoots;
-map<string, string> Option::AutoloadRoots;
-vector<string> Option::IncludeSearchPaths;
-string Option::DefaultIncludeRoot;
-map<string, int> Option::DynamicFunctionCalls;
+std::map<std::string, std::string> Option::IncludeRoots;
+std::map<std::string, std::string> Option::AutoloadRoots;
+std::vector<std::string> Option::IncludeSearchPaths;
+std::string Option::DefaultIncludeRoot;
+hphp_string_imap<std::string> Option::ConstantFunctions;
 
 bool Option::GeneratePickledPHP = false;
 bool Option::GenerateInlinedPHP = false;
 bool Option::GenerateTrimmedPHP = false;
 bool Option::ConvertSuperGlobals = false;
 bool Option::ConvertQOpExpressions = false;
-string Option::ProgramPrologue;
-string Option::TrimmedPrologue;
-vector<string> Option::DynamicFunctionPrefixes;
-vector<string> Option::DynamicFunctionPostfixes;
-vector<string> Option::DynamicMethodPrefixes;
-vector<string> Option::DynamicMethodPostfixes;
-vector<string> Option::DynamicClassPrefixes;
-vector<string> Option::DynamicClassPostfixes;
-set<string, stdltistr> Option::DynamicInvokeFunctions;
-set<string> Option::VolatileClasses;
-map<string,string> Option::AutoloadClassMap;
-map<string,string> Option::AutoloadFuncMap;
-map<string,string> Option::AutoloadConstMap;
-string Option::AutoloadRoot;
+std::string Option::ProgramPrologue;
+std::string Option::TrimmedPrologue;
+std::set<std::string, stdltistr> Option::DynamicInvokeFunctions;
+std::set<std::string> Option::VolatileClasses;
+std::map<std::string,std::string,stdltistr> Option::AutoloadClassMap;
+std::map<std::string,std::string,stdltistr> Option::AutoloadFuncMap;
+std::map<std::string,std::string> Option::AutoloadConstMap;
+std::string Option::AutoloadRoot;
 
-map<string, string> Option::FunctionSections;
+std::vector<std::string> Option::APCProfile;
+
+std::map<std::string, std::string> Option::FunctionSections;
 
 bool Option::GenerateTextHHBC = false;
 bool Option::GenerateBinaryHHBC = false;
-string Option::RepoCentralPath;
+std::string Option::RepoCentralPath;
 bool Option::RepoDebugInfo = false;
 
-string Option::IdPrefix = "$$";
+std::string Option::IdPrefix = "$$";
 
-string Option::LambdaPrefix = "df_";
-string Option::Tab = "  ";
+std::string Option::LambdaPrefix = "df_";
+std::string Option::Tab = "  ";
 
 const char *Option::UserFilePrefix = "php/";
 
@@ -98,8 +96,6 @@ bool Option::PostOptimization = false;
 bool Option::SeparateCompilation = false;
 bool Option::SeparateCompLib = false;
 bool Option::AnalyzePerfectVirtuals = true;
-bool Option::HardTypeHints = true;
-bool Option::HardReturnTypeHints = false;
 bool Option::HardConstProp = true;
 
 bool Option::KeepStatementsWithNoEffect = false;
@@ -108,8 +104,6 @@ int Option::ConditionalIncludeExpandLevel = 1;
 
 int Option::DependencyMaxProgram = 1;
 int Option::CodeErrorMaxProgram = 1;
-
-Option::EvalLevel Option::EnableEval = NoEval;
 
 std::string Option::ProgramName;
 
@@ -136,20 +130,11 @@ int Option::GetScannerType() {
   return type;
 }
 
-int Option::InvokeFewArgsCount = 6;
-int Option::InlineFunctionThreshold = -1;
-bool Option::EliminateDeadCode = true;
-bool Option::LocalCopyProp = true;
-int Option::AutoInline = 0;
-bool Option::VariableCoalescing = false;
-bool Option::ArrayAccessIdempotent = false;
 bool Option::DumpAst = false;
 bool Option::WholeProgram = true;
 bool Option::UseHHBBC = !getenv("HHVM_DISABLE_HHBBC2");
 bool Option::RecordErrors = true;
-std::string Option::DocJson;
 
-bool Option::AllDynamic = true;
 bool Option::AllVolatile = false;
 
 StringBag Option::OptionStrings;
@@ -159,50 +144,56 @@ bool Option::GenerateDocComments = true;
 ///////////////////////////////////////////////////////////////////////////////
 // load from HDF file
 
-void Option::LoadRootHdf(const IniSetting::Map& ini, const Hdf &roots,
-                         map<string, string> &map) {
-  if (roots.exists()) {
-    for (Hdf hdf = roots.firstChild(); hdf.exists(); hdf = hdf.next()) {
-      map[Config::Get(ini, hdf["root"])] = Config::Get(ini, hdf["path"]);
-    }
-  }
+void Option::LoadRootHdf(const IniSetting::Map& ini,
+                         const Hdf &roots,
+                         const std::string& name,
+                         std::map<std::string, std::string> &map) {
+  auto root_map_callback = [&] (const IniSetting::Map &ini_rm,
+                                const Hdf &hdf_rm,
+                                const std::string &ini_rm_key) {
+    map[Config::GetString(ini_rm, hdf_rm, "root", "", false)] =
+      Config::GetString(ini_rm, hdf_rm, "path", "", false);
+  };
+  Config::Iterate(root_map_callback, ini, roots, name);
 }
 
-void Option::LoadRootHdf(const IniSetting::Map& ini, const Hdf &roots,
-                         vector<string> &vec) {
-  if (roots.exists()) {
-    for (Hdf hdf = roots.firstChild(); hdf.exists(); hdf = hdf.next()) {
-      vec.push_back(Config::GetString(ini, hdf,""));
-    }
-  }
+void Option::LoadRootHdf(const IniSetting::Map& ini,
+                         const Hdf &roots,
+                         const std::string& name,
+                         std::vector<std::string> &vec) {
+  auto root_vec_callback = [&] (const IniSetting::Map &ini_rv,
+                                const Hdf &hdf_rv,
+                                const std::string &ini_rv_key) {
+    vec.push_back(Config::GetString(ini_rv, hdf_rv, "", "", false));
+  };
+  Config::Iterate(root_vec_callback, ini, roots, name);
 }
 
 void Option::Load(const IniSetting::Map& ini, Hdf &config) {
-  LoadRootHdf(ini, config["IncludeRoots"], IncludeRoots);
-  LoadRootHdf(ini, config["AutoloadRoots"], AutoloadRoots);
+  LoadRootHdf(ini, config, "IncludeRoots", IncludeRoots);
+  LoadRootHdf(ini, config, "AutoloadRoots", AutoloadRoots);
 
-  Config::Get(ini, config["PackageFiles"], PackageFiles);
-  Config::Get(ini, config["IncludeSearchPaths"], IncludeSearchPaths);
-  Config::Get(ini, config["PackageDirectories"], PackageDirectories);
-  Config::Get(ini, config["PackageExcludeDirs"], PackageExcludeDirs);
-  Config::Get(ini, config["PackageExcludeFiles"], PackageExcludeFiles);
-  Config::Get(ini, config["PackageExcludePatterns"], PackageExcludePatterns);
-  Config::Get(ini, config["PackageExcludeStaticDirs"],
-              PackageExcludeStaticDirs);
-  Config::Get(ini, config["PackageExcludeStaticFiles"],
-              PackageExcludeStaticFiles);
-  Config::Get(ini, config["PackageExcludeStaticPatterns"],
-              PackageExcludeStaticPatterns);
-  Config::Bind(CachePHPFile, ini, config["CachePHPFile"]);
+  Config::Bind(PackageFiles, ini, config, "PackageFiles", PackageFiles);
+  Config::Bind(IncludeSearchPaths, ini, config, "IncludeSearchPaths");
+  Config::Bind(PackageDirectories, ini, config, "PackageDirectories");
+  Config::Bind(PackageExcludeDirs, ini, config, "PackageExcludeDirs");
+  Config::Bind(PackageExcludeFiles, ini, config, "PackageExcludeFiles");
+  Config::Bind(PackageExcludePatterns, ini, config, "PackageExcludePatterns");
+  Config::Bind(PackageExcludeStaticDirs, ini,
+               config, "PackageExcludeStaticDirs");
+  Config::Bind(PackageExcludeStaticFiles, ini,
+               config, "PackageExcludeStaticFiles");
+  Config::Bind(PackageExcludeStaticFiles, ini,
+               config, "PackageExcludeStaticPatterns");
+  Config::Bind(CachePHPFile, ini, config, "CachePHPFile");
 
-  Config::Get(ini, config["ParseOnDemandDirs"], ParseOnDemandDirs);
+  Config::Bind(ParseOnDemandDirs, ini, config, "ParseOnDemandDirs");
 
   {
-    Hdf cg = config["CodeGeneration"];
-    string tmp;
+    std::string tmp;
 
 #define READ_CG_OPTION(name)                    \
-    tmp = Config::GetString(ini, cg[#name]);         \
+    tmp = Config::GetString(ini, config, "CodeGeneration."#name); \
     if (!tmp.empty()) {                         \
       name = OptionStrings.add(tmp.c_str());    \
     }
@@ -211,61 +202,78 @@ void Option::Load(const IniSetting::Map& ini, Hdf &config) {
     READ_CG_OPTION(LambdaPrefix);
   }
 
-  Config::Get(ini, config["DynamicFunctionPrefix"], DynamicFunctionPrefixes);
-  Config::Get(ini, config["DynamicFunctionPostfix"], DynamicFunctionPostfixes);
-  Config::Get(ini, config["DynamicMethodPrefix"], DynamicMethodPrefixes);
-  Config::Get(ini, config["DynamicInvokeFunctions"], DynamicInvokeFunctions);
-  Config::Get(ini, config["VolatileClasses"], VolatileClasses);
+  Config::Bind(DynamicInvokeFunctions, ini, config, "DynamicInvokeFunctions");
+  Config::Bind(VolatileClasses, ini, config, "VolatileClasses");
+
+  for (auto& str : Config::GetVector(ini, config, "ConstantFunctions")) {
+    std::string func;
+    std::string value;
+    if (folly::split('|', str, func, value)) {
+      ConstantFunctions[func] = value;
+    } else {
+      std::cerr << folly::format("Invalid ConstantFunction: '{}'\n", str);
+    }
+  }
 
   // build map from function names to sections
-  for (Hdf hdf = config["FunctionSections"].firstChild(); hdf.exists();
-       hdf = hdf.next()) {
-    for (Hdf hdfFunc = hdf.firstChild(); hdfFunc.exists();
-         hdfFunc = hdfFunc.next()) {
-           FunctionSections[Config::GetString(ini, hdfFunc)] = hdf.getName();
-    }
-  }
+  auto function_sections_callback = [&] (const IniSetting::Map &ini_fs,
+                                         const Hdf &hdf_fs,
+                                         const std::string &ini_fs_key) {
+    auto function_callback = [&] (const IniSetting::Map &ini_f,
+                                  const Hdf &hdf_f,
+                                  const std::string &ini_f_key) {
+      FunctionSections[Config::GetString(ini_f, hdf_f, "", "", false)] =
+        hdf_fs.exists() && !hdf_fs.isEmpty() ? hdf_fs.getName() : ini_fs_key;
+    };
+    Config::Iterate(function_callback, ini_fs, hdf_fs, "", false);
+  };
+  Config::Iterate(function_sections_callback, ini, config, "FunctionSections");
 
   {
-    Hdf repo = config["Repo"];
+    // Repo
     {
-      Hdf repoCentral = repo["Central"];
-      Config::Bind(RepoCentralPath, ini, repoCentral["Path"]);
+      // Repo Central
+      Config::Bind(RepoCentralPath, ini, config, "Repo.Central.Path");
     }
-    Config::Bind(RepoDebugInfo, ini, repo["DebugInfo"], false);
+    Config::Bind(RepoDebugInfo, ini, config, "Repo.DebugInfo", false);
   }
 
   {
-    Hdf autoloadMap = config["AutoloadMap"];
-    Config::Get(ini, autoloadMap["class"], AutoloadClassMap);
-    Config::Get(ini, autoloadMap["function"], AutoloadFuncMap);
-    Config::Get(ini, autoloadMap["constant"], AutoloadConstMap);
-    Config::Bind(AutoloadRoot, ini, autoloadMap["root"]);
+    // AutoloadMap
+    Config::Bind(AutoloadClassMap, ini, config, "AutoloadMap.class");
+    Config::Bind(AutoloadFuncMap, ini, config, "AutoloadMap.function");
+    Config::Bind(AutoloadConstMap, ini, config, "AutoloadMap.constant");
+    Config::Bind(AutoloadRoot, ini, config, "AutoloadMap.root");
   }
 
-  Config::Bind(HardTypeHints, ini, config["HardTypeHints"], true);
-  Config::Bind(HardReturnTypeHints, ini, config["HardReturnTypeHints"], false);
-  Config::Bind(HardConstProp, ini, config["HardConstProp"], true);
+  Config::Bind(HHBBC::options.HardTypeHints, ini, config,
+               "HardTypeHints", true);
+  Config::Bind(HHBBC::options.HardReturnTypeHints, ini, config,
+               "HardReturnTypeHints", false);
+  Config::Bind(HardConstProp, ini, config, "HardConstProp", true);
 
-  Config::Bind(EnableHipHopSyntax, ini, config["EnableHipHopSyntax"]);
-  Config::Bind(EnableZendCompat, ini, config["EnableZendCompat"]);
-  Config::Bind(JitEnableRenameFunction, ini, config["JitEnableRenameFunction"]);
+  Config::Bind(APCProfile, ini, config, "APCProfile");
+
+  Config::Bind(EnableHipHopSyntax, ini, config, "EnableHipHopSyntax");
+  Config::Bind(EnableZendCompat, ini, config, "EnableZendCompat");
+  Config::Bind(JitEnableRenameFunction, ini, config, "JitEnableRenameFunction");
   Config::Bind(EnableHipHopExperimentalSyntax, ini,
-               config["EnableHipHopExperimentalSyntax"]);
-  Config::Bind(EnableShortTags, ini, config["EnableShortTags"], true);
+               config, "EnableHipHopExperimentalSyntax");
+  Config::Bind(EnableShortTags, ini, config, "EnableShortTags", true);
 
   {
-    const Hdf& lang = config["Hack"]["Lang"];
-    Config::Bind(IntsOverflowToInts, ini, lang["IntsOverflowToInts"],
-                 EnableHipHopSyntax);
-    Config::Bind(StrictArrayFillKeys, ini, lang["StrictArrayFillKeys"]);
-    Config::Bind(DisallowDynamicVarEnvFuncs, ini,
-                 lang["DisallowDynamicVarEnvFuncs"]);
+    // Hack
+    Config::Bind(IntsOverflowToInts, ini, config,
+                 "Hack.Lang.IntsOverflowToInts", EnableHipHopSyntax);
+    Config::Bind(StrictArrayFillKeys, ini, config,
+                 "Hack.Lang.StrictArrayFillKeys");
+    Config::Bind(DisallowDynamicVarEnvFuncs, ini, config,
+                 "Hack.Lang.DisallowDynamicVarEnvFuncs");
   }
 
-  Config::Bind(EnableAspTags, ini, config["EnableAspTags"]);
+  Config::Bind(EnableAspTags, ini, config, "EnableAspTags");
 
-  Config::Bind(EnableXHP, ini, config["EnableXHP"], false);
+  Config::Bind(EnableXHP, ini, config, "EnableXHP", false);
 
   if (EnableHipHopSyntax) {
     // If EnableHipHopSyntax is true, it forces EnableXHP to true
@@ -273,89 +281,42 @@ void Option::Load(const IniSetting::Map& ini, Hdf &config) {
     EnableXHP = true;
   }
 
-  Config::Bind(ParserThreadCount, ini, config["ParserThreadCount"], 0);
+  Config::Bind(ParserThreadCount, ini, config, "ParserThreadCount", 0);
   if (ParserThreadCount <= 0) {
     ParserThreadCount = Process::GetCPUCount();
   }
 
-  EnableEval = (EvalLevel) Config::GetByte(ini, config["EnableEval"], 0);
-  Config::Bind(AllDynamic, ini, config["AllDynamic"], true);
-  Config::Bind(AllVolatile, ini, config["AllVolatile"]);
+  // Just to silence warnings until we remove them from various config files
+  (void)Config::GetByte(ini, config, "EnableEval", 0);
+  (void)Config::GetBool(ini, config, "AllDynamic", true);
 
-  Config::Bind(GenerateDocComments, ini, config["GenerateDocComments"], true);
-  Config::Bind(EliminateDeadCode, ini, config["EliminateDeadCode"], true);
-  Config::Bind(LocalCopyProp, ini, config["LocalCopyProp"], true);
-  Config::Bind(AutoInline, ini, config["AutoInline"], 0);
-  Config::Bind(VariableCoalescing, ini, config["VariableCoalescing"], false);
-  Config::Bind(ArrayAccessIdempotent, ini, config["ArrayAccessIdempotent"],
-               false);
-  Config::Bind(DumpAst, ini, config["DumpAst"], false);
-  Config::Bind(WholeProgram, ini, config["WholeProgram"], true);
-  Config::Bind(UseHHBBC, ini, config["UseHHBBC"], UseHHBBC);
+  Config::Bind(AllVolatile, ini, config, "AllVolatile");
+
+  Config::Bind(GenerateDocComments, ini, config, "GenerateDocComments", true);
+  Config::Bind(DumpAst, ini, config, "DumpAst", false);
+  Config::Bind(WholeProgram, ini, config, "WholeProgram", true);
+  Config::Bind(UseHHBBC, ini, config, "UseHHBBC", UseHHBBC);
 
   // Temporary, during file-cache migration.
-  Config::Bind(FileCache::UseNewCache, ini, config["UseNewCache"], false);
-
-  OnLoad();
+  Config::Bind(FileCache::UseNewCache, ini, config, "UseNewCache", false);
 }
 
 void Option::Load() {
-  OnLoad();
-}
-
-void Option::OnLoad() {
-  // all lambda functions are dynamic automatically
-  DynamicFunctionPrefixes.push_back(LambdaPrefix);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-bool Option::IsDynamicFunction(bool method, const std::string &name) {
-  if (method) {
-    return IsDynamic(name, DynamicMethodPrefixes, DynamicMethodPostfixes);
-  }
-  return IsDynamic(name, DynamicFunctionPrefixes, DynamicFunctionPostfixes);
-}
-
-bool Option::IsDynamicClass(const std::string &name) {
-  return IsDynamic(name, DynamicClassPrefixes, DynamicClassPostfixes);
-}
-
-bool Option::IsDynamic(const std::string &name,
-                       const std::vector<std::string> &prefixes,
-                       const std::vector<std::string> &postfixes) {
-  if (name.substr(0, 4) == "dyn_") return true;
-
-  for (unsigned int i = 0; i < prefixes.size(); i++) {
-    const string &prefix = prefixes[i];
-    if (name.substr(0, prefix.length()) == prefix) {
-      return true;
-    }
-  }
-
-  for (unsigned int i = 0; i < postfixes.size(); i++) {
-    const string &postfix = postfixes[i];
-    if (name.length() > postfix.length() &&
-        name.substr(name.length() - postfix.length()) == postfix) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 std::string Option::GetAutoloadRoot(const std::string &name) {
-  for (map<string, string>::const_iterator iter = AutoloadRoots.begin();
-       iter != AutoloadRoots.end(); ++iter) {
-    if (name.substr(0, iter->first.length()) == iter->first) {
-      return iter->second;
+  for (auto const& pair : AutoloadRoots) {
+    if (name.substr(0, pair.first.length()) == pair.first) {
+      return pair.second;
     }
   }
   return "";
 }
 
 std::string Option::MangleFilename(const std::string &name, bool id) {
-  string ret = UserFilePrefix;
+  std::string ret = UserFilePrefix;
   ret += name;
 
   if (id) {
@@ -369,12 +330,10 @@ std::string Option::MangleFilename(const std::string &name, bool id) {
 bool Option::IsFileExcluded(const std::string &file,
                             const std::set<std::string> &patterns) {
   String sfile(file.c_str(), file.size(), CopyString);
-  for (set<string>::const_iterator iter = patterns.begin();
-       iter != patterns.end(); ++iter) {
-    const std::string &pattern = *iter;
+  for (auto const& pattern : patterns) {
     Variant matches;
     Variant ret = preg_match(String(pattern.c_str(), pattern.size(),
-                                    CopyString), sfile, matches);
+                                    CopyString), sfile, &matches);
     if (ret.toInt64() > 0) {
       return true;
     }
@@ -399,8 +358,6 @@ void initialize_hhbbc_options() {
   HHBBC::options.InterceptableFunctions = HHBBC::make_method_map(
                                             Option::DynamicInvokeFunctions);
   HHBBC::options.HardConstProp          = Option::HardConstProp;
-  HHBBC::options.HardTypeHints          = Option::HardTypeHints;
-  HHBBC::options.HardReturnTypeHints    = Option::HardReturnTypeHints;
   HHBBC::options.DisallowDynamicVarEnvFuncs =
     (Option::DisallowDynamicVarEnvFuncs == HackStrictOption::ON);
 }

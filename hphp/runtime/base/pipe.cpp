@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,11 @@
 
 #include "hphp/runtime/base/type-string.h"
 
+#ifdef _MSC_VER
+#include "hphp/util/process.h"
+#else
 #include "hphp/util/light-process.h"
+#endif
 
 namespace HPHP {
 
@@ -34,14 +38,22 @@ Pipe::~Pipe() {
 
 bool Pipe::open(const String& filename, const String& mode) {
   assert(m_stream == nullptr);
-  assert(m_fd == -1);
+  assert(getFd() == -1);
 
-  FILE *f = LightProcess::popen(filename.data(), mode.data());
+#ifdef _MSC_VER
+  auto old_cwd = Process::GetCurrentDirectory();
+  chdir(g_context->getCwd().data());
+  FILE* f = _popen(filename.data(), mode.data());
+  chdir(old_cwd.c_str());
+#else
+  FILE *f = LightProcess::popen(filename.data(), mode.data(),
+                                g_context->getCwd().data());
+#endif
   if (!f) {
     return false;
   }
   m_stream = f;
-  m_fd = fileno(f);
+  setFd(fileno(f));
   return true;
 }
 
@@ -55,11 +67,15 @@ bool Pipe::closeImpl() {
   s_pcloseRet = 0;
   if (valid() && !isClosed()) {
     assert(m_stream);
+#ifdef _MSC_VER
+    int pcloseRet = _pclose(m_stream);
+#else
     int pcloseRet = LightProcess::pclose(m_stream);
     if (WIFEXITED(pcloseRet)) pcloseRet = WEXITSTATUS(pcloseRet);
+#endif
     s_pcloseRet = pcloseRet;
     ret = (pcloseRet == 0);
-    m_closed = true;
+    setIsClosed(true);
     m_stream = nullptr;
   }
   File::closeImpl();

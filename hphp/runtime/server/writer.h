@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,8 +30,7 @@ namespace HPHP{
 ///////////////////////////////////////////////////////////////////////////////
 // writers
 
-class Writer {
-public:
+struct Writer {
 
   enum class Format {
     XML,
@@ -69,8 +68,8 @@ public:
     endObject(name);
   }
 
-  static folly::fbstring escape_for_json(const char* s) {
-    auto ret = folly::fbstring{};
+  static std::string escape_for_json(const char* s) {
+    auto ret = std::string{};
     auto opts = folly::json::serialization_opts{};
     opts.skip_invalid_utf8 = true;
     opts.encode_non_ascii = true;
@@ -90,8 +89,7 @@ protected:
   }
 };
 
-class XMLWriter : public Writer {
-public:
+struct XMLWriter : Writer {
   explicit XMLWriter(std::ostream &out) : Writer(out) {}
 
 
@@ -150,9 +148,14 @@ private:
   }
 };
 
-class JSONWriter : public Writer {
+struct JSONWriter : Writer {
 
 protected:
+  // If true it will generate human-friendly output on multiple lines and with
+  // tabs for indentation. If false the output will be in a single line with no
+  // extra spacing.
+  bool m_prettify;
+
   // Whether or not we have skiped a comma for this current indent level. Valid
   // json may not have trailing commas such as {"a":4, "b":5,} Since we are
   // writing to a stream, we output *valid* json that has commas preceding all
@@ -193,7 +196,10 @@ protected:
   virtual void beginContainer(const char *name, bool isList) {
     char opener = isList ? '[' : '{';
     beginEntity(name);
-    m_out << opener << '\n';
+    m_out << opener;
+    if (m_prettify) {
+      m_out << '\n';
+    }
 
     // Push on whether or not we're entering a nameless context
     m_namelessContextStack.push(isList);
@@ -203,8 +209,13 @@ protected:
   virtual void endContainer(bool isList) {
     char closer = isList ? ']' : '}';
     decreaseIndent();
-    writeIndent();
-    m_out << closer << '\n';
+    if (m_prettify) {
+      writeIndent();
+    }
+    m_out << closer;
+    if (m_prettify) {
+      m_out << '\n';
+    }
   }
 
   /**
@@ -214,7 +225,9 @@ protected:
    * written with/without a name and if we need a comma.
    */
   virtual void beginEntity(const char *name) {
-    writeIndent();
+    if (m_prettify) {
+      writeIndent();
+    }
     if (!m_justIndented) {
       m_out << ", ";
     }
@@ -226,8 +239,8 @@ protected:
 
 public:
 
-  explicit JSONWriter(std::ostream &out) : Writer(out),
-      m_justIndented(true) {
+  explicit JSONWriter(std::ostream &out, bool prettify=true) : Writer(out),
+      m_prettify(prettify), m_justIndented(true) {
 
     // A valid json object begins in the nameless context. See
     // json.org for JSON state machine.
@@ -263,20 +276,24 @@ public:
     beginEntity(name);
 
     // Now write the actual value
-    m_out << escape_for_json(value.c_str()) << "\n";
+    m_out << escape_for_json(value.c_str());
+    if (m_prettify) {
+      m_out << '\n';
+    }
   }
 
   virtual void writeEntry(const char *name, int64_t value) {
     beginEntity(name);
 
     // Now write the actual value
-    m_out << value << '\n';
+    m_out << value;
+    if (m_prettify) {
+      m_out << '\n';
+    }
   }
 };
 
-class HTMLWriter : public Writer {
-
-public:
+struct HTMLWriter : Writer {
   explicit HTMLWriter(std::ostream &out) : Writer(out) {}
 
   virtual void writeFileHeader() {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,31 +18,34 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_EVAL_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include "hphp/runtime/base/req-root.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdEval : public DebuggerCommand {
-public:
-  CmdEval() : DebuggerCommand(KindOfEval), m_bypassAccessCheck(false) {
+struct CmdEval : DebuggerCommand {
+  CmdEval() : DebuggerCommand(KindOfEval) {
     m_version = 1;
   }
 
-  virtual void onClient(DebuggerClient &client);
-  virtual bool onServer(DebuggerProxy &proxy);
+  void onClient(DebuggerClient&) override;
+  bool onServer(DebuggerProxy&) override;
 
-  virtual void handleReply(DebuggerClient &client);
-  bool failed() { return m_failed; }
+  bool failed() const {
+    return m_failed;
+  }
 
 protected:
-  virtual void sendImpl(DebuggerThriftBuffer &thrift);
-  virtual void recvImpl(DebuggerThriftBuffer &thrift);
+  void sendImpl(DebuggerThriftBuffer&) override;
+  void recvImpl(DebuggerThriftBuffer&) override;
 
 private:
-  String m_output;
+  void handleReply(DebuggerClient&);
+
+  req::root<String> m_output;
   int m_frame;
-  bool m_bypassAccessCheck;
-  bool m_failed;
+  bool m_bypassAccessCheck{false};
+  bool m_failed{false};
 };
 
 ///////////////////////////////////////////////////////////////////////////////

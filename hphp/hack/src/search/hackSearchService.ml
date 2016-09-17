@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,6 +8,7 @@
  *
  *)
 
+open Core
 open Utils
 
 type search_result_type =
@@ -17,6 +18,9 @@ type search_result_type =
   | Function
   | Typedef
   | Constant
+
+type result =
+  (Pos.absolute, search_result_type) SearchUtils.term list
 
 module SS = SearchService.Make(struct
   type t = search_result_type
@@ -48,13 +52,13 @@ module WorkerApi = struct
    * methods so that they can also be searched for *)
   let update_class c acc =
     let prefix = (snd c.Ast.c_name)^"::" in
-    List.fold_left begin fun acc elt ->
+    List.fold_left c.Ast.c_body ~f:begin fun acc elt ->
       match elt with
         | Ast.Method m -> let id = m.Ast.m_name in
             let name = snd id in
             let full_name = prefix^name in
             let pos = fst id in
-            let is_static = List.mem Ast.Static m.Ast.m_kind in
+            let is_static = List.mem m.Ast.m_kind Ast.Static in
             let type_ =
               Method (is_static, (Utils.strip_ns (snd c.Ast.c_name)))
             in
@@ -64,17 +68,22 @@ module WorkerApi = struct
             SS.WorkerApi.process_trie_term
               (clean_key full_name) name pos type_ acc
         | _ -> acc
-    end acc c.Ast.c_body
+    end ~init:acc
 
   let add_fuzzy_term id type_ acc =
     let name = snd id in
     let key = strip_ns name in
     SS.WorkerApi.process_fuzzy_term key name (fst id) type_ acc
 
+  let add_autocomplete_term id type_ acc =
+    let pos, name = id in
+    let key = strip_ns name in
+    SS.WorkerApi.process_autocomplete_term key name pos type_ acc
+
   (* Called by a worker after the file is parsed *)
   let update fn ast =
     let fuzzy_defs, trie_defs =
-        List.fold_left begin fun (fuzzy_defs, trie_defs) def ->
+      List.fold_left ast ~f:begin fun (fuzzy_defs, trie_defs) def ->
       match def with
       | Ast.Fun f ->
           let fuzzy_defs = add_fuzzy_term f.Ast.f_name Function fuzzy_defs in
@@ -94,8 +103,15 @@ module WorkerApi = struct
           in
           fuzzy_defs, trie_defs
       | _ -> fuzzy_defs, trie_defs
-    end (SS.Fuzzy.TMap.empty, []) ast in
-    SS.WorkerApi.update fn trie_defs fuzzy_defs
+    end ~init:(SS.Fuzzy.TMap.empty, []) in
+    let autocomplete_defs = List.fold_left ast ~f:begin fun acc def ->
+      match def with
+      | Ast.Fun f -> add_autocomplete_term f.Ast.f_name Function acc
+      | Ast.Class c -> add_autocomplete_term
+          c.Ast.c_name (Class c.Ast.c_kind) acc
+      | _ -> acc
+    end ~init:[] in
+    SS.WorkerApi.update fn trie_defs fuzzy_defs autocomplete_defs
 end
 
 module MasterApi = struct
@@ -106,16 +122,16 @@ module MasterApi = struct
     | "typedef" -> Some Typedef
     | _ -> None
 
-  let query input type_ =
-    SS.MasterApi.query input (get_type type_)
+  let query workers input type_ =
+    SS.MasterApi.query workers input (get_type type_)
+
+  let query_autocomplete input ~limit ~filter_map =
+    SS.AutocompleteTrie.MasterApi.query input ~limit ~filter_map
 
   let clear_shared_memory =
     SS.MasterApi.clear_shared_memory
 
-  let update_search_index files php_files =
-    let files = List.fold_left begin fun acc file ->
-      Relative_path.Set.add file acc
-    end php_files files in
+  let update_search_index files =
     SS.MasterApi.update_search_index files
 end
 

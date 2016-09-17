@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,44 +33,17 @@ FunctionContainer::FunctionContainer() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// parser functions
-
-void FunctionContainer::countReturnTypes(
-  std::map<std::string, int> &counts,
-  const StringToFunctionScopePtrVecMap *redec) {
-  for (StringToFunctionScopePtrMap::const_iterator iter =
-         m_functions.begin(); iter != m_functions.end(); ++iter) {
-    FunctionScopePtr f = iter->second;
-    if (f->isLocalRedeclaring()) {
-      always_assert(redec);
-      for (FunctionScopePtr f: redec->find(iter->first)->second) {
-        TypePtr type = f->getReturnType();
-        if (type) {
-          type->count(counts);
-        }
-      }
-    } else {
-      TypePtr type = f->getReturnType();
-      if (type) {
-        type->count(counts);
-      }
-    }
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void FunctionContainer::getFunctionsFlattened(
-  const StringToFunctionScopePtrVecMap *redec,
-  FunctionScopePtrVec &funcs,
+  const StringToFunctionScopePtrVecMap* redec,
+  std::vector<FunctionScopePtr>& funcs,
   bool excludePseudoMains /* = false */) const {
-  for (StringToFunctionScopePtrMap::const_iterator it = m_functions.begin();
-       it != m_functions.end(); ++it) {
-    FunctionScopePtr func = it->second;
+  for (const auto& fscope : m_functions) {
+    auto func = fscope.second;
     if (!excludePseudoMains || !func->inPseudoMain()) {
       if (func->isLocalRedeclaring()) {
-        const FunctionScopePtrVec &r = redec->find(it->first)->second;
+        const auto& r = redec->find(fscope.first)->second;
         funcs.insert(funcs.end(), r.begin(), r.end());
       } else {
         funcs.push_back(func);

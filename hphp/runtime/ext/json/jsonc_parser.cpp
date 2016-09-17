@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -28,9 +28,11 @@
 #include <json/json.h>
 #endif
 
-#include "hphp/runtime/ext/ext_collections.h"
+#include "hphp/runtime/ext/collections/ext_collections-map.h"
+#include "hphp/runtime/ext/collections/ext_collections-vector.h"
 #include "hphp/runtime/ext/json/JSON_parser.h"
 #include "hphp/runtime/ext/json/ext_json.h"
+#include "hphp/runtime/base/collections.h"
 #include "hphp/runtime/base/utf8-decode.h"
 #include "hphp/runtime/base/variable-serializer.h"
 
@@ -99,7 +101,7 @@ Variant json_type_array_to_variant(json_object *new_obj, const bool assoc,
   Variant var, tmpvar;
   nb = json_object_array_length(new_obj);
   if (collections) {
-    var = newres<c_Vector>();
+    var = req::make<c_Vector>();
   } else {
     var = Array::Create();
   }
@@ -107,7 +109,7 @@ Variant json_type_array_to_variant(json_object *new_obj, const bool assoc,
     tmpvar = json_object_to_variant(json_object_array_get_idx(new_obj, i),
                                     assoc, stable_maps, collections);
     if (collections) {
-      collectionAppend(var.getObjectData(), tmpvar.asCell());
+      collections::append(var.getObjectData(), tmpvar.asCell());
     } else {
       var.asArrRef().append(tmpvar);
     }
@@ -123,7 +125,7 @@ Variant json_type_object_to_variant(json_object *new_obj, const bool assoc,
     Variant       var, tmpvar;
 
   if (collections) {
-    var = newres<c_Map>();
+    var = req::make<c_Map>();
   } else if (assoc) {
     var = Array::Create();
   } else {
@@ -147,7 +149,7 @@ Variant json_type_object_to_variant(json_object *new_obj, const bool assoc,
     } else {
       if (collections) {
         auto keyTV = make_tv<KindOfString>(key.get());
-        collectionSet(var.getObjectData(), &keyTV, tmpvar.asCell());
+        collections::set(var.getObjectData(), &keyTV, tmpvar.asCell());
       } else {
         forceToArray(var).set(key, tmpvar);
       }
@@ -257,6 +259,14 @@ bool JSON_parser(Variant &return_value, const char *data, int data_len,
 
     json_tokener_free(tok);
     return retval;
+}
+
+void json_parser_init() {
+    // Nop
+}
+
+void json_parser_scan(IMarker& imarker) {
+    // No-op for now?
 }
 
 }

@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -25,7 +25,7 @@ open Ast
 (* This is meant to simplify hints when they appear inside extends,
 implements or use statements *)
 let simplify_hint (p, hint) = match hint with
-  | Hoption _ | Hfun _ | Htuple _ | Hshape _ -> raise CE.Impossible
+  | Hoption _ | Hfun _ | Htuple _ | Hshape _ | Haccess _ -> raise CE.Impossible
   | Happly (id, _) -> (p, Happly (id, []))
 
 

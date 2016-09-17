@@ -31,9 +31,8 @@
 #include "zend_constants.h"
 #include "zend_extensions.h"
 #include "zend_exceptions.h"
-#ifdef HAVE_SYS_TIME_H
-#include <sys/time.h>
-#endif
+
+#include <folly/portability/SysTime.h>
 
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
@@ -137,51 +136,73 @@ namespace {
     catch (HPHP::Object& e) {
       HPHP::TypedValue tv = HPHP::make_tv<HPHP::KindOfObject>(e.get());
       EG(exception) = HPHP::RefData::Make(tv);
+      tvIncRef(EG(exception)->tv());
     }
 
     catch (std::exception& e) {
       std::string message(typeid(e).name());
       message += ": ";
       message += e.what();
-      EG(exception) = HPHP::RefData::Make(HPHP::make_tv<HPHP::KindOfObject>(
-          HPHP::SystemLib::AllocExceptionObject(HPHP::Variant(message))));
+      EG(exception) =
+        HPHP::RefData::Make(
+          HPHP::make_tv<HPHP::KindOfObject>(
+            HPHP::SystemLib::AllocExceptionObject(
+              HPHP::Variant(message)
+            ).detach()
+          )
+        );
     }
 
     catch (...) {
       std::string message("unexpected C++ exception");
-      EG(exception) = HPHP::RefData::Make(HPHP::make_tv<HPHP::KindOfObject>(
-          HPHP::SystemLib::AllocExceptionObject(HPHP::Variant(message))));
+      EG(exception) =
+        HPHP::RefData::Make(
+          HPHP::make_tv<HPHP::KindOfObject>(
+            HPHP::SystemLib::AllocExceptionObject(
+              HPHP::Variant(message)
+            ).detach()
+          )
+        );
     }
-    tvIncRef(EG(exception)->tv());
   }
 }
 
 int zend_call_function(zend_fcall_info *fci, zend_fcall_info_cache *fci_cache TSRMLS_DC) /* {{{ */
 {
   // mostly from vm_call_user_func
-  HPHP::ObjectData* obj = nullptr;
+  HPHP::ObjectData* inferred_obj = nullptr;
   HPHP::Class* cls = nullptr;
 
   if (fci->object_ptr != nullptr) {
     HPHP::TypedValue *tv = fci->object_ptr->tv();
     if (tv->m_type == HPHP::KindOfObject) {
-      obj = tv->m_data.pobj;
-      if (obj) {
-        cls = obj->getVMClass();
+      inferred_obj = tv->m_data.pobj;
+      if (inferred_obj) {
+        cls = inferred_obj->getVMClass();
       }
     } else {
       assert(!"zend_call_function not given an object");
     }
   }
 
+  HPHP::ObjectData* obj = inferred_obj;
+
   HPHP::CallerFrame cf;
   HPHP::StringData* invName = nullptr;
+  /*
+   * WATCHOUT! obj and cls are passed by reference to vm_decode_function,
+   * and may get overwritten.
+   */
   const HPHP::Func* f = HPHP::vm_decode_function(
     HPHP::tvAsCVarRef(fci->function_name->tv()), cf(), false, obj, cls, invName
   );
   if (f == nullptr) {
     return FAILURE;
   }
+  if (obj == nullptr && inferred_obj != nullptr) {
+    obj = inferred_obj;  /* restore value inferred above */
+  }
+
   *fci->retval_ptr_ptr = NULL;
 
   HPHP::PackedArrayInit ad_params(fci->param_count);
@@ -250,4 +271,3 @@ ZEND_API zend_class_entry *zend_fetch_class_by_name(
   }
   return HPHP::zend_hphp_class_to_class_entry(cls);
 }
-

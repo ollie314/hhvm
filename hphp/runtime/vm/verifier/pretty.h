@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,17 +19,18 @@
 
 #include <string>
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/types.h"
+#include "hphp/util/portability.h"
 
 namespace HPHP {
 
-class Func;
-class Unit;
+struct Func;
+struct Unit;
 
 namespace Verifier {
 
-class Graph;
-class Block;
+struct Graph;
+struct Block;
 
 /**
  * Pretty print the control flow graph to stdout.
@@ -70,8 +71,8 @@ void printGml(const Unit*);
  *
  * The Func* may be nullptr.
  */
-void verify_error(const Unit*, const Func*, const char* fmt, ...)
-  ATTRIBUTE_PRINTF(3,4);
+void verify_error(const Unit*, const Func*,
+  ATTRIBUTE_PRINTF_STRING const char* fmt, ...) ATTRIBUTE_PRINTF(3,4);
 
 }}
 

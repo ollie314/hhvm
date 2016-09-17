@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,15 +24,22 @@ namespace HPHP {
 
 ALWAYS_INLINE void setCachedFunc(Func* func, bool debugger) {
   assert(!func->isMethod());
-  RDS::Link<Func*> funcLink(func->funcHandle());
-  auto const funcAddr = funcLink.get();
-  if (UNLIKELY(*funcAddr != nullptr)) {
-    if (*funcAddr == func) return;
-    if (!(*funcAddr)->isAllowOverride()) {
+  auto const handle = func->funcHandle();
+  auto& funcAddr = rds::handleToRef<LowPtr<Func>>(handle);
+
+  if (rds::isPersistentHandle(handle)) {
+    assertx(funcAddr.get() == nullptr || funcAddr.get() == func);
+  } else {
+    assertx(rds::isNormalHandle(handle));
+    if (!rds::isHandleInit(handle, rds::NormalTag{})) {
+      rds::initHandle(handle);
+    } else {
+      if (funcAddr.get() == func) return;
       raise_error(Strings::FUNCTION_ALREADY_DEFINED, func->name()->data());
     }
   }
-  *funcAddr = func;
+  funcAddr = func;
+
   if (UNLIKELY(debugger)) phpDebuggerDefFuncHook(func);
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,7 +30,7 @@ bool TypeSource::operator<(const TypeSource& rhs) const {
     return int(kind) < int(rhs.kind);
   }
   if (isGuard()) return guard->id() < rhs.guard->id();
-  assert(isValue());
+  assertx(isValue());
   return value->id() < rhs.value->id();
 }
 

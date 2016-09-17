@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,6 +7,9 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
+
+open Core
+open Sys_utils
 open Utils
 
 (*****************************************************************************)
@@ -16,9 +19,10 @@ open Utils
 let print_patch filename (line, kind, type_) =
   let line = string_of_int line in
   let kind = Typing_suggest.string_of_kind kind in
-  let tenv = Typing_env.empty filename in
+  let tenv =
+    Typing_env.empty TypecheckerOptions.permissive filename ~droot:None in
   let type_ = Typing_print.full tenv type_ in
-  Printf.printf "File: %s, line: %s, kind: %s, type: %s\n" 
+  Printf.printf "File: %s, line: %s, kind: %s, type: %s\n"
     (Relative_path.to_absolute filename) line kind type_
 
 (*****************************************************************************)
@@ -26,7 +30,7 @@ let print_patch filename (line, kind, type_) =
 (*****************************************************************************)
 
 let add_file env fn =
-  let failed_parsing = Relative_path.Set.add fn env.ServerEnv.failed_parsing in
+  let failed_parsing = Relative_path.Set.add env.ServerEnv.failed_parsing fn in
   { env with ServerEnv.failed_parsing = failed_parsing }
 
 (* Maps filenames to the contents of those files, split into lines. Each line
@@ -45,10 +49,10 @@ let file_data = ref (Relative_path.Map.empty :
   (int * string) list Relative_path.Map.t)
 
 let split_and_number content =
-  let lines = Utils.split_lines content in
-  let (_, numbered_lines) = List.fold_left begin fun (n, acc) line ->
+  let lines = split_lines content in
+  let (_, numbered_lines) = List.fold_left lines ~f:begin fun (n, acc) line ->
     n+1, (n, line)::acc
-  end (1, []) lines in
+  end ~init:(1, []) in
   List.rev numbered_lines
 
 let read_file_raw fn =
@@ -56,49 +60,50 @@ let read_file_raw fn =
   split_and_number content
 
 let read_file fn =
-  match Relative_path.Map.get fn !file_data with
+  match Relative_path.Map.get !file_data fn with
     | Some d -> d
     | None -> read_file_raw fn
 
 let write_file fn numbered_lines =
   let buf = Buffer.create 256 in
-  List.iter begin fun (lnum, line) ->
+  List.iter numbered_lines begin fun (_lnum, line) ->
     Buffer.add_string buf line;
     Buffer.add_char buf '\n'
-  end numbered_lines;
+  end;
   let abs_fn = Relative_path.to_absolute fn in
   let oc = open_out_no_fail abs_fn in
   output_string oc (Buffer.contents buf);
   close_out_no_fail abs_fn oc;
-  file_data := Relative_path.Map.add fn numbered_lines !file_data
+  file_data := Relative_path.Map.add !file_data ~key:fn ~data:numbered_lines
 
-let apply_patch genv env fn f =
+let apply_patch (genv:ServerEnv.genv) (env:ServerEnv.env) fn f =
   Printf.printf "Patching %s: %!" (Relative_path.to_absolute fn);
   let content = read_file fn in
   let patched = f fn content in
   if patched == content
-  then begin 
+  then begin
     Printf.printf "No patch\n"; flush stdout;
-    [], env
+    Errors.empty, env
   end
   else begin
     write_file fn patched;
     let env = add_file env fn in
-    let env = ServerTypeCheck.type_check genv env in
+    let env, _, _rechecked = ServerTypeCheck.(type_check genv env Full_check)in
     let errors = env.ServerEnv.errorl in
-    if env.ServerEnv.errorl <> []
+    if not (Errors.is_empty env.ServerEnv.errorl)
     then begin
       (* Reverting the changes *)
       write_file fn content;
       let env = add_file env fn in
       Printf.printf "Failed\n"; flush stdout;
-      let env = ServerTypeCheck.type_check genv env in
-      assert (env.ServerEnv.errorl = []);
+      let env, _,  _rechecked =
+        ServerTypeCheck.(type_check genv env Full_check) in
+      assert (Errors.is_empty env.ServerEnv.errorl);
       errors, env
     end
     else begin
       Printf.printf "OK\n"; flush stdout;
-      [], env
+      Errors.empty, env
     end
   end
 
@@ -136,7 +141,7 @@ let rec search_and_insert indent type_ head = function
       Printf.printf
         "\n-%s\n+%s\n"
         line_content
-        (String.concat "\n" (List.map snd patched_lines));
+        (String.concat "\n" (List.map patched_lines snd));
       List.rev_append head (patched_lines @ rl)
   | x :: rl -> search_and_insert indent type_ (x :: head) rl
 
@@ -203,7 +208,7 @@ let split_file fn =
  * line numbers. *)
 let rec reconcile_split orig_content split_content split_locs acc =
   match (orig_content, split_content) with
-    | ((o_n, o_l) :: o_c, (s_n, s_l) :: s_c) -> begin
+    | ((o_n, _o_l) :: o_c, (s_n, s_l) :: s_c) -> begin
       match split_locs with
         | (n :: split_locs) when n = s_n ->
           (* This line got split by split_vars -- i.e., there's an extra line
@@ -258,7 +263,7 @@ let add_member name patch_line type_ fn content =
 (*****************************************************************************)
 (* Section adding parameter types. *)
 (*****************************************************************************)
- 
+
 let add_soft_param name patch_line type_ _ content =
   (* As it turns out, the core logic for adding member vars works for parameters
    * too. *)
@@ -268,47 +273,47 @@ let add_soft_param name patch_line type_ _ content =
 (* Checking that the root directory is clean. *)
 (*****************************************************************************)
 
-let fail_not_clean genv =
+let fail_not_clean () =
   let msg = "The directory is not clean. Fix the errors before converting." in
   Printf.fprintf stderr "%s\n" msg;
   exit 3
 
-let check_no_error genv env =
-  match env.ServerEnv.errorl with
-  | [] -> ()
-  | _ -> fail_not_clean genv
+let check_no_error env =
+  if Errors.is_empty env.ServerEnv.errorl
+  then ()
+  else fail_not_clean ()
 
 (*****************************************************************************)
 (* Entry point *)
 (*****************************************************************************)
-open Utils
 open ServerEnv
 
 (* Selects the files we want to annotate. *)
 let select_files env dirname =
-  Relative_path.Map.fold begin fun fn defs acc ->
+  Relative_path.Map.fold env.files_info ~f:begin fun fn defs acc ->
     if is_prefix_dir dirname (Relative_path.to_absolute fn)
-    then Relative_path.Map.add fn defs acc
+    then Relative_path.Map.add acc ~key:fn ~data:defs
     else acc
-  end env.files_info Relative_path.Map.empty
+  end ~init:Relative_path.Map.empty
 
 (* Infers the types where annotations are missing. *)
 let infer_types genv env dirname =
-  let fast = select_files env dirname in  
+  let fast = select_files env dirname in
   let fast = FileInfo.simplify_fast fast in
   Typing_suggest_service.go genv.workers fast
 
 (* Tries to apply the patches one by one, rolls back if it failed. *)
-let apply_patches tried_patches genv env continue patches =
-  let tenv = Typing_env.empty Relative_path.default in
+let apply_patches tried_patches (genv:ServerEnv.genv) env continue patches =
+  let tcopt = (!env).tcopt in
+  let tenv = Typing_env.empty tcopt Relative_path.default ~droot:None in
   file_data := Relative_path.Map.empty;
-  Relative_path.Map.iter begin fun fn patchl ->
-    List.iter begin fun (line, k, type_ as patch) ->
+  Relative_path.Map.iter patches begin fun fn patchl ->
+    List.iter patchl begin fun (line, k, type_ as patch) ->
       if Hashtbl.mem tried_patches (fn, patch) then () else
       let go patch =
         let errors, new_env = apply_patch genv !env fn patch in
         env := new_env;
-        if errors = []
+        if Errors.is_empty errors
         then continue := true
       in
       Hashtbl.add tried_patches (fn, patch) true;
@@ -320,16 +325,16 @@ let apply_patches tried_patches genv env continue patches =
           go (add_return line type_string)
       | Typing_suggest.Kmember name ->
           go (add_member name line type_string)
-    end patchl
-  end patches;
+    end
+  end;
   ()
 
 (* Main entry point *)
-let go genv env dirname_path =
-  let dirname = Path.string_of_path dirname_path in
+let go (genv:ServerEnv.genv) env dirname_path =
+  let dirname = Path.to_string dirname_path in
   let env = ref env in
   let continue = ref false in
-  check_no_error genv !env;
+  check_no_error !env;
   let tried_patches = Hashtbl.create 23 in
   let patches = infer_types genv !env dirname in
   apply_patches tried_patches genv env continue patches;

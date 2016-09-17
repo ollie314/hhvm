@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,51 +21,52 @@
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/vm/tread-hash-map.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/atomic.h"
 #include "hphp/util/data-block.h"
 
 namespace HPHP {
+struct ExecutionContext;
+}
 
-class ExecutionContext;
+namespace HPHP { namespace jit {
 
-namespace jit {
+//////////////////////////////////////////////////////////////////////
 
 /*
- * The Fixup map allows us to reconstruct the state of the VM
- * registers (fp, sp, and pc) from an up-stack invocation record.
- * Each range of bytes in the translation cache is associated with a
- * "distance" in both stack cells and opcode bytes from the beginning
- * of the function.  These are known at translation time.
+ * The Fixup map allows us to reconstruct the state of the VM registers (fp,
+ * sp, and pc) from an up-stack invocation record.  Each range of bytes in the
+ * translation cache is associated with a "distance" in both stack cells and
+ * opcode bytes from the beginning of the function.  These are known at
+ * translation time.
  *
- * The way this works is by chasing the native rbp chain to find a rbp
- * that we know is a VM frame (i.e. is actually a full ActRec).  Once
- * we find that, regsFromActRec is called, which looks to see if the
- * return ip for the frame before the VM frame has an entry in the
- * fixup map (i.e. if it points into the translation cache)---if so,
- * it finds the fixup information in one of two ways:
+ * The way this works is by chasing the native rbp chain to find a rbp that we
+ * know is a VM frame (i.e. is actually a full ActRec).  Once we find that,
+ * regsFromActRec is called, which looks to see if the return ip for the frame
+ * before the VM frame has an entry in the fixup map (i.e. if it points into
+ * the translation cache)---if so, it finds the fixup information in one of two
+ * ways:
  *
  *   - Fixup: the normal case.
  *
- *     The Fixup record just stores an offset relative to the ActRec*
- *     for vpsp, and an offset from the start of the func for pc.  In
- *     the case of resumable frames the sp offset is relative to
- *     Stack::resumableStackBase.
+ *     The Fixup record just stores an offset relative to the ActRec* for vmsp,
+ *     and an offset from the start of the func for pc.  In the case of
+ *     resumable frames the sp offset is relative to Stack::resumableStackBase.
  *
  *   - IndirectFixup: this is used for some shared stubs in the TC.
  *
- *     In this case, some JIT'd code associated with the ActRec* we
- *     found made a call to a shared stub, and then that stub called
- *     C++.  The IndirectFixup record stores an offset to the saved
- *     frame pointer *two* levels deeper in C++, that says where the
- *     return IP for the call to the shared stub can be found.  I.e.,
- *     we're trying to chase back two return ips into the TC.
+ *     In this case, some JIT'd code associated with the ActRec* we found made
+ *     a call to a shared stub, and then that stub called C++.  The
+ *     IndirectFixup record stores an offset to the saved frame pointer *two*
+ *     levels deeper in C++, that says where the return IP for the call to the
+ *     shared stub can be found.  I.e., we're trying to chase back two return
+ *     ips into the TC.
  *
- *     Note that this means IndirectFixups will not work for C++ code
- *     paths that need to do a fixup without making at least one other
- *     C++ call, but for the current use case this is fine.
+ *     Note that this means IndirectFixups will not work for C++ code paths
+ *     that need to do a fixup without making at least one other C++ call, but
+ *     for the current use case this is fine.
  *
- *     Here's a picture of the native stack in the indirect fixup
- *     situation:
+ *     Here's a picture of the native stack in the indirect fixup situation:
  *
  *        |..............................|
  *        |..............................|
@@ -86,7 +87,7 @@ namespace jit {
  *        +------------------------------+  <call to C++>
  *        |    RetIP to the dtor stub    |
  *        |--                          --|
- *        |         saved rVmFp          |  push %rbp; mov %rsp, %rbp
+ *        |         saved rvmfp()        |  push %rbp; mov %rsp, %rbp
  *    +-->|--                          --|
  *    |   |    < C++ local variables>    |
  *    |   +------------------------------+
@@ -97,17 +98,19 @@ namespace jit {
  *        |..............................|
  *        |..............................|
  *
- *     The offset in IndirectFixup is how to get to the "RetIP to
- *     caller of dtor stub", relative to the value in the starred
- *     stack slot shown.  We then look that IP up in the fixup map
- *     again to find a normal (non-indirect) Fixup record.
+ *     The offset in IndirectFixup is how to get to the "RetIP to caller of
+ *     dtor stub", relative to the value in the starred stack slot shown.  We
+ *     then look that IP up in the fixup map again to find a normal
+ *     (non-indirect) Fixup record.
  *
  */
 
+//////////////////////////////////////////////////////////////////////
+
 struct Fixup {
   Fixup(int32_t pcOff, int32_t spOff) : pcOffset{pcOff}, spOffset{spOff} {
-    assert(pcOffset >= 0);
-    assert(spOffset >= 0);
+    assertx(pcOffset >= 0);
+    assertx(spOffset >= 0);
   }
 
   Fixup() {}
@@ -118,101 +121,55 @@ struct Fixup {
   int32_t spOffset{-1};
 };
 
-struct IndirectFixup {
-  explicit IndirectFixup(int retIpDisp) : returnIpDisp{retIpDisp} {}
+inline Fixup makeIndirectFixup(int dwordsPushed) {
+  Fixup fix;
+  fix.spOffset = kNativeFrameSize +
+                 AROFF(m_savedRip) +
+                 dwordsPushed * sizeof(uintptr_t);
+  return fix;
+}
 
-  /* FixupEntry uses magic to differentiate between IndirectFixup and Fixup. */
-  int32_t magic{-1};
-  int32_t returnIpDisp;
-};
+namespace FixupMap {
+/*
+ * Record a new fixup (or overwrite an existing fixup) at tca.
+ */
+void recordFixup(CTCA tca, const Fixup& fixup);
 
-class FixupMap {
-  static constexpr unsigned kInitCapac = 128;
-  TRACE_SET_MOD(fixup);
+/*
+ * Find the fixup for tca if it exists (or return nullptr).
+ */
+const Fixup* findFixup(CTCA tca);
 
-public:
-  struct VMRegs {
-    const Op* pc;
-    TypedValue* sp;
-    const ActRec* fp;
-  };
+/*
+ * Number of entries in the fixup map.
+ */
+size_t size();
 
-  FixupMap() : m_fixups(kInitCapac) {}
+/*
+ * Perform a fixup of the VM registers of ec for a stack whose first frame is
+ * rbp.
+ */
+void fixupWork(ExecutionContext* ec, ActRec* rbp);
 
-  void recordFixup(CTCA tca, const Fixup& fixup) {
-    TRACE(3, "FixupMapImpl::recordFixup: tca %p -> (pcOff %d, spOff %d)\n",
-          tca, fixup.pcOffset, fixup.spOffset);
-    m_fixups.insert(tca, FixupEntry(fixup));
-  }
+/*
+ * Returns true if calls to func should use an EagerVMRegAnchor.
+ */
+bool eagerRecord(const Func* func);
+}
 
-  const Fixup* findFixup(CTCA tca) const {
-    auto ent = m_fixups.find(tca);
-    if (!ent) return nullptr;
-    return &ent->fixup;
-  }
+namespace detail {
+void syncVMRegsWork(); // internal sync work for a dirty vm state
+}
 
-  bool getFrameRegs(const ActRec* ar, const ActRec* prevAr,
-                    VMRegs* outVMRegs) const;
+/*
+ * Sync VM registers for the first TC frame in the callstack.
+ */
+inline void syncVMRegs() {
+  if (tl_regState == VMRegState::CLEAN) return;
+  detail::syncVMRegsWork();
+}
 
-  void recordIndirectFixup(CodeAddress frontier, int dwordsPushed);
-  void fixup(ExecutionContext* ec) const;
-  void fixupWork(ExecutionContext* ec, ActRec* rbp) const;
-  void fixupWorkSimulated(ExecutionContext* ec) const;
-
-  static bool eagerRecord(const Func* func);
-
-private:
-  union FixupEntry {
-    explicit FixupEntry(Fixup f) : fixup(f) {}
-    explicit FixupEntry(IndirectFixup f) : indirect(f) {}
-
-    /* Depends on the magic field in an IndirectFixup being -1. */
-    bool isIndirect() const {
-      static_assert(
-        offsetof(IndirectFixup, magic) == offsetof(FixupEntry, firstElem),
-        "Differentiates between Fixup and IndirectFixup by looking at magic."
-      );
-
-      return firstElem < 0;
-    }
-
-    int32_t firstElem;
-    Fixup fixup;
-    IndirectFixup indirect;
-  };
-
-  void recordIndirectFixup(CTCA tca, const IndirectFixup& indirect) {
-    TRACE(2, "FixupMapImpl::recordIndirectFixup: tca %p -> ripOff %d\n",
-          tca, indirect.returnIpDisp);
-    m_fixups.insert(tca, FixupEntry(indirect));
-  }
-
-  PC pc(const ActRec* ar, const Func* f, const Fixup& fixup) const {
-    assert(f);
-    return f->getEntry() + fixup.pcOffset;
-  }
-
-  void regsFromActRec(CTCA tca, const ActRec* ar, const Fixup& fixup,
-                      VMRegs* outRegs) const {
-    const Func* f = ar->m_func;
-    assert(f);
-    TRACE(3, "regsFromActRec:: tca %p -> (pcOff %d, spOff %d)\n",
-          (void*)tca, fixup.pcOffset, fixup.spOffset);
-    assert(fixup.spOffset >= 0);
-    outRegs->pc = reinterpret_cast<const Op*>(pc(ar, f, fixup));
-    outRegs->fp = ar;
-
-    if (UNLIKELY(ar->resumed())) {
-      TypedValue* stackBase = Stack::resumableStackBase(ar);
-      outRegs->sp = stackBase - fixup.spOffset;
-    } else {
-      outRegs->sp = (TypedValue*)ar - fixup.spOffset;
-    }
-  }
-
-private:
-  TreadHashMap<CTCA,FixupEntry,ctca_identity_hash> m_fixups;
-};
+//////////////////////////////////////////////////////////////////////
 
 }}
 

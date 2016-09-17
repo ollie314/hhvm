@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,13 +27,11 @@ namespace HPHP {
 
 struct SatelliteServerInfo;
 
-class SatelliteServer {
-public:
+struct SatelliteServer {
   enum class Type {
     Unknown,
 
     KindOfInternalPageServer,  // handles restricted URLs
-    KindOfDanglingPageServer,  // handles old version requests during shutdown
     KindOfRPCServer,           // invokes one PHP function and returns JSON
     KindOfXboxServer,          // handles internal xbox tasks
   };
@@ -59,14 +57,12 @@ private:
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
 
-class SatelliteServerInfo {
-public:
+struct SatelliteServerInfo {
   /**
    * These are regular expressions of URLs that are not allowed on main server.
    * These are collected from all internal page servers.
    */
   static std::set<std::string> InternalURLs;
-  static int DanglingServerPort;
 
   /**
    * Check whether a requested path should be allowed on the main server.
@@ -74,7 +70,8 @@ public:
   static bool checkMainURL(const std::string& path);
 
 public:
-  explicit SatelliteServerInfo(const IniSetting::Map& ini, Hdf hdf);
+  SatelliteServerInfo(const IniSetting::Map& ini, const Hdf& hdf,
+                      const std::string& ini_key = "");
 
   const std::string &getName() const { return m_name;}
   SatelliteServer::Type getType() const { return m_type;}
@@ -95,6 +92,7 @@ public:
   const std::string &getPassword() const { return m_password;}
   const std::set<std::string> &getPasswords() const { return m_passwords;}
   bool alwaysReset() const { return m_alwaysReset;}
+  const std::set<std::string> &getFunctions() const { return m_functions; }
 
 protected:
   std::string m_name;
@@ -110,6 +108,7 @@ protected:
   std::string m_password;
   std::set<std::string> m_passwords;
   bool m_alwaysReset = false;
+  std::set<std::string> m_functions;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

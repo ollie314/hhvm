@@ -12,7 +12,7 @@
  *
  */
 <<__Native, __IsFoldable>>
-function array_change_key_case(mixed $input, int $case_ = 0): mixed;
+function array_change_key_case(mixed $input, int $case_ = CASE_LOWER): mixed;
 
 /**
  * Chunks an array into size large chunks. The last chunk may contain less
@@ -74,7 +74,7 @@ function array_combine(mixed $keys, mixed $values): mixed;
  *
  */
 <<__Native, __IsFoldable>>
-function array_count_values(mixed $input): mixed;
+function array_count_values(array $input): mixed;
 
 /**
  * Fills an array with the value of the value parameter, using the values of
@@ -162,7 +162,7 @@ function key_exists(mixed $key, mixed $search): bool;
  * @return mixed - Returns an array of all the keys in input.
  *
  */
-<<__Native("ActRec"), __IsFoldable>>
+<<__Native("NumArgs"), __IsFoldable>>
 function array_keys(mixed $input,
                     mixed $search_value = null,
                     bool $strict = false): mixed;
@@ -184,7 +184,7 @@ function array_keys(mixed $input,
  *   together.
  *
  */
-<<__Native, __IsFoldable>>
+<<__Native("NumArgs"), __IsFoldable>>
 function array_merge_recursive(mixed $array1,
                                mixed $array2 = null,
                                ...$argv): mixed;
@@ -204,7 +204,7 @@ function array_merge_recursive(mixed $array1,
  * @return mixed - Returns the resulting array.
  *
  */
-<<__Native, __IsFoldable>>
+<<__Native("NumArgs"), __IsFoldable>>
 function array_merge(mixed $array1, mixed $array2 = null, ...$argv): mixed;
 
 /**
@@ -349,11 +349,9 @@ function array_rand(mixed $input, int $num_req = 1): mixed;
  * @return mixed - Returns the resulting value. If the array is empty and
  *   initial is not passed, array_reduce() returns NULL.
  *
+ * Defined in array_reduce.hhas
  */
-<<__Native>>
-function array_reduce(mixed $input,
-                      mixed $callback,
-                      mixed $initial = null): mixed;
+
 
 /**
  * Takes an input array and returns a new array with the order of the elements
@@ -632,7 +630,7 @@ function shuffle(mixed &$array): bool;
  *
  */
 <<__Native, __IsFoldable>>
-function count(mixed $var, int $mode = 0): int;
+function count(mixed $var, int $mode = COUNT_NORMAL): int;
 
 /**
  * @param mixed $var
@@ -642,7 +640,7 @@ function count(mixed $var, int $mode = 0): int;
  *
  */
 <<__Native, __IsFoldable>>
-function sizeof(mixed $var, int $mode = 0): int;
+function sizeof(mixed $var, int $mode = COUNT_NORMAL): int;
 
 /**
  * Return the current key and value pair from an array and advance the array
@@ -1288,7 +1286,7 @@ function uksort(mixed &$array, mixed $cmp_function): bool;
  *
  */
 <<__Native>>
-function natsort(mixed &$array): mixed;
+function natsort(mixed &$array): bool;
 
 /**
  * natcasesort() is a case insensitive version of natsort(). This function
@@ -1302,7 +1300,7 @@ function natsort(mixed &$array): mixed;
  *
  */
 <<__Native>>
-function natcasesort(mixed &$array): mixed;
+function natcasesort(mixed &$array): bool;
 
 <<__Native>>
 function i18n_loc_get_default(): string;
@@ -1368,4 +1366,36 @@ namespace __SystemLib {
    */
   <<__Native>>
   function compact_sl(mixed $varname, ...$argv): array;
+
+  /* array_map() returns an array containing all the elements of arr1 after
+   * applying the callback function to each one. The number of parameters that
+   * the callback function accepts should match the number of arrays passed to
+   * the array_map()
+   * @param mixed $callback - Callback function to run for each element in each
+   * array.
+   * @param mixed $arr1 - An array to run through the callback function.
+   * @return mixed - Returns an array containing all the elements of arr1 after
+   * applying the callback function to each one.
+   *
+   * SystemLib defines the HHAS fast-path for array_map() as taking two args.
+   * First is valid callback, second is valid array.
+   *
+   * If array_map() is called by other means, it dispatches to this version
+   * which allows variadic array counts and deals with bad types.
+   */
+  <<__Native>>
+  function array_map(mixed $callback,
+                     mixed $arr1,
+                     ...$argv): mixed;
+}
+
+namespace HH {
+  <<__Native>>
+  function dict(mixed $arr): dict;
+
+  <<__Native>>
+  function vec(mixed $arr): vec;
+
+  <<__Native>>
+  function keyset(mixed $arr): keyset;
 }

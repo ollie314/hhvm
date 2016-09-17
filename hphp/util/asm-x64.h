@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,14 +16,13 @@
 #ifndef incl_HPHP_UTIL_ASM_X64_H_
 #define incl_HPHP_UTIL_ASM_X64_H_
 
-#include <boost/noncopyable.hpp>
 #include <type_traits>
 
-#include "hphp/util/data-block.h"
 #include "hphp/util/atomic.h"
+#include "hphp/util/data-block.h"
 #include "hphp/util/immed.h"
-#include "hphp/util/trace.h"
 #include "hphp/util/safe-cast.h"
+#include "hphp/util/trace.h"
 
 /*
  * An experimental macro assembler for x64, that strives for low coupling to
@@ -108,11 +107,16 @@ struct RegRIP {
 
 // Convert between physical registers of different sizes
 inline Reg8 rbyte(Reg32 r)     { return Reg8(int(r)); }
+inline Reg8 rbyte(Reg64 r)     { return Reg8(int(r)); }
 inline Reg16 r16(Reg8 r)       { return Reg16(int(r)); }
 inline Reg32 r32(Reg8 r)       { return Reg32(int(r)); }
 inline Reg32 r32(Reg16 r)      { return Reg32(int(r)); }
-inline Reg32 r32(Reg64 r)      { return Reg32(int(r)); }
 inline Reg32 r32(Reg32 r)      { return r; }
+inline Reg32 r32(Reg64 r)      { return Reg32(int(r)); }
+inline Reg64 r64(Reg8 r)       { return Reg64(int(r)); }
+inline Reg64 r64(Reg16 r)      { return Reg64(int(r)); }
+inline Reg64 r64(Reg32 r)      { return Reg64(int(r)); }
+inline Reg64 r64(Reg64 r)      { return r; }
 
 //////////////////////////////////////////////////////////////////////
 
@@ -252,7 +256,7 @@ struct DispRIP {
     return DispRIP(disp - x);
   }
 
-  intptr_t disp; // TODO #4613274: should be int32_t
+  intptr_t disp;
 };
 
 // *(reg + x)
@@ -538,7 +542,8 @@ struct X64Instr {
 };
 
 //                                    0    1    2    3    4    5     flags
-const X64Instr instr_divsd     { { 0x5E,0xF1,0xF1,0x00,0xF1,0xF1 }, 0x10102 };
+const X64Instr instr_divsd =   { { 0x5E,0xF1,0xF1,0x00,0xF1,0xF1 }, 0x10102 };
+const X64Instr instr_movups =  { { 0x10,0x11,0xF1,0x00,0xF1,0xF1 }, 0x0103  };
 const X64Instr instr_movdqa =  { { 0x6F,0x7F,0xF1,0x00,0xF1,0xF1 }, 0x4103  };
 const X64Instr instr_movdqu =  { { 0x6F,0x7F,0xF1,0x00,0xF1,0xF1 }, 0x8103  };
 const X64Instr instr_movsd =   { { 0x11,0x10,0xF1,0x00,0xF1,0xF1 }, 0x10102 };
@@ -626,6 +631,8 @@ enum class RoundDirection : ssize_t {
   truncate = 3,
 };
 
+const char* show(RoundDirection);
+
 enum class ComparisonPred : uint8_t {
   // True if...
   eq_ord = 0,    // ...operands are ordered AND equal
@@ -708,7 +715,8 @@ struct Label;
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-class X64Assembler : private boost::noncopyable {
+struct X64Assembler {
+private:
   friend struct Label;
 
   /*
@@ -722,6 +730,9 @@ class X64Assembler : private boost::noncopyable {
 
 public:
   explicit X64Assembler(CodeBlock& cb) : codeBlock(cb) {}
+
+  X64Assembler(const X64Assembler&) = delete;
+  X64Assembler& operator=(const X64Assembler&) = delete;
 
   CodeBlock& code() const { return codeBlock; }
 
@@ -932,6 +943,10 @@ public:
   void decl(MemoryRef m) { instrM32(instr_dec, m); }
   void decw(MemoryRef m) { instrM16(instr_dec, m); }
 
+  void push(Immed64 i) { emitI(instr_push, i.q()); }
+
+  void movups(RegXMM x, MemoryRef m)        { instrRM(instr_movups, x, m); }
+  void movups(MemoryRef m, RegXMM x)        { instrMR(instr_movups, m, x); }
   void movdqu(RegXMM x, MemoryRef m)        { instrRM(instr_movdqu, x, m); }
   void movdqu(MemoryRef m, RegXMM x)        { instrMR(instr_movdqu, m, x); }
   void movdqa(RegXMM x, RegXMM y)           { instrRR(instr_movdqa, x, y); }
@@ -977,6 +992,7 @@ public:
 
   void jmp(Reg64 r)            { instrR(instr_jmp, r); }
   void jmp(MemoryRef m)        { instrM(instr_jmp, m); }
+  void jmp(RIPRelativeRef m)   { instrM(instr_jmp, m); }
   void call(Reg64 r)           { instrR(instr_call, r); }
   void call(MemoryRef m)       { instrM(instr_call, m); }
   void call(RIPRelativeRef m)  { instrM(instr_call, m); }
@@ -1123,7 +1139,7 @@ public:
       xorl  (r32(dest), r32(dest));
       return;
     }
-    if (LIKELY(imm.q() > 0 && deltaFits(imm.q(), sz::dword))) {
+    if (LIKELY(imm.q() > 0 && imm.fits(sz::dword))) {
       // This will zero out the high-order bits.
       movl (imm.l(), r32(dest));
       return;
@@ -2079,7 +2095,7 @@ private:
 
 //////////////////////////////////////////////////////////////////////
 
-struct Label : private boost::noncopyable {
+struct Label {
   explicit Label()
     : m_a(nullptr)
     , m_address(nullptr)
@@ -2099,6 +2115,9 @@ struct Label : private boost::noncopyable {
       }
     }
   }
+
+  Label(const Label&) = delete;
+  Label& operator=(const Label&) = delete;
 
   void jmp(X64Assembler& a) {
     addJump(&a, Branch::Jmp);
@@ -2205,9 +2224,8 @@ inline void X64Assembler::call(Label& l) { l.call(*this); }
  *   a.patchJmp(...);
  */
 inline CodeBlock& codeBlockChoose(CodeAddress addr) {
-  assert(false && "addr was not part of any known code block");
-  not_reached();
-  return *static_cast<CodeBlock*>(nullptr);
+  always_assert_flog(false,
+                     "address {} was not part of any known code block", addr);
 }
 template<class... Blocks>
 CodeBlock& codeBlockChoose(CodeAddress addr, CodeBlock& a, Blocks&... as) {
@@ -2216,6 +2234,8 @@ CodeBlock& codeBlockChoose(CodeAddress addr, CodeBlock& a, Blocks&... as) {
 }
 
 //////////////////////////////////////////////////////////////////////
+
+namespace x64 {
 
 struct DecodedInstruction {
   explicit DecodedInstruction(uint8_t* ip) { decode(ip); }
@@ -2226,12 +2246,18 @@ struct DecodedInstruction {
   uint8_t* picAddress() const;
   bool setPicAddress(uint8_t* target);
 
+  bool hasOffset() const { return m_offSz != 0; }
+  int32_t offset() const;
+
   bool hasImmediate() const { return m_immSz; }
   int64_t immediate() const;
   bool setImmediate(int64_t value);
   bool isNop() const;
   bool isBranch(bool allowCond = true) const;
   bool isCall() const;
+  bool isJmp() const;
+  bool isLea() const;
+  ConditionCode jccCondCode() const;
   bool shrinkBranch();
   void widenBranch();
   uint8_t getModRm() const;
@@ -2298,6 +2324,6 @@ private:
 #undef logical_const
 #undef CCS
 
-}}
+}}}
 
 #endif

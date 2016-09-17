@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,6 @@
 
 #include "hphp/compiler/statement/break_statement.h"
 #include "hphp/compiler/expression/scalar_expression.h"
-#include "hphp/runtime/base/complex-types.h"
 
 using namespace HPHP;
 
@@ -71,21 +70,6 @@ uint64_t BreakStatement::getDepth() {
 
 StatementPtr BreakStatement::preOptimize(AnalysisResultConstPtr ar) {
   return StatementPtr();
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void BreakStatement::outputCodeModel(CodeGenerator &cg) {
-  if (strncmp(m_name, "break", 5) == 0) {
-    cg.printObjectHeader("BreakStatement", 2);
-  } else {
-    cg.printObjectHeader("ContinueStatement", 2);
-  }
-  cg.printPropertyHeader("depth");
-  cg.printValue((int)m_depth);
-  cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
-  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

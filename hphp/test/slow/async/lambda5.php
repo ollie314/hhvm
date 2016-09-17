@@ -1,7 +1,7 @@
 <?hh
 
 async function block() {
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
 }
 
 async function foo($a) {
@@ -22,4 +22,4 @@ async function foo($a) {
   } while ($next < 2000);
 }
 
-foo(42)->join();
+HH\Asio\join(foo(42));

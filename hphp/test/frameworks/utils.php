@@ -1,4 +1,5 @@
 <?hh
+
 require_once __DIR__.'/SortedIterator.php';
 require_once __DIR__.'/Options.php';
 
@@ -77,10 +78,10 @@ function find_first_file_recursive(Set $filenames, string $root_dir,
   $sit = new SortedIterator($rit);
 
   foreach ($sit as $fileinfo) {
-    if ($filenames->contains($fileinfo->getFileName())) {
+    if ($filenames->contains($fileinfo->getFilename())) {
       return $just_path_to_file
              ? $fileinfo->getPath()
-             : $fileinfo->getPathName();
+             : $fileinfo->getPathname();
     }
   }
 
@@ -99,11 +100,11 @@ function find_all_files(string $pattern, string $root_dir,
   $rit = new RecursiveIteratorIterator($dit);
   $sit = new SortedIterator($rit);
   foreach ($sit as $fileinfo) {
-    if (preg_match($pattern, $fileinfo->getFileName()) === 1 &&
-        preg_match($exclude_file_pattern, $fileinfo->getFileName()) === 0 &&
+    if (preg_match($pattern, $fileinfo->getFilename()) === 1 &&
+        preg_match($exclude_file_pattern, $fileinfo->getFilename()) === 0 &&
         strstr($fileinfo->getPath(), '/vendor/') === false &&
         !nullthrows($exclude_dirs)->contains(dirname($fileinfo->getPath()))) {
-      $files[] = $fileinfo->getPathName();
+      $files[] = $fileinfo->getPathname();
     }
   }
 
@@ -125,11 +126,11 @@ function find_all_files_containing_text(
   $rit = new RecursiveIteratorIterator($dit);
   $sit = new SortedIterator($rit);
   foreach ($sit as $fileinfo) {
-    if (strpos(file_get_contents($fileinfo->getPathName()), $text) !== false &&
-        preg_match($exclude_file_pattern, $fileinfo->getFileName()) === 0 &&
+    if (strpos(file_get_contents($fileinfo->getPathname()), $text) !== false &&
+        preg_match($exclude_file_pattern, $fileinfo->getFilename()) === 0 &&
         strstr($fileinfo->getPath(), '/vendor/') === false &&
         !nullthrows($exclude_dirs)->contains(dirname($fileinfo->getPath()))) {
-      $files[] = $fileinfo->getPathName();
+      $files[] = $fileinfo->getPathname();
     }
   }
 
@@ -270,17 +271,28 @@ function get_runtime_build(bool $use_php = false): string {
   } else {
     $fbcode_root_dir = __DIR__.'/../../..';
     $oss_root_dir = __DIR__.'/../..';
+    $buck_root_dir = __DIR__.'/../../..';
+
     // See if we are using an internal development build
     if ((file_exists($fbcode_root_dir."/_bin"))) {
       $executable = $fbcode_root_dir;
       $executable .= $use_php ? "/_bin/hphp/hhvm/php" : "/_bin/hphp/hhvm/hhvm";
-    // Maybe we are in OSS land trying this script
+    } else if (file_exists($buck_root_dir."/buck-out/gen")) {
+      // Maybe we're using a buck build.
+      $executable = $buck_root_dir;
+      $executable .= $use_php
+        ? "/buck-out/gen/hphp/hhvm/symlinks=php/php"
+        : "/buck-out/gen/hphp/hhvm/hhvm/hhvm";
     } else if (file_exists($oss_root_dir."/hhvm")) {
+      // Maybe we are in OSS land trying this script.
+
       // Pear won't run correctly unless a 'php' executable exists.
       // This may be a Pear thing, a PHPUnit running phpt thing, or
       // or something else. Until we know for sure, let's just create
       // a php symlink to hhvm
-      symlink($oss_root_dir."/hhvm/hhvm", $oss_root_dir."/hhvm/php");
+      if (!file_exists($oss_root_dir.'/hhvm/php')) {
+        symlink($oss_root_dir."/hhvm/hhvm", $oss_root_dir."/hhvm/php");
+      }
 
       $executable = $oss_root_dir."/hhvm";
       $executable .= $use_php ? "/php" : "/hhvm";
@@ -358,6 +370,7 @@ function run_install(
       return $result;
     } catch (TimeoutException $e) {
       verbose((string) $e);
+      remove_dir_recursive(nullthrows($path));
       fbmake_json(
         Map {'op' => 'test_done', 'test' => $test_name, 'status' => 'skipped' }
       );
@@ -441,4 +454,11 @@ function nullthrows<T>(?T $x, ?string $message = null): T {
     $message = 'Unexpected null';
   }
   throw new Exception($message);
+}
+
+// Use this instead of unlink to avoid warnings
+function delete_file(?string $path): void {
+  if ($path !== null && file_exists($path)) {
+    unlink($path);
+  }
 }

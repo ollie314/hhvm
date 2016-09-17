@@ -23,12 +23,8 @@
 
 #include <php.h>
 
-#ifdef PHP_WIN32
-# include <win32/inet.h>
-#else
-# undef closesocket
-# define closesocket close
-#endif
+#undef closesocket
+#define closesocket close
 
 #ifndef HAVE_SHUTDOWN
 #undef shutdown
@@ -81,9 +77,7 @@ END_EXTERN_C()
 # define SHUT_RDWR 2
 #endif
 
-#ifdef HAVE_SYS_TIME_H
-#include <sys/time.h>
-#endif
+#include <folly/portability/SysTime.h>
 
 #ifdef HAVE_STDDEF_H
 #include <stddef.h>

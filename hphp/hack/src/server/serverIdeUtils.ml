@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,151 +7,181 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
-open Utils
+
+open Core
+open Reordered_argument_collections
 
 (*****************************************************************************)
 (* Error. *)
 (*****************************************************************************)
 
-let report_error exn =
-  let exn_str = Printexc.to_string exn in
-  Printf.printf "Could not auto-complete because of errors: %s\n" exn_str;
-  flush stdout;
-  ()
+let canon_set names =
+  names
+  |> SSet.elements
+  |> List.map ~f:NamingGlobal.canon_key
+  |> List.fold_left ~f:SSet.add ~init:SSet.empty
 
 let oldify_funs names =
-  Naming_heap.FunHeap.oldify_batch names;
-  Typing_env.Funs.oldify_batch names;
+  Naming_heap.FunPosHeap.oldify_batch names;
+  Naming_heap.FunCanonHeap.oldify_batch @@ canon_set names;
+  Decl_heap.Funs.oldify_batch names;
   ()
 
 let oldify_classes names =
-  Naming_heap.ClassHeap.oldify_batch names;
-  Typing_env.Classes.oldify_batch names;
+  Naming_heap.TypeIdHeap.oldify_batch names;
+  Naming_heap.TypeCanonHeap.oldify_batch @@ canon_set names;
+  Decl_class_elements.(
+    names |> SSet.elements |> get_for_classes |> oldify_all
+  );
+  Decl_heap.Classes.oldify_batch names;
   ()
 
-let revive funs classes =
-  Naming_heap.FunHeap.revive_batch funs;
-  Typing_env.Funs.revive_batch funs;
-  Naming_heap.ClassHeap.revive_batch classes;
-  Typing_env.Classes.revive_batch classes;
-  ()
+let oldify_typedefs names =
+  Naming_heap.TypeIdHeap.oldify_batch names;
+  Naming_heap.TypeCanonHeap.oldify_batch @@ canon_set names;
+  Decl_heap.Typedefs.oldify_batch names
 
-let declare content =
+let oldify_consts names =
+  Naming_heap.ConstPosHeap.oldify_batch names;
+  Decl_heap.GConsts.oldify_batch names
+
+let oldify_file name =
+  Parser_heap.ParserHeap.oldify_batch @@
+    Parser_heap.ParserHeap.KeySet.singleton name
+
+let oldify_file_info path file_info =
+  oldify_file path;
+  let {
+    FileInfo.n_funs; n_classes; n_types; n_consts
+  } = FileInfo.simplify file_info in
+  oldify_funs n_funs;
+  oldify_classes n_classes;
+  oldify_typedefs n_types;
+  oldify_consts n_consts
+
+let revive funs classes typedefs consts file_name =
+  Decl_heap.Funs.revive_batch funs;
+  Naming_heap.FunPosHeap.revive_batch funs;
+  Naming_heap.FunCanonHeap.revive_batch @@ canon_set funs;
+
+  Decl_heap.Classes.revive_batch classes;
+  Decl_class_elements.(
+    classes |> SSet.elements |> get_for_classes |> revive_all
+  );
+  Naming_heap.TypeIdHeap.revive_batch classes;
+  Naming_heap.TypeCanonHeap.revive_batch @@ canon_set classes;
+
+  Naming_heap.TypeIdHeap.revive_batch typedefs;
+  Naming_heap.TypeCanonHeap.revive_batch @@ canon_set typedefs;
+  Decl_heap.Typedefs.revive_batch typedefs;
+
+  Naming_heap.ConstPosHeap.revive_batch consts;
+  Decl_heap.GConsts.revive_batch consts;
+
+  Parser_heap.ParserHeap.revive_batch @@
+    Parser_heap.ParserHeap.KeySet.singleton file_name
+
+let revive_file_info path file_info =
+  let {
+    FileInfo.n_funs; n_classes; n_types; n_consts
+  } = FileInfo.simplify file_info in
+  revive n_funs n_classes n_types n_consts path
+
+let path = Relative_path.default
+(* This will parse, declare and check all functions and classes in content
+ * buffer.
+ *
+ * Declaring will overwrite definitions on shared heap, so before doing this,
+ * the function will also "oldify" them (see functions above and
+ * SharedMem.S.oldify_batch) - after working with local content is done,
+ * original definitions can (and should) be restored using "revive".
+ *)
+let declare_and_check content ~f =
+  let tcopt = TypecheckerOptions.permissive in
   Autocomplete.auto_complete := false;
   Autocomplete.auto_complete_for_global := "";
-  let declared_funs = ref SSet.empty in
-  let declared_classes = ref SSet.empty in
-  try
+  let file_info =
     Errors.ignore_ begin fun () ->
-      let {Parser_hack.is_hh_file; comments; ast} =
-        Parser_hack.program Relative_path.default content
+      let {Parser_hack.file_mode = _; comments = _; ast} =
+        (* FIXME: tcopt here doesn't use namespace aliasing *)
+        Parser_hack.program tcopt path content
       in
-      let funs, classes = List.fold_left begin fun (funs, classes) def ->
+      let funs, classes, typedefs, consts =
+        List.fold_left ast ~f:begin fun (funs, classes, typedefs, consts) def ->
         match def with
-          | Ast.Fun f -> SSet.add (snd f.Ast.f_name) funs, classes
-          | Ast.Class c -> funs, SSet.add (snd c.Ast.c_name) classes
-          | _ -> funs, classes
-      end (SSet.empty, SSet.empty) ast in
-      oldify_funs funs;
-      oldify_classes classes;
-      List.iter begin fun def ->
-        match def with
-        | Ast.Fun f ->
-            let nenv = Naming.empty in
-            let f = Naming.fun_ nenv f in
-            if !Find_refs.find_method_at_cursor_target <> None then
-              Find_refs.process_find_refs None
-                (snd f.Nast.f_name) (fst f.Nast.f_name);
-            let fname = (snd f.Nast.f_name) in
-            Typing.fun_decl f;
-            declared_funs := SSet.add fname !declared_funs;
-        | Ast.Class c ->
-            let nenv = Naming.empty in
-            let c = Naming.class_ nenv c in
-            if !Find_refs.find_method_at_cursor_target <> None then
-              Find_refs.process_class_ref (fst c.Nast.c_name)
-                (snd c.Nast.c_name) None;
-            let cname = snd c.Nast.c_name in
-            let all_methods = c.Nast.c_methods @ c.Nast.c_static_methods in
-            if !Find_refs.find_method_at_cursor_target <> None then
-            List.iter begin fun method_ ->
-              Find_refs.process_find_refs (Some (snd c.Nast.c_name))
-                (snd method_.Nast.m_name) (fst method_.Nast.m_name)
-            end all_methods;
-            (match c.Nast.c_constructor with
-            | Some method_ ->
-                Find_refs.process_find_refs (Some (snd c.Nast.c_name))
-                  Naming_special_names.Members.__construct
-                  (fst method_.Nast.m_name)
-            | None -> ());
-            declared_classes := SSet.add cname !declared_classes;
-            Typing_decl.class_decl c;
-            ()
-        | _ -> ()
-      end ast;
-      !declared_funs, !declared_classes
+          | Ast.Fun { Ast.f_name; _ } ->
+            f_name::funs, classes, typedefs, consts
+          | Ast.Class { Ast.c_name; _ } ->
+            funs, c_name::classes, typedefs, consts
+          | Ast.Typedef { Ast.t_id; _ } ->
+            funs, classes, t_id::typedefs, consts
+          | Ast.Constant { Ast.cst_name; _ } ->
+            funs, classes, typedefs, cst_name::consts
+          | _ -> funs, classes, typedefs, consts
+      end ~init:([], [], [], []) in
+
+      let file_info = { FileInfo.empty_t with
+        FileInfo.funs; classes; typedefs; consts;
+      } in
+
+      oldify_file_info path file_info;
+
+      Parser_heap.ParserHeap.add path ast;
+      NamingGlobal.make_env ~funs ~classes ~typedefs ~consts;
+      let nast = Naming.program tcopt ast in
+      List.iter nast begin function
+        | Nast.Fun f -> Decl.fun_decl f
+        | Nast.Class c -> Decl.class_decl tcopt c
+        | Nast.Typedef t -> Decl.typedef_decl t
+        | Nast.Constant cst -> Decl.const_decl cst
+      end;
+
+      (* If we remove a class member, there may still be child classes that
+       * refer to that member. We can either invalidate all the extends_deps
+       * of the classes we just declared, or revive the types of the class
+       * elements back into the new heap. We choose to revive since it should
+       * be faster, even though it is technically incorrect.
+       *)
+      classes
+      |> List.map ~f:snd
+      |> Decl_class_elements.revive_removed_elems;
+      (* We must run all the declaration steps first to ensure that the
+       * typechecking below sees all the new declarations. Lazy decl
+       * won't work in this case because we haven't put the new ASTs into
+       * the parsing heap. *)
+      List.iter nast begin function
+        | Nast.Fun f -> Typing.fun_def tcopt f;
+        | Nast.Class c -> Typing.class_def tcopt c;
+        | Nast.Typedef t -> Typing.typedef_def t;
+        | Nast.Constant cst -> Typing.gconst_def cst;
+      end;
+      file_info
     end
-  with e ->
-    report_error e;
-    SSet.empty, SSet.empty
+  in
+  let result = f path file_info in
+  revive_file_info path file_info;
+  result
 
-let fix_file_and_def content = try
-  Errors.ignore_ begin fun () ->
-    let {Parser_hack.is_hh_file; comments; ast} =
-      Parser_hack.program Relative_path.default content in
-    List.iter begin fun def ->
-      match def with
-      | Ast.Fun f ->
-          let nenv = Naming.empty in
-          let f = Naming.fun_ nenv f in
-          let filename = Pos.filename (fst f.Nast.f_name) in
-          let tenv = Typing_env.empty filename in
-          Typing.fun_def tenv (snd f.Nast.f_name) f
-      | Ast.Class c ->
-          let nenv = Naming.empty in
-          let c = Naming.class_ nenv c in
-          let filename = Pos.filename (fst c.Nast.c_name) in
-          let tenv = Typing_env.empty filename in
-          let res = Typing.class_def tenv (snd c.Nast.c_name) c in
-          res
-      | _ -> ()
-    end ast;
-  end
-with e ->
-  report_error e;
-  ()
-
-let check_def = function
-  | Ast.Fun f ->
-      (try Typing_check_service.type_fun (snd f.Ast.f_name)
-      with _ -> ())
-  | Ast.Class c ->
-      (try Typing_check_service.type_class (snd c.Ast.c_name)
-      with _ -> ())
-  | Ast.Stmt _ -> ()
-  | Ast.Typedef { Ast.t_id = (_, tname); _ } ->
-      (try Typing_check_service.check_typedef tname
-      with _ -> ()
-      )
-  | Ast.Constant _ -> ()
-  | Ast.Namespace _
-  | Ast.NamespaceUse _ -> assert false
-
-let recheck file_names =
+let recheck tcopt filetuple_l =
   SharedMem.invalidate_caches();
-  Errors.ignore_ begin fun () ->
-    List.iter begin fun fn ->
-      match Parser_heap.ParserHeap.get fn with
-      | None -> ()
-      | Some defs -> List.iter check_def defs
-    end file_names
+  List.iter filetuple_l begin fun (fn, defs) ->
+    ignore @@ Typing_check_utils.check_defs tcopt fn defs
   end
 
-let check_file_input fi =
+let check_file_input tcopt files_info fi =
   match fi with
-    | ServerMsg.FileContent content ->
-        let funs, classes = declare content in
-        fix_file_and_def content;
-        revive funs classes;
-    | ServerMsg.FileName fn ->
-        recheck [Relative_path.create Relative_path.Root fn];
+  | ServerUtils.FileContent content ->
+      begin
+        try
+          declare_and_check content ~f:(fun path _ -> path)
+        with Decl_class.Decl_heap_elems_bug -> begin
+          Hh_logger.log "%s" content;
+          Exit_status.(exit Decl_heap_elems_bug)
+        end
+      end
+  | ServerUtils.FileName fn ->
+      let path = Relative_path.create Relative_path.Root fn in
+      let () = match Relative_path.Map.get files_info path with
+        | Some fileinfo -> recheck tcopt [(path, fileinfo)]
+        | None -> () in
+      path

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,6 @@
 */
 
 #include "hphp/util/current-executable.h"
-#include <unistd.h>
 #include <limits.h>
 
 #ifdef __APPLE__
@@ -25,6 +24,8 @@
 #ifdef __FreeBSD__
 #include <sys/sysctl.h>
 #endif
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP {
 
@@ -37,7 +38,7 @@ std::string current_executable_path() {
   char result[PATH_MAX];
   uint32_t size = sizeof(result);
   uint32_t success = _NSGetExecutablePath(result, &size);
-  return std::string(result, (success == 0) ? size : 0);
+  return std::string(success == 0 ? result : "");
 #elif defined(__FreeBSD__)
   char result[PATH_MAX];
   size_t size = sizeof(result);

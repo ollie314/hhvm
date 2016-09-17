@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,42 +8,256 @@
  *
  *)
 
+open Core
 
-open Utils
+(* Don't change the ordering of this record without updating hh_shared_init in
+ * hh_shared.c, which indexes into config objects *)
+type config = {
+  global_size      : int;
+  heap_size        : int;
+  dep_table_pow    : int;
+  hash_table_pow   : int;
+  shm_dirs         : string list;
+  shm_min_avail    : int;
+  log_level        : int;
+}
+
+(* Allocated in C only. *)
+type handle = private {
+  h_fd: Unix.file_descr;
+  h_global_size: int;
+  h_heap_size: int;
+}
+
+exception Out_of_shared_memory
+exception Hash_table_full
+exception Dep_table_full
+exception Heap_full
+exception Failed_anonymous_memfd_init
+exception Less_than_minimum_available of int
+exception Failed_to_use_shm_dir of string
+let () =
+  Callback.register_exception "out_of_shared_memory" Out_of_shared_memory;
+  Callback.register_exception "hash_table_full" Hash_table_full;
+  Callback.register_exception "dep_table_full" Dep_table_full;
+  Callback.register_exception "heap_full" Heap_full;
+  Callback.register_exception "failed_anonymous_memfd_init" Failed_anonymous_memfd_init;
+  Callback.register_exception "less_than_minimum_available" (Less_than_minimum_available 0);
 
 (*****************************************************************************)
 (* Initializes the shared memory. Must be called before forking. *)
 (*****************************************************************************)
-external init: unit -> unit = "hh_shared_init"
+external hh_shared_init :
+  config:config -> shm_dir:string option -> handle = "hh_shared_init"
+
+let anonymous_init config =
+  hh_shared_init
+    ~config
+    ~shm_dir: None
+
+let rec shm_dir_init config = function
+| [] ->
+    Hh_logger.log
+      "We've run out of filesystems to use for shared memory";
+    raise Out_of_shared_memory
+| shm_dir::shm_dirs ->
+    let shm_min_avail = config.shm_min_avail in
+    begin try
+      (* For some reason statvfs is segfaulting when the directory doesn't
+       * exist, instead of returning -1 and an errno *)
+      if not (Sys.file_exists shm_dir)
+      then raise (Failed_to_use_shm_dir "shm_dir does not exist");
+      hh_shared_init
+        ~config
+        ~shm_dir:(Some shm_dir)
+    with
+    | Less_than_minimum_available avail ->
+        EventLogger.(log_if_initialized (fun () ->
+          sharedmem_less_than_minimum_available
+            ~shm_dir
+            ~shm_min_avail
+            ~avail
+        ));
+        if !Utils.debug
+        then Hh_logger.log
+          "Filesystem %s only has %d bytes available, \
+            which is less than the minimum %d bytes"
+          shm_dir
+          avail
+          config.shm_min_avail;
+        shm_dir_init config shm_dirs
+    | Unix.Unix_error (e, fn, arg) ->
+        let fn_string =
+          if fn = ""
+          then ""
+          else Utils.spf " thrown by %s(%s)" fn arg in
+        let reason =
+          Utils.spf "Unix error%s: %s" fn_string (Unix.error_message e) in
+        EventLogger.(log_if_initialized (fun () ->
+          sharedmem_failed_to_use_shm_dir ~shm_dir ~reason
+        ));
+        if !Utils.debug
+        then Hh_logger.log
+          "Failed to use shm dir `%s`: %s"
+          shm_dir
+          reason;
+        shm_dir_init config shm_dirs
+    | Failed_to_use_shm_dir reason ->
+        EventLogger.(log_if_initialized (fun () ->
+          sharedmem_failed_to_use_shm_dir ~shm_dir ~reason
+        ));
+        if !Utils.debug
+        then Hh_logger.log
+          "Failed to use shm dir `%s`: %s"
+          shm_dir
+          reason;
+        shm_dir_init config shm_dirs
+    end
+
+let init config =
+ try anonymous_init config
+  with Failed_anonymous_memfd_init ->
+    EventLogger.(log_if_initialized (fun () ->
+      sharedmem_failed_anonymous_memfd_init ()
+    ));
+    if !Utils.debug
+    then Hh_logger.log "Failed to use anonymous memfd init";
+    shm_dir_init config config.shm_dirs
+
+external connect : handle -> is_master:bool -> unit = "hh_connect"
 
 (*****************************************************************************)
 (* The shared memory garbage collector. It must be called every time we
  * free data (cf hh_shared.c for the underlying C implementation).
  *)
 (*****************************************************************************)
-external collect: unit -> unit = "hh_collect"
+external hh_collect: bool -> unit = "hh_collect"
 
 (*****************************************************************************)
-(* Must be called after the initialization of the hack server is over.
- * (cf serverInit.ml).
- *)
+(* Serializes the dependency table and writes it to a file *)
 (*****************************************************************************)
-external init_done: unit -> unit = "hh_call_after_init"
+external save_dep_table: string -> unit = "hh_save_dep_table"
 
 (*****************************************************************************)
-(* Serializes the shared memory and writes it to a file *)
+(* Loads the dependency table by reading from a file *)
 (*****************************************************************************)
-external save: string -> unit = "hh_save"
-
-(*****************************************************************************)
-(* Loads the shared memory by reading from a file *)
-(*****************************************************************************)
-external load: string -> unit = "hh_load"
+external load_dep_table: string -> unit = "hh_load_dep_table"
 
 (*****************************************************************************)
 (* The size of the dynamically allocated shared memory section *)
 (*****************************************************************************)
 external heap_size: unit -> int = "hh_heap_size"
+
+(*****************************************************************************)
+(* The logging level for shared memory statistics *)
+(* 0 = nothing *)
+(* 1 = log totals, averages, min, max bytes marshalled and unmarshalled *)
+(*****************************************************************************)
+external hh_log_level : unit -> int = "hh_log_level"
+
+(*****************************************************************************)
+(* The number of used slots in our hashtable *)
+(*****************************************************************************)
+external hash_used_slots : unit -> int * int = "hh_hash_used_slots"
+
+(*****************************************************************************)
+(* The total number of slots in our hashtable *)
+(*****************************************************************************)
+external hash_slots : unit -> int = "hh_hash_slots"
+
+(*****************************************************************************)
+(* The number of used slots in our dependency table *)
+(*****************************************************************************)
+external dep_used_slots : unit -> int = "hh_dep_used_slots"
+
+(*****************************************************************************)
+(* The total number of slots in our dependency table *)
+(*****************************************************************************)
+external dep_slots : unit -> int = "hh_dep_slots"
+
+(*****************************************************************************)
+(* Must be called after the initialization of the hack server is over.
+ * (cf serverInit.ml). *)
+(*****************************************************************************)
+external hh_init_done: unit -> unit = "hh_call_after_init"
+
+external hh_check_heap_overflow: unit -> bool  = "hh_check_heap_overflow"
+
+let init_done () =
+  hh_init_done ();
+  Measure.print_stats ();
+  EventLogger.sharedmem_init_done (heap_size ())
+
+type table_stats = {
+  nonempty_slots : int;
+  used_slots : int;
+  slots : int;
+}
+
+let dep_stats () =
+  let used = dep_used_slots () in
+  {
+    nonempty_slots = used;
+    used_slots = used;
+    slots = dep_slots ();
+  }
+
+let hash_stats () =
+  let used_slots, nonempty_slots = hash_used_slots () in
+  {
+    nonempty_slots;
+    used_slots;
+    slots = hash_slots ();
+  }
+
+let collect (effort : [ `gentle | `aggressive ]) =
+  let old_size = heap_size () in
+  Stats.update_max_heap_size old_size;
+  let start_t = Unix.gettimeofday () in
+  hh_collect (effort = `aggressive);
+  let new_size = heap_size () in
+  let time_taken = Unix.gettimeofday () -. start_t in
+  if old_size <> new_size then begin
+    Hh_logger.log
+      "Sharedmem GC: %d bytes before; %d bytes after; in %f seconds"
+      old_size new_size time_taken;
+    EventLogger.sharedmem_gc_ran effort old_size new_size time_taken
+  end
+
+let is_heap_overflow () = hh_check_heap_overflow ()
+
+(*****************************************************************************)
+(* Compute size of values in the garbage-collected heap *)
+(*****************************************************************************)
+module HeapSize = struct
+
+  let rec traverse ((visited:ISet.t), acc) r =
+    if Obj.is_block r then begin
+      let p:int = Obj.magic r in
+      if ISet.mem p visited
+      then (visited,acc)
+      else begin
+        let visited' = ISet.add p visited in
+        let n = Obj.size r in
+        let acc' = acc + 1 + n in
+        if Obj.tag r < Obj.no_scan_tag
+        then traverse_fields (visited', acc') r n
+        else (visited', acc')
+      end
+    end else (visited, acc)
+
+  and traverse_fields acc r i =
+    let i = i - 1 in
+    if i < 0 then acc
+    else traverse_fields (traverse acc (Obj.field r i)) r i
+
+  (* Return size in bytes that o occupies in GC heap *)
+  let size r =
+    let (_, w) = traverse (ISet.empty, 0) r in
+    w * (Sys.word_size / 8)
+end
+
+let value_size = HeapSize.size
 
 (*****************************************************************************)
 (* Module returning the MD5 of the key. It's because the code in C land
@@ -100,7 +314,7 @@ end) : Key with type userkey = UserKeyType.t = struct
 
   let to_old x = old_prefix^x
 
-  let to_new x = 
+  let to_new x =
     let module S = String in
     S.sub x (S.length old_prefix) (S.length x - S.length old_prefix)
 
@@ -118,31 +332,53 @@ end
 module Serial: functor(Value:Value.Type) -> sig
   type t
 
+  (* Serialize a value and log stats *)
   val make : Value.t -> t
-  val get  : t -> Value.t
+
+  (* Log stats for the number of bytes given *)
+  val log_deserialize  : int -> Obj.t -> unit
 
 end = functor(Value:Value.Type) -> struct
   type t = string
 
-  let make x = Marshal.to_string x []
-  let get x  = Marshal.from_string x 0
-end
+  let make x =
+    let s = Marshal.to_string x [] in
+    if hh_log_level() > 0
+    then begin
+      let sharedheap = float (String.length s) in
+      Measure.sample (Value.description ^
+          " (bytes serialized into shared heap)") sharedheap;
+      Measure.sample
+        ("ALL bytes serialized into shared heap") sharedheap
+    end;
+    s
 
+  let log_deserialize l r =
+    let sharedheap = float l in
+    let localheap = float (value_size r) in
+    begin
+      Measure.sample (Value.description
+        ^ " (bytes deserialized from shared heap)") sharedheap;
+      Measure.sample ("ALL bytes deserialized from shared heap") sharedheap;
+      Measure.sample (Value.description
+        ^ " (bytes allocated for deserialized value)") localheap;
+      Measure.sample ("ALL bytes allocated for deserialized value") localheap
+    end
+end
 
 (*****************************************************************************)
 (* Raw interface to shared memory (cf hh_shared.c for the underlying
  * representation).
  *)
 (*****************************************************************************)
-module Raw (Key: Key) (Value: sig type t end) = struct
+module Raw (Key: Key) (SerializedValue: sig type t end) (Value:Value.Type) = struct
 
-  external hh_shared_init : unit -> unit               = "hh_shared_init"
-  external hh_add         : Key.md5 -> Value.t -> unit = "hh_add"
+  external hh_add         : Key.md5 -> SerializedValue.t -> unit = "hh_add"
   external hh_mem         : Key.md5 -> bool            = "hh_mem"
-  external hh_get         : Key.md5 -> Value.t         = "hh_get"
+  external hh_get_size    : Key.md5 -> int             = "hh_get_size"
+  external hh_get_and_deserialize: Key.md5 -> Value.t = "hh_get_and_deserialize"
   external hh_remove      : Key.md5 -> unit            = "hh_remove"
   external hh_move        : Key.md5 -> Key.md5 -> unit = "hh_move"
-      
 end
 
 (*****************************************************************************)
@@ -152,13 +388,13 @@ end
  * The "old" representation is the value that was bound to that key in the
  * last round of type-checking.
  * Despite the fact that the same storage is used under the hood, it's good
- * to seperate the two interfaces to make sure we never mix old and new
+ * to separate the two interfaces to make sure we never mix old and new
  * values.
  *)
 (*****************************************************************************)
 
 module New : functor (Key : Key) -> functor(Value: Value.Type) -> sig
-  
+
   (* Adds a binding to the table, the table is left unchanged if the
    * key was already bound.
    *)
@@ -179,7 +415,7 @@ module New : functor (Key : Key) -> functor(Value: Value.Type) -> sig
 end = functor (Key : Key) -> functor (Value : Value.Type) -> struct
 
   module Data = Serial(Value)
-  module Raw = Raw (Key) (Data)
+  module Raw = Raw (Key) (Data) (Value)
 
   let add key value = Raw.hh_add (Key.md5 key) (Data.make value)
   let mem key = Raw.hh_mem (Key.md5 key)
@@ -187,18 +423,22 @@ end = functor (Key : Key) -> functor (Value : Value.Type) -> struct
   let get key =
     let key = Key.md5 key in
     if Raw.hh_mem key
-    then Some (Data.get (Raw.hh_get key))
+    then
+      let v = Raw.hh_get_and_deserialize key in
+      if hh_log_level() > 0
+      then (Data.log_deserialize (Raw.hh_get_size key) (Obj.repr v));
+      Some v
     else None
 
-  let find_unsafe key = 
-    match get key with 
+  let find_unsafe key =
+    match get key with
     | None -> raise Not_found
     | Some x -> x
 
   let remove key =
     let key = Key.md5 key in
     if Raw.hh_mem key
-    then begin 
+    then begin
       Raw.hh_remove key;
       assert (not (Raw.hh_mem key));
     end
@@ -216,9 +456,7 @@ end
 module Old : functor (Key : Key) -> functor (Value : Value.Type) -> sig
 
   val get         : Key.old -> Value.t option
-  val find_unsafe : Key.old -> Value.t
   val remove      : Key.old -> unit
-  val mem         : Key.old -> bool
 
   (* Takes an old value and moves it back to a "new" one
    * (useful for auto-complete).
@@ -228,24 +466,23 @@ module Old : functor (Key : Key) -> functor (Value : Value.Type) -> sig
 end = functor (Key : Key) -> functor (Value: Value.Type) -> struct
 
   module Data = Serial(Value)
-  module Raw = Raw (Key) (Data)
+  module Raw = Raw (Key) (Data) (Value)
 
   let get key =
     let key = Key.md5_old key in
     if Raw.hh_mem key
-    then Some (Data.get (Raw.hh_get key))
+    then
+      let v = Raw.hh_get_and_deserialize key in
+      if hh_log_level() > 0
+      then Data.log_deserialize (Raw.hh_get_size key) (Obj.repr v);
+      Some v
     else None
 
   let mem key = Raw.hh_mem (Key.md5_old key)
 
-  let remove key = 
+  let remove key =
     if mem key
     then Raw.hh_remove (Key.md5_old key)
-
-  let find_unsafe key = 
-    match get key with 
-    | None -> raise Not_found
-    | Some x -> x
 
   let revive key =
     if mem key
@@ -259,14 +496,14 @@ end = functor (Key : Key) -> functor (Value: Value.Type) -> struct
 end
 
 (*****************************************************************************)
-(* The signature of what we are actually going to expose to the user *)
+(* The signatures of what we are actually going to expose to the user *)
 (*****************************************************************************)
 
-module type S = sig
+module type NoCache = sig
   type key
   type t
   module KeySet : Set.S with type elt = key
-  module KeyMap : MapSig with type key = key
+  module KeyMap : MyMap.S with type key = key
 
   val add              : key -> t -> unit
   val get              : key -> t option
@@ -281,6 +518,11 @@ module type S = sig
   val revive_batch     : KeySet.t -> unit
 end
 
+module type WithCache = sig
+  include NoCache
+  val write_through : key -> t -> unit
+end
+
 (*****************************************************************************)
 (* The interface that all keys need to implement *)
 (*****************************************************************************)
@@ -293,7 +535,7 @@ end
 
 (*****************************************************************************)
 (* A functor returning an implementation of the S module without caching. *)
-(*****************************************************************************)        
+(*****************************************************************************)
 
 module NoCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
 
@@ -301,7 +543,7 @@ module NoCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
   module New = New (Key) (Value)
   module Old = Old (Key) (Value)
   module KeySet = Set.Make (UserKeyType)
-  module KeyMap = MyMap (UserKeyType)
+  module KeyMap = MyMap.Make (UserKeyType)
 
   type key = UserKeyType.t
   type t = Value.t
@@ -342,15 +584,10 @@ module NoCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
   let revive_batch xs =
     KeySet.iter begin fun str_key ->
       let old_key = Key.make_old Value.prefix str_key in
-      if Old.mem old_key
-      then
-        Old.revive old_key
-      else
-        let key = Key.make Value.prefix str_key in
-        New.remove key
+      Old.revive old_key
     end xs
 
-  let get_batch xs = 
+  let get_batch xs =
     KeySet.fold begin fun str_key acc ->
       let key = Key.make Value.prefix str_key in
       match New.get key with
@@ -375,7 +612,7 @@ end
 module type ConfigType = sig
 
 (* The type of object we want to keep in cache *)
-  type value         
+  type value
 
 (* The capacity of the cache *)
   val capacity : int
@@ -386,23 +623,23 @@ end
 (* All the caches are functors returning a module of the following signature
  *)
 (*****************************************************************************)
-      
-module type CacheType = sig
-  type value
-  module Key : Key
 
-  val add: Key.t -> value -> unit
-  val get: Key.t -> value option
-  val find: Key.t -> value
-  val remove: Key.t -> unit
+module type CacheType = sig
+  type key
+  type value
+
+  val add: key -> value -> unit
+  val get: key -> value option
+  val remove: key -> unit
   val clear: unit -> unit
 end
 
 (*****************************************************************************)
 (* Cache keeping the objects the most frequently used. *)
 (*****************************************************************************)
-      
-module FreqCache (Key : Key) (Config:ConfigType) = struct
+
+module FreqCache (Key : Key) (Config:ConfigType) :
+  CacheType with type key := Key.t and type value := Config.value = struct
 
   type value = Config.value
 
@@ -411,10 +648,10 @@ module FreqCache (Key : Key) (Config:ConfigType) = struct
       = Hashtbl.create (2 * Config.capacity)
   let size = ref 0
 
-  let clear() = 
+  let clear() =
     Hashtbl.clear cache;
     size := 0
- 
+
 (* The collection function is called when we reach twice original capacity
  * in size. When the collection is triggered, we only keep the most recent
  * object.
@@ -443,7 +680,7 @@ module FreqCache (Key : Key) (Config:ConfigType) = struct
 
   let add x y =
     collect();
-    try 
+    try
       let freq, y' = Hashtbl.find cache x in
       incr freq;
       if y' == y
@@ -473,11 +710,9 @@ end
 (* An ordered cache keeps the most recently used objects *)
 (*****************************************************************************)
 
-module OrderedCache (Key : Key) (Config:ConfigType) = struct
-  
-  type value = Config.value
+module OrderedCache (Key : Key) (Config:ConfigType):
+  CacheType with type key := Key.t and type value := Config.value = struct
 
-  let iorder = ref 0
   let (cache: (Key.t, Config.value) Hashtbl.t) =
     Hashtbl.create Config.capacity
 
@@ -489,7 +724,7 @@ module OrderedCache (Key : Key) (Config:ConfigType) = struct
     size := 0;
     Queue.clear queue;
     ()
-      
+
   let add x y =
     if !size < Config.capacity
     then begin
@@ -508,7 +743,7 @@ module OrderedCache (Key : Key) (Config:ConfigType) = struct
   let get x = try Some (find x) with Not_found -> None
 
   let remove x =
-    try 
+    try
       if Hashtbl.mem cache x
       then decr size;
       Hashtbl.remove cache x;
@@ -524,19 +759,12 @@ end
 
 let invalidate_callback_list = ref []
 let invalidate_caches () =
-  List.iter begin fun callback -> callback() end !invalidate_callback_list
+  List.iter !invalidate_callback_list begin fun callback -> callback() end
 
-(*****************************************************************************)
-(* A functor returning an implementation of the S module with caching.
- * We need to avoid constantly deserializing types, because it costs us too
- * much time. The caches keep a deserialized version of the types.
- *)
-(*****************************************************************************)        
-
-module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
+module LocalCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
 
   type key = UserKeyType.t
-  type t = Value.t
+  type value = Value.t
 
   module ConfValue = struct
     type value = Value.t
@@ -550,44 +778,94 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
   (* Frequent values cache *)
   module L2 = FreqCache (Key) (ConfValue)
 
+  let addWithKey x y =
+    L1.add x y;
+    L2.add x y
+
+  let getWithKey x =
+    match L1.get x with
+    | None ->
+      (match L2.get x with
+       | None -> None
+       | Some v as result ->
+         L1.add x v;
+         result
+      )
+    | Some v as result ->
+      L2.add x v;
+      result
+
+  let removeWithKey x =
+    L1.remove x;
+    L2.remove x
+
+  let add x y =
+    let x = Key.make Value.prefix x in
+    addWithKey x y
+
+  let get x =
+    let x = Key.make Value.prefix x in
+    getWithKey x
+
+  let remove x =
+    let x = Key.make Value.prefix x in
+    removeWithKey x
+
+  let clear () =
+    L1.clear();
+    L2.clear()
+
+  let () =
+    invalidate_callback_list := begin fun () ->
+      L1.clear();
+      L2.clear()
+    end :: !invalidate_callback_list
+
+end
+
+(*****************************************************************************)
+(* A functor returning an implementation of the S module with caching.
+ * We need to avoid constantly deserializing types, because it costs us too
+ * much time. The caches keep a deserialized version of the types.
+ *)
+(*****************************************************************************)
+module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
+
+  type key = UserKeyType.t
+  type t = Value.t
+
+  module Cache = LocalCache (UserKeyType) (Value)
+  module Key = Cache.Key
   module New = New (Key) (Value)
   module Old = Old (Key) (Value)
   module KeySet = Set.Make (UserKeyType)
-  module KeyMap = MyMap (UserKeyType)
+  module KeyMap = MyMap.Make (UserKeyType)
 
   module Direct = NoCache (UserKeyType) (Value)
 
-  let add x y = 
+  let add x y =
     let x = Key.make Value.prefix x in
-    L1.add x y;
-    L2.add x y;
+    Cache.addWithKey x y;
     New.add x y
 
-  let force_get = function
-    | Some x -> x
-    | None -> raise Not_found
-        
-  let get x = 
+  let write_through x y =
+    (* Note that we do not need to do any cache invalidation here because
+     * New.add is a no-op if the key already exists. *)
     let x = Key.make Value.prefix x in
-    match L1.get x with
+    New.add x y
+
+  let get x =
+    let x = Key.make Value.prefix x in
+    match Cache.getWithKey x with
     | None ->
-        (match L2.get x with
-        | None ->
-            (match New.get x with
-            | None ->
-                None
-            | Some v as result ->
-                L1.add x v;
-                L2.add x v;
-                result
-            )
-        | Some v as result ->
-            L1.add x v;
-            result
-        )
+      (match New.get x with
+       | None -> None
+       | Some v as result ->
+         Cache.addWithKey x v;
+         result
+      )
     | Some v as result ->
-        L2.add x v;
-        result
+      result
 
   (* We don't cache old objects, they are not accessed often enough. *)
   let get_old = Direct.get_old
@@ -598,15 +876,14 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
     | None -> raise Not_found
     | Some x -> x
 
-  let mem x = 
+  let mem x =
     match get x with
     | None -> false
     | Some _ -> true
-    
-  let remove x = 
+
+  let remove x =
     let x = Key.make Value.prefix x in
-    L1.remove x;
-    L2.remove x;
+    Cache.removeWithKey x;
     New.remove x
 
   let get_batch keys =
@@ -618,24 +895,21 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
     Direct.oldify_batch keys;
     KeySet.iter begin fun key ->
       let key = Key.make Value.prefix key in
-      L1.remove key;
-      L2.remove key;
+      Cache.removeWithKey key
     end keys
 
   let revive_batch keys =
     Direct.revive_batch keys;
     KeySet.iter begin fun x ->
       let x = Key.make Value.prefix x in
-      L1.remove x;
-      L2.remove x;
+      Cache.removeWithKey x
     end keys
 
   let remove_batch xs = KeySet.iter remove xs
 
   let () =
     invalidate_callback_list := begin fun () ->
-      L1.clear();
-      L2.clear();
+      Cache.clear()
     end :: !invalidate_callback_list
 
   let remove_old x = Old.remove (Key.make_old Value.prefix x)

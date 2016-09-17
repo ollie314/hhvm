@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,12 +29,12 @@
 #include "hphp/util/either.h"
 #include "hphp/util/smalllocks.h"
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/apc-handle.h"
+#include "hphp/runtime/base/apc-stats.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/type-conversions.h"
-#include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/apc-stats.h"
+#include "hphp/runtime/ext/apc/snapshot-loader.h"
 #include "hphp/runtime/server/server-stats.h"
 
 namespace HPHP {
@@ -45,14 +45,38 @@ namespace HPHP {
  * This is the in-APC representation of a value, in ConcurrentTableSharedStore.
  */
 struct StoreValue {
+  /*
+   * Index into cache layer. Valid indices are >= 0 and never invalidated.
+   */
+  using HotCacheIdx = int32_t;
+
   StoreValue() = default;
   StoreValue(const StoreValue& o)
     : data{o.data}
     , expire{o.expire}
     , dataSize{o.dataSize}
+    , kind(o.kind)
+    , readOnly(o.readOnly)
+    , c_time{o.c_time}
+    , mtime{o.mtime}
     // Copy everything except the lock
-  {}
+  {
+    hotIndex.store(o.hotIndex.load(std::memory_order_relaxed),
+                   std::memory_order_relaxed);
+  }
 
+  void setHandle(APCHandle* v) {
+    data = v;
+    kind = v->kind();
+  }
+  APCKind getKind() const {
+    assert(data.left());
+    assert(data.left()->kind() == kind);
+    return kind;
+  }
+  Variant toLocal() const {
+    return data.left()->toLocal(getKind());
+  }
   void set(APCHandle* v, int64_t ttl);
   bool expired() const;
 
@@ -66,21 +90,34 @@ struct StoreValue {
     return dataSize < 0;
   }
 
+  /* Special invalid indices; used to classify cache lookup misses. */
+  static constexpr HotCacheIdx kHotCacheUnknown = -1;
+  static constexpr HotCacheIdx kHotCacheKnownIneligible = -2;
+
   // Mutable fields here are so that we can deserialize the object from disk
-  // while holding a const pointer to the StoreValue.
+  // while holding a const pointer to the StoreValue, or remember a cache entry.
 
   /*
    * Each entry in APC is either an APCHandle or a pointer to serialized prime
-   * data.  All primed keys have an expiration time of zero, but make use of a
+   * data.  All primed values have an expiration time of zero, but make use of a
    * lock during their initial file-data-to-APCHandle conversion, so these two
-   * fields are unioned.
+   * fields are unioned.  Note that 'expire' may not be safe to read even if
+   * data.left() is valid, due to non-atomicity of updates; use 'expired()'.
    *
-   * Note: expiration times are stored in 32-bits as seconds since the Epoch.
+   * Note: expiration, creation, and modification times are stored unsigned
+   * in 32-bits as seconds since the Epoch to save cache-line space.
    * HHVM might get confused after 2106 :)
    */
   mutable Either<APCHandle*,char*,either_policy::high_bit> data;
   union { uint32_t expire; mutable SmallLock lock; };
   int32_t dataSize{0};  // For file storage, negative means serialized object
+  // Reference to any HotCache entry to be cleared if the value is treadmilled.
+  mutable std::atomic<HotCacheIdx> hotIndex{kHotCacheUnknown};
+  APCKind kind;  // Only valid if data is an APCHandle*.
+  bool readOnly{false}; // Set for primed entries that will never change.
+  char padding[10];  // Make APCMap nodes cache-line sized (it static_asserts).
+  uint32_t c_time{0}; // Creation time; 0 for primed values
+  uint32_t mtime{0}; // Modification time
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -100,18 +137,31 @@ struct EntryInfo {
     APCArray,
     APCObject,
     SerializedObject,
+    UncountedVec,
+    UncountedDict,
+    UncountedKeyset,
+    SerializedVec,
+    SerializedDict,
+    SerializedKeyset,
+    APCVec,
+    APCDict,
+    APCKeyset,
   };
 
   EntryInfo(const char* apckey,
             bool inMem,
             int32_t size,
             int64_t ttl,
-            Type type)
+            Type type,
+            int64_t c_time,
+            int64_t mtime)
     : key(apckey)
     , inMem(inMem)
     , size(size)
     , ttl(ttl)
     , type(type)
+    , c_time(c_time)
+    , mtime(mtime)
   {}
 
   static Type getAPCType(const APCHandle* handle);
@@ -121,6 +171,8 @@ struct EntryInfo {
   int32_t size;
   int64_t ttl;
   Type type;
+  int64_t c_time;
+  int64_t mtime;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -136,16 +188,13 @@ struct EntryInfo {
  */
 struct ConcurrentTableSharedStore {
   struct KeyValuePair {
-    KeyValuePair() : value(nullptr), sAddr(nullptr) {}
+    KeyValuePair() : value(nullptr), sAddr(nullptr), readOnly(false) {}
     const char* key;
-    int len;
     APCHandle* value;
     char* sAddr;
     int32_t sSize;
-
-    bool inMem() const {
-      return value != nullptr;
-    }
+    bool readOnly;
+    bool inMem() const { return value != nullptr; }
   };
 
   ConcurrentTableSharedStore() = default;
@@ -213,7 +262,7 @@ struct ConcurrentTableSharedStore {
    * Returns: false if the key was not in the table, true if the key was in the
    * table **even if it was expired**.
    */
-  bool erase(const String& key);
+  bool eraseKey(const String& key);
 
   /*
    * Clear the entire APC table.
@@ -221,12 +270,16 @@ struct ConcurrentTableSharedStore {
   bool clear();
 
   /*
-   * The API for priming APC.  Not yet documented.
+   * The API for priming APC.  Poorly documented.
    */
-  void prime(const std::vector<KeyValuePair>& vars);
+  void prime(std::vector<KeyValuePair>&& vars);
   bool constructPrime(const String& v, KeyValuePair& item, bool serialized);
   bool constructPrime(const Variant& v, KeyValuePair& item);
   void primeDone();
+  // Returns false on failure (in particular, for the old file format).
+  bool primeFromSnapshot(const char* filename);
+  // Evict any file-backed APC values from OS page cache.
+  void adviseOut();
 
   /*
    * Debugging.  Dump information about the table to an output stream.
@@ -244,7 +297,13 @@ struct ConcurrentTableSharedStore {
   /*
    * Dump random key and entry size to output stream
    */
-  void dumpRandomKeys(std::ostream &out, uint32_t count);
+  void dumpRandomKeys(std::ostream& out, uint32_t count);
+
+  /*
+   * Return 'count' randomly chosen entries, possibly with duplicates. If the
+   * store is empty or this operation is not supported, returns an empty vector.
+   */
+  std::vector<EntryInfo> sampleEntriesInfo(uint32_t count);
 
   /*
    * Debugging.  Access information about all the entries in this table.
@@ -292,14 +351,18 @@ private:
 
 private:
   template<typename Key, typename T, typename HashCompare>
-  class APCMap : public tbb::concurrent_hash_map<Key,T,HashCompare> {
-  public:
-    void getRandomAPCEntry(std::ostream &out);
+  struct APCMap : tbb::concurrent_hash_map<Key,T,HashCompare> {
+    // Append a random entry to 'entries'. The map must be non-empty and not
+    // concurrently accessed. Returns false if this operation is not supported.
+    bool getRandomAPCEntry(std::vector<EntryInfo>& entries);
+
+    using node = typename tbb::concurrent_hash_map<Key,T,HashCompare>::node;
+    static_assert(sizeof(node) == 64, "Node should be cache-line sized");
   };
 
   using Map = APCMap<const char*,StoreValue,CharHashCompare>;
-  using ExpirationPair = std::pair<const char*,time_t>;
-  using ExpMap = tbb::concurrent_hash_map<const char*,int,CharHashCompare>;
+  using ExpirationPair = std::pair<intptr_t,time_t>;
+  using ExpMap = tbb::concurrent_hash_map<intptr_t,int>;
 
   struct ExpirationCompare {
     bool operator()(const ExpirationPair& p1, const ExpirationPair& p2) const {
@@ -308,22 +371,55 @@ private:
   };
 
 private:
-  bool eraseImpl(const String&, bool, int64_t);
+  bool eraseImpl(const char*, bool, int64_t, ExpMap::accessor* expAcc);
   bool storeImpl(const String&, const Variant&, int64_t, bool, bool);
-  void eraseAcc(Map::accessor&);
   void purgeExpired();
-  void addToExpirationQueue(const char*, int64_t);
   bool handlePromoteObj(const String&, APCHandle*, const Variant&);
   APCHandle* unserialize(const String&, StoreValue*);
   void dumpKeyAndValue(std::ostream&);
+  static EntryInfo makeEntryInfo(const char*, StoreValue*, int64_t curr_time);
 
 private:
   Map m_vars;
   ReadWriteMutex m_lock;
+  /*
+   * m_expQueue is a queue of keys to be expired. We purge items from
+   * it every n (configurable) apc_stores.
+   *
+   * We can't (easily) remove items from m_expQueue, so if we add a
+   * new entry every time an item is updated we could end up with a
+   * lot of copies of the same key in the queue. To avoid that, we use
+   * m_expMap, and only add an entry to the queue if there isn't one
+   * already.
+   *
+   * In the current implementation, that means that if an element is
+   * updated before it expires, when its entry in m_expQueue is
+   * processed, it does nothing; and from then on, the item has no
+   * entry in the queue. I think this is intentional, because items
+   * that are updated frequently (or at all) are probably read
+   * frequently; so it will be expired naturally. It also means that
+   * we don't bother updating the queue every time for keys that are
+   * updated frequently.
+   *
+   * This implementation uses the apc key's address as the key into
+   * m_expMap, and as the identifier in ExpirationPair. We ensure that
+   * the m_expMap entry is removed before the apc key is freed, and
+   * guarantee that the key is valid as a char* if it exists in
+   * m_expMap. If the entry subsequently pops off m_expQueue, we check
+   * to see if its in m_expMap, and only try to purge it from apc if
+   * its found.
+   *
+   * Note that its possible that the apc key was freed and
+   * reallocated, and the entry in m_expQueue doesn't correspond to
+   * the new key; but thats fine - if the key really has expired, it
+   * will be purged, and if not, nothing will happen.
+   */
   tbb::concurrent_priority_queue<ExpirationPair,
                                  ExpirationCompare> m_expQueue;
   ExpMap m_expMap;
   std::atomic<uint64_t> m_purgeCounter{0};
+
+  std::unique_ptr<SnapshotLoader> m_snapshotLoader;
 };
 
 //////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -56,20 +56,18 @@ Disasm::Disasm(const Disasm::Options& opts)
   xed_state_init(&m_xedState, XED_MACHINE_MODE_LONG_64,
                  XED_ADDRESS_WIDTH_64b, XED_ADDRESS_WIDTH_64b);
   xed_tables_init();
+#if XED_ENCODE_ORDER_MAX_ENTRIES == 28 // Older version of XED library
   xed_register_disassembly_callback(addressToSymbol);
+#endif
 #endif // HAVE_LIBXED
 }
 
 #ifdef HAVE_LIBXED
-static void error(std::string msg) {
-  fprintf(stderr, "Error: %s\n", msg.c_str());
-  exit(1);
-}
 
 #define MAX_INSTR_ASM_LEN 128
 
 static const xed_syntax_enum_t s_xed_syntax =
-  getenv("HHVM_ATT_DISAS") ? XED_SYNTAX_ATT : XED_SYNTAX_INTEL;
+  getenv("HHVM_INTEL_DISAS") ? XED_SYNTAX_INTEL : XED_SYNTAX_ATT;
 #endif // HAVE_LIBXED
 
 void Disasm::disasm(std::ostream& out, uint8_t* codeStartAddr,
@@ -86,17 +84,30 @@ void Disasm::disasm(std::ostream& out, uint8_t* codeStartAddr,
   // Decode and print each instruction
   for (frontier = codeStartAddr, ip = (uint64_t)codeStartAddr;
        frontier < codeEndAddr; ) {
+    for (int i = 0; i < m_opts.m_indentLevel; ++i) {
+      out << ' ';
+    }
+
     xed_decoded_inst_zero_set_mode(&xedd, &m_xedState);
     xed_decoded_inst_set_input_chip(&xedd, XED_CHIP_INVALID);
     xed_error_enum_t xed_error = xed_decode(&xedd, frontier, 15);
-    if (xed_error != XED_ERROR_NONE) error("disasm error: xed_decode failed");
+    if (xed_error != XED_ERROR_NONE) {
+      out << folly::format("xed_decode failed at address {}\n", frontier);
+      return;
+    }
 
     // Get disassembled instruction in codeStr
     auto const syntax = m_opts.m_forceAttSyntax ? XED_SYNTAX_ATT
                                                 : s_xed_syntax;
     if (!xed_format_context(syntax, &xedd, codeStr,
-                            MAX_INSTR_ASM_LEN, ip, nullptr)) {
-      error("disasm error: xed_format_context failed");
+                            MAX_INSTR_ASM_LEN, ip, nullptr
+#if XED_ENCODE_ORDER_MAX_ENTRIES != 28 // Newer version of XED library
+                            , addressToSymbol
+#endif
+                           )) {
+      out << folly::format("xed_format_context failed at address {}\n",
+                           frontier);
+      return;
     }
     uint32_t instrLen = xed_decoded_inst_get_length(&xedd);
 
@@ -116,9 +127,6 @@ void Disasm::disasm(std::ostream& out, uint8_t* codeStartAddr,
       }
     }
 
-    for (int i = 0; i < m_opts.m_indentLevel; ++i) {
-      out << ' ';
-    }
     out << m_opts.m_color;
     if (m_opts.m_addresses) {
       const char* fmt = m_opts.m_relativeOffset ? "{:3x}: " : "{:#10x}: ";

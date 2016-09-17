@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -21,16 +21,10 @@ type uenv = {
    * Toption[Tunresolved[Toption]] or similar. *)
   non_null: bool;
 
-  (* unify/sub_type are careful to make sure they don't get stuck in an infinite
-   * loop expanding recursive types, but most other code isn't (and actually
-   * doesn't care about Tvar at all). Keep track of the Tvar's we've hit in
-   * those other functions so we aren't infinitely recursive.
-   * TODO implement this as part of the aforementioned "apply" function. *)
-   (* tvar_seen: ISet.t; *)
-
-  (* Silence warnings when overwriting the non_null field, since it's currently
-   * the only field, but may not always be that way. *)
-  placeholder: unit
+  (* The list of expression dependent types we have visited thus far. This is
+   * used in Typing_subtype to properly handle the 'this' type for inheritance.
+   *)
+  dep_tys: (Typing_reason.t * Typing_defs.dependent_type) list;
 }
 
-let empty = { non_null = false; placeholder = () }
+let empty = { non_null = false; dep_tys = []; }

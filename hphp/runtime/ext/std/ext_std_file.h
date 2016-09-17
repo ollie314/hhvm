@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,11 @@
 #ifndef incl_HPHP_EXT_FILE_H_
 #define incl_HPHP_EXT_FILE_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
+
+// To get the values of the SEEK constants
+#include <stdio.h>
 
 #undef basename
 
@@ -26,13 +30,43 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // constants
 
-#define k_STDIN (BuiltinFiles::GetSTDIN())
-#define k_STDOUT (BuiltinFiles::GetSTDOUT())
-#define k_STDERR (BuiltinFiles::GetSTDERR())
-extern const int64_t k_STREAM_URL_STAT_LINK;
-extern const int64_t k_STREAM_URL_STAT_QUIET;
-extern const int64_t k_SEEK_SET;
-extern const int64_t k_INI_SCANNER_NORMAL;
+#define PHP_FILE_USE_INCLUDE_PATH   1
+#define PHP_FILE_IGNORE_NEW_LINES   2
+#define PHP_FILE_SKIP_EMPTY_LINES   4
+#define PHP_FILE_APPEND             8
+#define PHP_FILE_NO_DEFAULT_CONTEXT 16
+
+#ifndef GLOB_ONLYDIR
+# define GLOB_ONLYDIR (1<<30)
+# define GLOB_EMULATE_ONLYDIR
+# define GLOB_FLAGMASK (~GLOB_ONLYDIR)
+#else
+# define GLOB_FLAGMASK (~0)
+#endif
+
+#define PHP_GLOB_FLAGS (0 | GLOB_BRACE | GLOB_MARK  \
+                          | GLOB_NOSORT | GLOB_NOCHECK \
+                          | GLOB_NOESCAPE | GLOB_ERR \
+                          | GLOB_ONLYDIR)
+#define PHP_GLOB_FLAGMASK (GLOB_FLAGMASK & PHP_GLOB_FLAGS)
+
+#ifdef _MSC_VER
+const StaticString s_DIRECTORY_SEPARATOR("\\");
+const StaticString s_PATH_SEPARATOR(";");
+#else
+const StaticString s_DIRECTORY_SEPARATOR("/");
+const StaticString s_PATH_SEPARATOR(":");
+#endif
+const int64_t k_LOCK_SH = 1;
+const int64_t k_LOCK_EX = 2;
+const int64_t k_LOCK_UN = 3;
+const int64_t k_LOCK_NB = 4;
+const int64_t k_SCANDIR_SORT_ASCENDING = 0;
+const int64_t k_SCANDIR_SORT_DESCENDING = 1;
+const int64_t k_SCANDIR_SORT_NONE = 2;
+
+constexpr int64_t k_INI_SCANNER_NORMAL = 0;
+constexpr int64_t k_INI_SCANNER_RAW = 1;
 
 ///////////////////////////////////////////////////////////////////////////////
 // file handle based file operations
@@ -52,7 +86,7 @@ Variant HHVM_FUNCTION(pclose,
 Variant HHVM_FUNCTION(fseek,
                       const Resource& handle,
                       int64_t offset,
-                      int64_t whence = k_SEEK_SET);
+                      int64_t whence = SEEK_SET);
 bool HHVM_FUNCTION(rewind,
                    const Resource& handle);
 Variant HHVM_FUNCTION(ftell,
@@ -85,7 +119,7 @@ Variant HHVM_FUNCTION(fputs,
                       const String& data,
                       int64_t length = 0);
 Variant HHVM_FUNCTION(fprintf,
-                      const Resource& handle,
+                      const Variant& handle,
                       const String& format,
                       const Array& args = null_array);
 Variant HHVM_FUNCTION(vfprintf,
@@ -105,7 +139,8 @@ Variant HHVM_FUNCTION(fputcsv,
                       const Resource& handle,
                       const Array& fields,
                       const String& delimiter = ",",
-                      const String& enclosure = "\"");
+                      const String& enclosure = "\"",
+                      const String& escape = "\\");
 Variant HHVM_FUNCTION(fgetcsv,
                       const Resource& handle,
                       int64_t length = 0,

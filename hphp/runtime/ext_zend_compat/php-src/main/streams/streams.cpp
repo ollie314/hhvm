@@ -116,16 +116,13 @@ PHPAPI php_stream *_php_stream_alloc(php_stream_ops *ops, void *abstract, const 
   }
 
   if (persistent_id) {
-    zend_rsrc_list_entry le;
-
-    le.type = le_pstream;
-    le.ptr = ret;
-    le.refcount = 0;
+    auto le = HPHP::req::make<zend_rsrc_list_entry>(ret, le_pstream).detach();
+    SCOPE_EXIT { delete le; };
+    le->refcount = 0;
 
     if (FAILURE == zend_hash_update(&EG(persistent_list), (char *)persistent_id,
           strlen(persistent_id) + 1,
-          (void *)&le, sizeof(le), NULL)) {
-
+          (void*)le, sizeof(*le), NULL)) {
       pefree(ret, 1);
       return NULL;
     }
@@ -156,7 +153,7 @@ PHPAPI php_stream_wrapper *php_stream_locate_url_wrapper(const char *path, char 
     return nullptr;
   }
   // fill this out if people need it
-  php_stream_wrapper *stream = HPHP::smart_new<php_stream_wrapper>();
+  php_stream_wrapper *stream = HPHP::req::make_raw<php_stream_wrapper>();
   return stream;
 }
 
@@ -198,7 +195,7 @@ PHPAPI php_stream *_php_stream_opendir(char *path, int options, php_stream_conte
   }
 
   // TODO this leaks
-  php_stream *stream = HPHP::smart_new<php_stream>(dir);
+  php_stream *stream = HPHP::req::make_raw<php_stream>(dir.get());
   stream->hphp_dir->incRefCount();
   return stream;
 }
@@ -223,39 +220,39 @@ PHPAPI php_stream_dirent *_php_stream_readdir(php_stream *dirstream, php_stream_
 
 PHPAPI int _php_stream_set_option(php_stream *stream, int option, int value, void *ptrparam TSRMLS_DC)
 {
-  throw HPHP::FatalErrorException("unimplemented: _php_stream_set_option");
+  HPHP::raise_fatal_error("unimplemented: _php_stream_set_option");
 }
 
 PHPAPI php_stream_context *php_stream_context_set(php_stream *stream, php_stream_context *context)
 {
-  throw HPHP::FatalErrorException("unimplemented: php_stream_context_set");
+  HPHP::raise_fatal_error("unimplemented: php_stream_context_set");
 }
 
 PHPAPI void php_stream_notification_notify(php_stream_context *context, int notifycode, int severity,
     char *xmsg, int xcode, size_t bytes_sofar, size_t bytes_max, void * ptr TSRMLS_DC)
 {
-  throw HPHP::FatalErrorException("unimplemented: php_stream_notification_notify");
+  HPHP::raise_fatal_error("unimplemented: php_stream_notification_notify");
 }
 
 PHPAPI void php_stream_context_free(php_stream_context *context)
 {
-  throw HPHP::FatalErrorException("unimplemented: php_stream_context_free");
+  HPHP::raise_fatal_error("unimplemented: php_stream_context_free");
 }
 
 PHPAPI php_stream_notifier *php_stream_notification_alloc(void)
 {
-  throw HPHP::FatalErrorException("unimplemented: php_stream_notification_alloc");
+  HPHP::raise_fatal_error("unimplemented: php_stream_notification_alloc");
 }
 
 PHPAPI void php_stream_notification_free(php_stream_notifier *notifier)
 {
-  throw HPHP::FatalErrorException("unimplemented: php_stream_notification_free");
+  HPHP::raise_fatal_error("unimplemented: php_stream_notification_free");
 }
 
 PHPAPI int php_stream_context_get_option(php_stream_context *context,
     const char *wrappername, const char *optionname, zval ***optionvalue)
 {
-  throw HPHP::FatalErrorException("unimplemented: php_stream_context_get_option");
+  HPHP::raise_fatal_error("unimplemented: php_stream_context_get_option");
 }
 
 PHPAPI size_t _php_stream_copy_to_mem(php_stream *src, char **buf, size_t maxlen, int persistent STREAMS_DC TSRMLS_DC) {
@@ -285,15 +282,17 @@ PHPAPI int _php_stream_cast(php_stream *stream, int castas, void **ret, int show
 PHPAPI php_stream *_php_stream_open_wrapper_ex(char *path, const char *mode, int options, char **opened_path, php_stream_context *context STREAMS_DC TSRMLS_DC) {
   HPHP::Stream::Wrapper* w = HPHP::Stream::getWrapperFromURI(path);
   if (!w) return nullptr;
-  HPHP::File* file = w->open(path, mode, options, context);
+  // This was using the implicit Variant(bool) ctor.
+  // TODO: fixing this properly requires D1787768.
+  auto file = w->open(path, mode, options, nullptr/*context*/);
   if (!file) {
     return nullptr;
   }
   // TODO this leaks
-  php_stream *stream = HPHP::smart_new<php_stream>(file);
+  php_stream *stream = HPHP::req::make_raw<php_stream>(file.get());
   stream->hphp_file->incRefCount();
 
-  if (auto urlFile = dynamic_cast<HPHP::UrlFile*>(file)) {
+  if (auto urlFile = dynamic_cast<HPHP::UrlFile*>(file.get())) {
     // Why is there no ZVAL_ARRAY?
     MAKE_STD_ZVAL(stream->wrapperdata);
     Z_TYPE_P(stream->wrapperdata) = IS_ARRAY;

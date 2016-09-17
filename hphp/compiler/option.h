@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,29 +17,21 @@
 #ifndef incl_HPHP_OPTION_H_
 #define incl_HPHP_OPTION_H_
 
-#include "hphp/util/hdf.h"
-
-#include <folly/dynamic.h>
-
 #include <map>
 #include <set>
 #include <vector>
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/util/functional.h"
 #include "hphp/util/string-bag.h"
-#include "hphp/util/deprecated/base.h"
-#include "hphp/util/deprecated/declare-boost-types.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-DECLARE_BOOST_TYPES(BlockScope);
-DECLARE_BOOST_TYPES(FileScope);
 
-// Can we make sure this equals IniSettingMap?
-typedef folly::dynamic IniSettingMap;
+struct Hdf;
 
-class Option {
-public:
+struct IniSettingMap;
 
+struct Option {
   /**
    * Load options from different sources.
    */
@@ -103,9 +95,10 @@ public:
   static std::string DefaultIncludeRoot;
 
   /**
-   * PHP functions that will take a function name and make a dynamic call.
+   * PHP functions that can be assumed to always return a certain constant
+   * value.
    */
-  static std::map<std::string, int> DynamicFunctionCalls;
+  static hphp_string_imap<std::string> ConstantFunctions;
 
   /**
    * Optimization flags
@@ -113,8 +106,6 @@ public:
   static bool PreOptimization;
   static bool PostOptimization;
   static bool AnalyzePerfectVirtuals;
-  static bool HardTypeHints;
-  static bool HardReturnTypeHints;
 
   /*
    * Flags that only affect HHBBC right now.  See hhbbc/hhbbc.h for
@@ -138,16 +129,10 @@ public:
   static bool ConvertQOpExpressions;  // $var = $exp ? $yes : $no => if-else
   static std::string ProgramPrologue;
   static std::string TrimmedPrologue;
-  static std::vector<std::string> DynamicFunctionPrefixes;
-  static std::vector<std::string> DynamicFunctionPostfixes;
-  static std::vector<std::string> DynamicMethodPrefixes;
-  static std::vector<std::string> DynamicMethodPostfixes;
-  static std::vector<std::string> DynamicClassPrefixes;
-  static std::vector<std::string> DynamicClassPostfixes;
   static std::set<std::string, stdltistr> DynamicInvokeFunctions;
   static std::set<std::string> VolatileClasses;
-  static std::map<std::string,std::string> AutoloadClassMap;
-  static std::map<std::string,std::string> AutoloadFuncMap;
+  static std::map<std::string,std::string, stdltistr> AutoloadClassMap;
+  static std::map<std::string,std::string, stdltistr> AutoloadFuncMap;
   static std::map<std::string,std::string> AutoloadConstMap;
   static std::string AutoloadRoot;
 
@@ -158,6 +143,8 @@ public:
   static bool GenerateBinaryHHBC;
   static std::string RepoCentralPath;
   static bool RepoDebugInfo;
+
+  static std::vector<std::string> APCProfile;
 
   /**
    * Names of hot and cold functions to be marked in sources.
@@ -197,12 +184,6 @@ public:
   static int CodeErrorMaxProgram;
 
   /**
-   * Whether or not name matches dynamic function/class prefx/postfix lists.
-   */
-  static bool IsDynamicFunction(bool method, const std::string &name);
-  static bool IsDynamicClass(const std::string &name);
-
-  /**
    * Whether or not name matches AUTOLOAD files. If not, returns empty. If
    * yes, returns root directory for the file.
    */
@@ -213,14 +194,6 @@ public:
    * "/" in file paths.
    */
   static std::string MangleFilename(const std::string &name, bool id);
-
-  enum EvalLevel {
-    NoEval = 0, // calling eval is a fatal
-    LimitedEval = 1, // eval is supported in a limited way with no perf hit
-    FullEval = 2 // eval is supported but with a performance hit
-  };
-
-  static EvalLevel EnableEval;
 
   static std::string ProgramName;
 
@@ -241,45 +214,28 @@ public:
   static int GetScannerType();
 
   /**
-   * "Dynamic" means a function or a method can be invoked dynamically.
    * "Volatile" means a class or a function can be declared dynamically.
    */
-  static bool AllDynamic;
   static bool AllVolatile;
-
-  /**
-   * Optimizations
-   */
-  static int InvokeFewArgsCount;
-  static int InlineFunctionThreshold;
-  static bool EliminateDeadCode;
-  static bool LocalCopyProp;
-  static int AutoInline;
-  static bool ArrayAccessIdempotent;
 
   /**
    * Output options
    */
   static bool GenerateDocComments;
-  static bool VariableCoalescing;
   static bool DumpAst;
   static bool WholeProgram;
   static bool UseHHBBC;  // see hhbbc/README
   static bool RecordErrors;
-  static std::string DocJson; // filename to dump doc JSON to
 
 private:
   static StringBag OptionStrings;
 
   static void LoadRootHdf(const IniSettingMap& ini, const Hdf &roots,
+                          const std::string& name,
                           std::map<std::string, std::string> &map);
   static void LoadRootHdf(const IniSettingMap& ini, const Hdf &roots,
+                          const std::string& name,
                           std::vector<std::string> &vec);
-  static void OnLoad();
-
-  static bool IsDynamic(const std::string &name,
-                        const std::vector<std::string> &prefixes,
-                        const std::vector<std::string> &postfixes);
 };
 
 //////////////////////////////////////////////////////////////////////

@@ -1,5 +1,13 @@
 <?php
-// Copyright 2004-present Facebook. All Rights Reserved.
+/**
+ * Copyright (c) 2014, Facebook, Inc.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the "hack" directory of this source tree. An additional grant
+ * of patent rights can be found in the PATENTS file in the same directory.
+ *
+ */
 
 namespace HH {
   require_once(__DIR__.SEP.'..'.SEP.'hacklib_iterator.php');
@@ -18,8 +26,11 @@ namespace HH {
       if (is_string($k)) {
         return "_".$k;
       }
-      else throw new \InvalidArgumentException(
-        'Only integer values and string values may be used with Sets');
+
+      throw new \InvalidArgumentException(\sprintf(
+        'Only integer values and string values may be used with Sets, got %s',
+        is_object($k) ? get_class($k) : gettype($k),
+      ));
     }
 
     private static function hacklib_unmakeKey($k_actual) {
@@ -41,10 +52,12 @@ namespace HH {
         $this->container = $a;
       } elseif (is_null($it)) {
         $this->container = array();
-      } else {
-        throw new \InvalidArgumentException(
-          'Parameter must be an array or an instance of Traversable');
       }
+
+      throw new \InvalidArgumentException(\sprintf(
+        'Parameter must be an array or an instance of Traversable, got %s',
+        is_object($it) ? get_class($it) : gettype($it),
+      ));
     }
 
     /**
@@ -136,8 +149,10 @@ namespace HH {
             $a[$k_actual] = $v;
           }
         } else {
-        throw new \InvalidArgumentException(
-          'Parameters must be arrays');
+          throw new \InvalidArgumentException(\sprintf(
+            'Parameters must be arrays but got %s',
+            is_object($arg) ? get_class($arg) : gettype($arg),
+          ));
         }
       }
       $o = new self();
@@ -158,8 +173,10 @@ namespace HH {
       if (is_null($it)) {
         return new self();
       } else {
-        throw new \InvalidArgumentException(
-          'Parameter must be a container (array or collection)');
+        throw new \InvalidArgumentException(\sprintf(
+          'Parameter must be a container (array or collection) but got %s',
+          is_object($it) ? get_class($it) : gettype($it),
+        ));
       }
     }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,12 +22,14 @@
 
 #include <folly/Conv.h>
 
+#include "hphp/runtime/debugger/cmd/cmd_auth.h"
 #include "hphp/runtime/debugger/cmd/cmd_interrupt.h"
 #include "hphp/runtime/debugger/cmd/cmd_flow_control.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
 #include "hphp/runtime/debugger/cmd/cmd_machine.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_hook_handler.h"
+#include "hphp/runtime/debugger/dummy_sandbox.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/ext/sockets/ext_sockets.h"
@@ -41,11 +43,10 @@ namespace HPHP { namespace Eval {
 
 TRACE_SET_MOD(debugger);
 
-DebuggerProxy::DebuggerProxy(SmartPtr<Socket> socket, bool local)
-    : m_stopped(false), m_local(local), m_dummySandbox(nullptr),
-      m_hasBreakPoints(false), m_threadMode(Normal), m_thread(0),
+DebuggerProxy::DebuggerProxy(req::ptr<Socket> socket, bool local)
+    : m_local(local),
       m_signalThread(this, &DebuggerProxy::pollSignal),
-      m_okayToPoll(true), m_signum(CmdSignal::SignalNone) {
+      m_signum(CmdSignal::SignalNone) {
   TRACE(2, "DebuggerProxy::DebuggerProxy\n");
   m_thrift.create(socket);
   m_dummyInfo = DSandboxInfo::CreateDummyInfo((int64_t)this);
@@ -150,8 +151,7 @@ std::string DebuggerProxy::getSandboxId() {
 void DebuggerProxy::getThreads(std::vector<DThreadInfoPtr> &threads) {
   TRACE(2, "DebuggerProxy::getThreads\n");
   Lock lock(this);
-  std::stack<void *> &interrupts =
-    ThreadInfo::s_threadInfo->m_reqInjectionData.interrupts;
+  auto& interrupts = RID().interrupts;
   assert(!interrupts.empty());
   if (!interrupts.empty()) {
     CmdInterrupt *tint = (CmdInterrupt*)interrupts.top();
@@ -248,10 +248,11 @@ void DebuggerProxy::notifyDummySandbox() {
 }
 
 void DebuggerProxy::setBreakPoints(
-    std::vector<BreakPointInfoPtr> &breakpoints) {
+  std::vector<BreakPointInfoPtr>& breakpoints
+) {
   TRACE(2, "DebuggerProxy::setBreakPoints\n");
-  // Hold the break mutex while we update the proxy's state. There's no need
-  // to hold it over the longer operation to set breakpoints in each file later.
+  // Hold the break mutex while we update the proxy's state. There's no need to
+  // hold it over the longer operation to set breakpoints in each file later.
   {
     WriteLock lock(m_breakMutex);
     // breakpoints holds a list of fresh new BreakPointInfo objects that
@@ -324,7 +325,7 @@ void DebuggerProxy::interrupt(CmdInterrupt &cmd) {
   // command, stop if we're at a breakpoint, handle other interrupts, etc.
   if (checkFlowBreak(cmd)) {
     // We've hit a breakpoint and now need to make sure that breakpoints
-    // wont be hit again for this site until control leaves this site.
+    // won't be hit again for this site until control leaves this site.
     // (Breakpoints can still get hit if control reaches this site during
     // a call that is part of this site because the flags are stacked.)
     unsetBreakableForBreakpointsMatching(cmd);
@@ -803,6 +804,36 @@ Variant DebuggerProxy::ExecutePHP(const std::string &php, String &output,
   return ret;
 }
 
+std::string DebuggerProxy::requestAuthToken() {
+  TRACE_RB(2, "DebuggerProxy::requestauthToken: sending auth request\n");
+  CmdAuth cmd;
+  if (!cmd.onServer(*this)) {
+    TRACE_RB(2, "DebuggerProxy::requestAuthToken: "
+             "Failed to send CmdAuth to client\n");
+    return "";
+  }
+
+  DebuggerCommandPtr res;
+  while (!DebuggerCommand::Receive(m_thrift, res,
+                                   "DebuggerProxy::requestAuthToken()")) {
+    checkStop();
+  }
+  if (!res) {
+    TRACE_RB(2, "DebuggerProxy::requestAuthToken: "
+             "Failed to get CmdAuth back from client\n");
+    return "";
+  }
+
+  auto token = std::dynamic_pointer_cast<CmdAuth>(res);
+  if (!token) {
+    TRACE_RB(2, "DebuggerProxy::requestAuthToken: "
+             "bad response from token request: %d", res->getType());
+    return "";
+  }
+
+  return token->getToken();
+}
+
 int DebuggerProxy::getRealStackDepth() {
   TRACE(2, "DebuggerProxy::getRealStackDepth\n");
   int depth = 0;
@@ -811,7 +842,7 @@ int DebuggerProxy::getRealStackDepth() {
   if (!fp) return 0;
 
   while (fp != nullptr) {
-    fp = context->getPrevVMStateUNSAFE(fp, nullptr, nullptr);
+    fp = context->getPrevVMState(fp, nullptr, nullptr);
     depth++;
   }
   return depth;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,7 +27,9 @@
 #include "hphp/util/asm-x64.h"
 
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/code-cache.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/tc-internal.h"
 
 using namespace HPHP::jit;
 
@@ -95,16 +97,12 @@ void ElfWriter::initStrtab() {
   addSectionString("");
 }
 
-#if defined(LIBDWARF_USE_INIT_C) || defined(FACEBOOK)
+#if defined(LIBDWARF_USE_INIT_C)
 bool ElfWriter::initDwarfProducer() {
   Dwarf_Error error = 0;
   /* m_dwarfProducer is the handle used for interaction for libdwarf */
   m_dwarfProducer =
-#ifdef FACEBOOK
-    dwarf_producer_init_b(
-#else
     dwarf_producer_init_c(
-#endif
     DW_DLC_WRITE | DW_DLC_SIZE_64 | DW_DLC_SYMBOLIC_RELOCATIONS,
     g_dwarfCallback,
     nullptr,
@@ -560,7 +558,7 @@ int ElfWriter::writeStringSection() {
 
 int ElfWriter::writeTextSection() {
   int section = -1;
-  auto& code = mcg->code;
+  auto const& code = tc::code();
   if ((section = newSection(
          ".text.tracelets", code.codeSize(),
          SHT_NOBITS, SHF_ALLOC | SHF_EXECINSTR,

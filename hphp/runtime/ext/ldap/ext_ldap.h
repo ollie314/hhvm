@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_LDAP_H_
 #define incl_HPHP_EXT_LDAP_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -53,6 +53,10 @@ bool HHVM_FUNCTION(ldap_modify,
                    const Resource& link,
                    const String& dn,
                    const Array& entry);
+bool HHVM_FUNCTION(ldap_modify_batch,
+                   const Resource& link,
+                   const String& dn,
+                   const Array& modifs);
 bool HHVM_FUNCTION(ldap_bind,
                    const Resource& link,
                    const Variant& bind_rdn = null_variant,
@@ -119,14 +123,14 @@ Variant HHVM_FUNCTION(ldap_compare,
                       const String& dn,
                       const String& attribute,
                       const String& value);
-int64_t HHVM_FUNCTION(ldap_errno,
+Variant HHVM_FUNCTION(ldap_errno,
                       const Resource& link);
-String HHVM_FUNCTION(ldap_error,
+Variant HHVM_FUNCTION(ldap_error,
                      const Resource& link);
 Variant HHVM_FUNCTION(ldap_get_dn,
                       const Resource& link,
                       const Resource& result_entry);
-int64_t HHVM_FUNCTION(ldap_count_entries,
+Variant HHVM_FUNCTION(ldap_count_entries,
                       const Resource& link,
                       const Resource& result);
 Variant HHVM_FUNCTION(ldap_get_entries,
@@ -138,7 +142,7 @@ Variant HHVM_FUNCTION(ldap_first_entry,
 Variant HHVM_FUNCTION(ldap_next_entry,
                       const Resource& link,
                       const Resource& result_entry);
-Array HHVM_FUNCTION(ldap_get_attributes,
+Variant HHVM_FUNCTION(ldap_get_attributes,
                     const Resource& link,
                     const Resource& result_entry);
 Variant HHVM_FUNCTION(ldap_first_attribute,
@@ -184,6 +188,10 @@ bool HHVM_FUNCTION(ldap_control_paged_result_response,
                    const Resource& result,
                    VRefParam cookie = uninit_null(),
                    VRefParam estimated = uninit_null());
+String HHVM_FUNCTION(ldap_escape,
+                     const String& value,
+                     const String& ignores = empty_string(),
+                     int flags = 0);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

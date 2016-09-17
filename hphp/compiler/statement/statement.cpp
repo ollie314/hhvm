@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,21 +15,29 @@
 */
 
 #include "hphp/compiler/statement/statement.h"
-#include "hphp/compiler/analysis/ast_walker.h"
 #include "hphp/compiler/analysis/function_scope.h"
 
 using namespace HPHP;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define DEC_STMT_NAMES(x) #x
+#define DEC_STMT_NAMES(x) #x,
 const char *Statement::Names[] = {
   DECLARE_STATEMENT_TYPES(DEC_STMT_NAMES)
 };
+#undef DEC_STMT_NAMES
+
+const char* Statement::nameOfKind(Construct::KindOf kind) {
+  assert(kind > Construct::KindOfStatement);
+  assert(kind < Construct::KindOfExpression);
+  auto const idx = static_cast<int32_t>(kind) -
+    static_cast<int32_t>(Construct::KindOfStatement);
+  assert(idx > 0);
+  return Names[idx];
+}
 
 Statement::Statement(STATEMENT_CONSTRUCTOR_BASE_PARAMETERS)
-  : Construct(scope, loc),
-    m_kindOf(kindOf),
+  : Construct(scope, r, kindOf),
     m_labelScope(labelScope) {
   assert(m_labelScope != nullptr);
 }
@@ -46,7 +54,7 @@ void Statement::insertElement(StatementPtr stmt, int index /* = 0 */) {
 }
 
 bool Statement::hasReachableLabel() const {
-  if (FunctionWalker::SkipRecurse(this)) return false;
+  if (skipRecurse()) return false;
   switch (getKindOf()) {
     case KindOfForStatement:
     case KindOfForEachStatement:

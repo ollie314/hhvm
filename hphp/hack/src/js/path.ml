@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,4 +8,7 @@
  *
  *)
 
-let string_of_path x = x
+type t = string
+let dummy_path = ""
+let make x = x
+let to_string x = x

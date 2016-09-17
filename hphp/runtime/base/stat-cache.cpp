@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,12 +17,12 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <sys/param.h>
 #include <vector>
 
 #include <folly/MapUtil.h>
+#include <folly/portability/Unistd.h>
 
 #include "hphp/util/trace.h"
 #include "hphp/util/logger.h"
@@ -47,8 +47,10 @@ UNUSED static std::string statToString(const struct stat* buf) {
   os <<   "gid="                << buf->st_gid                 << ", ";
   os <<   "rdev="               << buf->st_rdev                << ", ";
   os <<   "size="               << buf->st_size                << ", ";
+#ifndef _MSC_VER
   os <<   "blksize="            << buf->st_blksize             << ", ";
   os <<   "blocks="             << buf->st_blocks              << ", ";
+#endif
   os <<   "atime="              << buf->st_atime               << ", ";
   os <<   "mtime="              << buf->st_mtime               << ", ";
   os <<   "ctime="              << buf->st_ctime;
@@ -65,8 +67,10 @@ UNUSED static bool statEquiv(const struct stat* stA, const struct stat* stB) {
           && stA->st_gid == stB->st_gid
           && stA->st_rdev == stB->st_rdev
           && stA->st_size == stB->st_size
+#ifndef _MSC_VER
           && stA->st_blksize == stB->st_blksize
           && stA->st_blocks == stB->st_blocks
+#endif
           /* Intentionally omitted:
           && stA->st_atime == stB->st_atime
           */
@@ -512,7 +516,7 @@ StatCache::NodePtr StatCache::getNode(const std::string& path, bool follow) {
 bool StatCache::mergePath(const std::string& path, bool follow) {
   String canonicalPath = FileUtil::canonicalize(path);
   std::vector<std::string> pvec;
-  split('/', canonicalPath.data(), pvec);
+  folly::split('/', canonicalPath.slice(), pvec);
   assert((pvec[0].size() == 0)); // path should be absolute.
   // Lazily initialize so that if StatCache never gets used, no kernel
   // resources are consumed.

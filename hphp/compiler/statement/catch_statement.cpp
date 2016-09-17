@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -35,10 +35,9 @@ CatchStatement::CatchStatement
  const std::string &className, const std::string &variable,
  StatementPtr stmt)
   : Statement(STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(CatchStatement)),
-    StaticClassName(ExpressionPtr(
-                      new ScalarExpression(scope, loc,
-                                           T_STRING, className, false))),
-    m_variable(new SimpleVariable(scope, loc, variable)),
+    StaticClassName(std::make_shared<ScalarExpression>(
+                      scope, r, T_STRING, className, false)),
+    m_variable(std::make_shared<SimpleVariable>(scope, r, variable)),
     m_stmt(stmt), m_valid(true) {
   m_variable->setContext(Expression::LValue);
 }
@@ -48,10 +47,9 @@ CatchStatement::CatchStatement
  const std::string &className, const std::string &variable,
  StatementPtr stmt, StatementPtr finallyStmt)
   : Statement(STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(CatchStatement)),
-    StaticClassName(ExpressionPtr(
-                      new ScalarExpression(scope, loc,
-                                           T_STRING, className, false))),
-    m_variable(new SimpleVariable(scope, loc, variable)),
+    StaticClassName(std::make_shared<ScalarExpression>(
+                      scope, r, T_STRING, className, false)),
+    m_variable(std::make_shared<SimpleVariable>(scope, r, variable)),
     m_stmt(stmt), m_finallyStmt(finallyStmt), m_valid(true) {
   m_variable->setContext(Expression::LValue);
 }
@@ -65,22 +63,14 @@ StatementPtr CatchStatement::clone() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// parser functions
-
-///////////////////////////////////////////////////////////////////////////////
 // static analysis functions
 
 void CatchStatement::analyzeProgram(AnalysisResultPtr ar) {
-  addUserClass(ar, m_className);
   m_variable->analyzeProgram(ar);
   (void)resolveClass();
   if (m_stmt) m_stmt->analyzeProgram(ar);
   if (m_variable->isThis()) {
-    // catch (Exception $this) { ... }
-    // See note in alias_manager.cpp about why this forces a variable table
-    VariableTablePtr variables(getScope()->getVariables());
-    variables->forceVariants(ar, VariableTable::AnyVars);
-    variables->setAttribute(VariableTable::ContainsLDynamicVariable);
+    getFunctionScope()->setContainsBareThis(true, true);
   }
 }
 
@@ -117,21 +107,6 @@ void CatchStatement::setNthKid(int n, ConstructPtr cp) {
       assert(false);
       break;
   }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void CatchStatement::outputCodeModel(CodeGenerator &cg) {
-  cg.printObjectHeader("CatchStatement", 4);
-  cg.printPropertyHeader("class");
-  cg.printTypeExpression(m_origClassName);
-  cg.printPropertyHeader("variableName");
-  cg.printValue(m_variable->getName());
-  cg.printPropertyHeader("block");
-  cg.printAsEnclosedBlock(m_stmt);
-  cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
-  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

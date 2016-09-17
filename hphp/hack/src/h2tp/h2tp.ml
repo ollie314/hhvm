@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -53,7 +53,7 @@ let parse_options () =
 let _ =
   let (src, dest, options) = parse_options () in
   try
-    SharedMem.init ();
+    let _handle = SharedMem.init GlobalConfig.default_sharedmem_config in
     Opts.set options;
     Engine.go (Sys.chop_dirsymbol src) (Sys.chop_dirsymbol dest);
     print_string "The Conversion was successful\n"

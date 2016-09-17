@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,8 @@
 #include "hphp/util/maphuge.h"
 #include "hphp/util/kernel-version.h"
 
-#include <unistd.h>
-#include <sys/mman.h>
+#include <folly/portability/SysMman.h>
+#include <folly/portability/Unistd.h>
 
 namespace HPHP {
 

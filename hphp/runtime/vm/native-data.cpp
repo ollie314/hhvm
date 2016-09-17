@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,14 +15,33 @@
 */
 
 #include "hphp/runtime/vm/native-data.h"
-#include "hphp/runtime/base/complex-types.h"
+
+#include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/base/memory-manager-defs.h"
 #include "hphp/runtime/base/memory-manager.h"
+#include "hphp/runtime/base/type-variant.h"
+#include "hphp/runtime/vm/class.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
+#include "hphp/runtime/ext/asio/ext_async-generator.h"
 
 namespace HPHP { namespace Native {
 //////////////////////////////////////////////////////////////////////////////
 
 typedef std::unordered_map<const StringData*,NativeDataInfo> NativeDataInfoMap;
 static NativeDataInfoMap s_nativedatainfo;
+
+size_t ndsize(const ObjectData* obj, const NativeDataInfo* ndi) {
+  auto cls = obj->getVMClass();
+  if (cls == Generator::getClass()) {
+    return Native::data<Generator>(obj)->resumable()->size() -
+           sizeof(ObjectData);
+  }
+  if (cls == AsyncGenerator::getClass()) {
+    return Native::data<AsyncGenerator>(obj)->resumable()->size() -
+           sizeof(ObjectData);
+  }
+  return ndsize(ndi->sz);
+}
 
 void registerNativeDataInfo(const StringData* name,
                             size_t sz,
@@ -31,10 +50,12 @@ void registerNativeDataInfo(const StringData* name,
                             NativeDataInfo::DestroyFunc destroy,
                             NativeDataInfo::SweepFunc sweep,
                             NativeDataInfo::SleepFunc sleep,
-                            NativeDataInfo::WakeupFunc wakeup) {
+                            NativeDataInfo::WakeupFunc wakeup,
+                            NativeDataInfo::ScanFunc scan) {
   assert(s_nativedatainfo.find(name) == s_nativedatainfo.end());
   assert((sleep == nullptr && wakeup == nullptr) ||
          (sleep != nullptr && wakeup != nullptr));
+  assert(scan);
   NativeDataInfo info;
   info.sz = sz;
   info.odattrs = ObjectData::Attribute::HasNativeData;
@@ -44,6 +65,7 @@ void registerNativeDataInfo(const StringData* name,
   info.sweep = sweep;
   info.sleep = sleep;
   info.wakeup = wakeup;
+  info.scan = scan;
   s_nativedatainfo[name] = info;
 }
 
@@ -53,38 +75,6 @@ NativeDataInfo* getNativeDataInfo(const StringData* name) {
     return nullptr;
   }
   return &it->second;
-}
-
-// return the full native header size, which is also the distance from
-// the allocated pointer to the ObjectData*.
-inline size_t ndsize(const NativeDataInfo* ndi) {
-  return alignTypedValue(ndi->sz + sizeof(NativeNode));
-}
-
-inline NativeNode* getSweepNode(ObjectData *obj, const NativeDataInfo* ndi) {
-  return reinterpret_cast<NativeNode*>(
-    reinterpret_cast<char*>(obj) - ndsize(ndi)
-  );
-}
-
-DEBUG_ONLY
-static bool invalidateNativeData(ObjectData* obj, const NativeDataInfo* ndi) {
-  memset(getSweepNode(obj, ndi), kSmartFreeFill, ndsize(ndi));
-  return true;
-}
-
-void sweepNativeData(std::vector<NativeNode*>& natives) {
-  while (!natives.empty()) {
-    assert(natives.back()->sweep_index == natives.size() - 1);
-    auto node = natives.back();
-    natives.pop_back();
-    auto obj = Native::obj(node);
-    auto ndi = obj->getVMClass()->getNativeDataInfo();
-    assert(ndi->sweep);
-    assert(node->obj_offset == ndsize(ndi));
-    ndi->sweep(obj);
-    assert(invalidateNativeData(obj, ndi));
-  }
 }
 
 /* Classes with NativeData structs allocate extra memory prior
@@ -100,32 +90,25 @@ void sweepNativeData(std::vector<NativeNode*>& natives) {
  * NativeNode is a link in the NativeData sweep list for this ND block
  */
 ObjectData* nativeDataInstanceCtor(Class* cls) {
-  Attr attrs = cls->attrs();
-  if (UNLIKELY(attrs &
-               (AttrAbstract | AttrInterface | AttrTrait | AttrEnum))) {
-    ObjectData::raiseAbstractClassError(cls);
-  }
   auto ndi = cls->getNativeDataInfo();
-  size_t nativeDataSize = ndsize(ndi);
+  size_t nativeDataSize = ndsize(ndi->sz);
   size_t nProps = cls->numDeclProperties();
   size_t size = ObjectData::sizeForNProps(nProps) + nativeDataSize;
 
   auto node = reinterpret_cast<NativeNode*>(
-    MM().objMallocLogged(size)
+    MM().objMalloc(size)
   );
   node->obj_offset = nativeDataSize;
-  node->kind = HeaderKind::Native;
+  node->hdr.kind = HeaderKind::NativeData;
   auto obj = new (reinterpret_cast<char*>(node) + nativeDataSize)
              ObjectData(cls);
+  assert(obj->hasExactlyOneRef());
   obj->setAttribute(static_cast<ObjectData::Attribute>(ndi->odattrs));
   if (ndi->init) {
     ndi->init(obj);
   }
   if (ndi->sweep) {
     MM().addNativeObject(node);
-  }
-  if (UNLIKELY(cls->callsCustomInstanceInit())) {
-    obj->callCustomInstanceInit();
   }
   return obj;
 }
@@ -157,16 +140,16 @@ void nativeDataInstanceDtor(ObjectData* obj, const Class* cls) {
   if (ndi->destroy) {
     ndi->destroy(obj);
   }
-  auto node = getSweepNode(obj, ndi);
+  auto node = getNativeNode(obj, ndi);
   if (ndi->sweep) {
     MM().removeNativeObject(node);
   }
 
-  size_t size = ObjectData::sizeForNProps(nProps) + ndsize(ndi);
-  if (LIKELY(size <= kMaxSmartSize)) {
-    return MM().smartFreeSizeLogged(node, size);
+  size_t size = ObjectData::sizeForNProps(nProps) + ndsize(obj, ndi);
+  if (LIKELY(size <= kMaxSmallSize)) {
+    return MM().freeSmallSize(node, size);
   }
-  MM().smartFreeSizeBigLogged(node, size);
+  MM().freeBigSize(node, size);
 }
 
 Variant nativeDataSleep(const ObjectData* obj) {

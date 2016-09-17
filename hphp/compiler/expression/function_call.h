@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,53 +27,49 @@ DECLARE_BOOST_TYPES(ExpressionList);
 DECLARE_BOOST_TYPES(FunctionScope);
 DECLARE_BOOST_TYPES(FunctionCall);
 
-class FunctionCall : public Expression, public StaticClassName {
+struct FunctionCall : Expression, StaticClassName {
 protected:
   FunctionCall(EXPRESSION_CONSTRUCTOR_BASE_PARAMETERS, ExpressionPtr nameExp,
                const std::string &name, bool hadBackslash,
                ExpressionListPtr params, ExpressionPtr classExp);
 public:
-  void analyzeProgram(AnalysisResultPtr ar);
+  void analyzeProgram(AnalysisResultPtr ar) override;
 
-  virtual bool isRefable(bool checkError = false) const { return true;}
-  virtual bool isTemporary() const;
+  bool isRefable(bool checkError = false) const override { return true;}
 
-  virtual ConstructPtr getNthKid(int n) const;
-  virtual void setNthKid(int n, ConstructPtr cp);
-  virtual int getKidCount() const;
+  ConstructPtr getNthKid(int n) const override;
+  void setNthKid(int n, ConstructPtr cp) override;
+  int getKidCount() const override;
 
-  virtual ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
+  ExpressionPtr preOptimize(AnalysisResultConstPtr ar) override;
 
-  const std::string &getName() const { return m_name; }
-  const std::string &getOriginalName() const { return m_origName; }
-  const std::string getNonNSOriginalName() const {
+  const std::string& getName() const = delete;//{ return m_name; }
+  const std::string& getOriginalName() const { return m_origName; }
+  std::string getNonNSOriginalName() const {
     auto nsPos = m_origName.rfind('\\');
-    if (nsPos == string::npos) {
+    if (nsPos == std::string::npos) {
       return m_origName;
     }
     return m_origName.substr(nsPos + 1);
   }
   ExpressionPtr getNameExp() const { return m_nameExp; }
   const ExpressionListPtr& getParams() const { return m_params; }
-  void setNoInline() { m_noInline = true; }
   void deepCopy(FunctionCallPtr exp);
 
   FunctionScopeRawPtr getFuncScope() const { return m_funcScope; }
-  bool canInvokeFewArgs();
   void setArrayParams() { m_arrayParams = true; }
   bool isValid() const { return m_valid; }
   bool hadBackslash() const { return m_hadBackslash; }
   bool hasUnpack() const;
-
+  void onParse(AnalysisResultConstPtr ar, FileScopePtr fileScope) override;
+  bool checkUnpackParams();
+  bool isNamed(folly::StringPiece name) const;
 private:
   void checkParamTypeCodeErrors(AnalysisResultPtr);
 
 protected:
   ExpressionPtr m_nameExp;
-  std::string m_name;
   std::string m_origName;
-  int m_ciTemp;
-  int m_clsNameTemp;
   ExpressionListPtr m_params;
 
   // Pointers to the corresponding function scope and class scope for this
@@ -83,36 +79,18 @@ protected:
   ClassScopeRawPtr m_classScope;
 
   bool m_valid;
-  int m_extraArg;
   unsigned m_variableArgument : 1;
-  unsigned m_voidReturn : 1;  // no return type
-  unsigned m_voidUsed : 1; // void return is used
   unsigned m_redeclared : 1;
-  unsigned m_noStatic : 1;
-  unsigned m_noInline : 1;
-  unsigned m_invokeFewArgsDecision : 1;
   unsigned m_arrayParams : 1;
   bool m_hadBackslash;
 
-  // Extra arguments form an array, to which the scalar array optimization
-  // should also apply.
-  int m_argArrayId;
-  int m_argArrayHash;
-  int m_argArrayIndex;
-  void optimizeArgArray(AnalysisResultPtr ar);
-
-  void checkUnpackParams();
-  void markRefParams(FunctionScopePtr func, const std::string &name,
-                     bool canInvokeFewArgs);
+  void markRefParams(FunctionScopePtr func, const std::string &name);
 
   /**
    * Each program needs to reset this object's members to revalidate
    * a function call.
    */
   void reset();
-
-  ExpressionPtr inliner(AnalysisResultConstPtr ar,
-                        ExpressionPtr obj, std::string localThis);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

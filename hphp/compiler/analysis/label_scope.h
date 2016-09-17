@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,23 +17,18 @@
 #ifndef incl_HPHP_LABEL_SCOPE_H_
 #define incl_HPHP_LABEL_SCOPE_H_
 
-#include "hphp/compiler/hphp.h"
-#include "hphp/util/deprecated/base.h"
-
-#include <vector>
 #include <string>
+#include <vector>
+
+#include "hphp/util/deprecated/declare-boost-types.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Statement;
-
 DECLARE_BOOST_TYPES(Statement);
 
-class LabelScope {
-public:
-  class LabelInfo {
-  public:
+struct LabelScope {
+  struct LabelInfo {
     LabelInfo(StatementPtr s, const std::string& name)
       : m_stmt(s), m_name(name) {}
 

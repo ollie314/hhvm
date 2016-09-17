@@ -1,6 +1,11 @@
 <?hh
 
-function block() { return RescheduleWaitHandle::create(1,1); };
+function block() {
+  return RescheduleWaitHandle::create(
+    RescheduleWaitHandle::QUEUE_NO_PENDING_IO,
+    1,
+  );
+};
 
 async function ret() {
   return 0;
@@ -32,6 +37,6 @@ class F {
   }
 }
 
-$global()->join();
-inFunc()->join();
-F::inMeth()->join();
+HH\Asio\join($global());
+HH\Asio\join(inFunc());
+HH\Asio\join(F::inMeth());

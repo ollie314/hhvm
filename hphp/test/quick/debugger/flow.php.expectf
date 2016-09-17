@@ -1,7 +1,7 @@
 Program %s/flow.php loaded. Type '[r]un' or '[c]ontinue' to go.
 break cls::pub()
 Breakpoint 1 set upon entering cls::pub()
-But wont break until class cls has been loaded.
+But won't break until class cls has been loaded.
 run
 flow_t.php loaded
 Program %s/flow.php exited normally.
@@ -285,13 +285,5 @@ continue
 foo:25
 out pri:7
 out pub:7
-Breakpoint 1 reached at test() on line 62 of %s/flow.php
-  61   $obj = new cls();
-  62*  $obj->pub($x);
-  63   error_log("test done ".$x);
-
-break clear all
-All breakpoints are cleared.
-continue
 test done 7
 quit

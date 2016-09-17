@@ -6,7 +6,10 @@ async function genEager(...$args) {
 }
 
 function block() { // simulates blocking I/O
-  return RescheduleWaitHandle::create(1,1);
+  return RescheduleWaitHandle::create(
+    RescheduleWaitHandle::QUEUE_NO_PENDING_IO,
+    1,
+  );
 };
 
 function generator(...$args) {
@@ -25,11 +28,11 @@ async function genBlocking(...$args) {
 
 function main() {
   echo "* eager async *\n";
-  $result = genEager('a', 'b', 'c')->join();
+  $result = HH\Asio\join(genEager('a', 'b', 'c'));
   var_dump($result);
 
   echo "* blocking async *\n";
-  $result = genBlocking('a', 'b', 'c')->join();
+  $result = HH\Asio\join(genBlocking('a', 'b', 'c'));
   var_dump($result);
 
   echo "* generator *\n";

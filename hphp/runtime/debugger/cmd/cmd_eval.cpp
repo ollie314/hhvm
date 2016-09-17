@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,8 +15,10 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_eval.h"
-#include "hphp/runtime/vm/debugger-hook.h"
+
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/debugger/debugger_client.h"
+#include "hphp/runtime/vm/debugger-hook.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -51,10 +53,11 @@ void CmdEval::onClient(DebuggerClient &client) {
   m_body = client.getCode();
   m_frame = client.getFrame();
   m_bypassAccessCheck = client.getDebuggerClientBypassCheck();
-  auto res =
-     client.xendWithNestedExecution<CmdEval>(this);
-  res->handleReply(client);
-  m_failed = res->m_failed;
+  auto res = client.xendWithNestedExecution<CmdEval>(this);
+  assert(res->is(DebuggerCommand::KindOfEval));
+  auto eval = std::static_pointer_cast<CmdEval>(res);
+  eval->handleReply(client);
+  m_failed = eval->m_failed;
 }
 
 void CmdEval::handleReply(DebuggerClient &client) {

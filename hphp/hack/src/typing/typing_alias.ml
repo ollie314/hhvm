@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -32,7 +32,7 @@
  *)
 (*****************************************************************************)
 
-open Utils
+open Core
 open Nast
 
 module Env = Typing_env
@@ -59,13 +59,13 @@ module Dep = struct
     | Some kl -> kl
 
   let visitor local =
-    object(this)
-      inherit [string list SMap.t] NastVisitor.nast_visitor as parent
+    object
+      inherit [string list SMap.t] Nast_visitor.nast_visitor as parent
 
-      method on_expr acc (_, e_ as e) =
+      method! on_expr acc (_, e_ as e) =
         match e_ with
         | Lvar (_, x) ->
-            add local (Ident.to_string x) acc
+            add local (Local_id.to_string x) acc
         | Obj_get ((_, (This | Lvar _) as x), (_, Id (_, y)), _) ->
             add local (Env.FakeMembers.make_id x y) acc
         | Class_get (x, (_, y)) ->
@@ -90,36 +90,35 @@ end = struct
 
   let get = Dep.get
 
-  let is_local = function
-    | Lvar _
-    | Obj_get ((_, (This | Lvar _)), (_, Id _), _)
-    | Class_get _  -> true
-    | _ -> false
-
   let local_to_string = function
-    | Lvar (_, x) -> Ident.to_string x
-    | Obj_get (x, (_, Id (_, y)), _) -> Env.FakeMembers.make_id x y
-    | Class_get (x, (_, y)) -> Env.FakeMembers.make_static_id x y
-    | _ -> assert false
+    | Lvar (_, x) ->
+        Some (Local_id.to_string x)
+    | Obj_get ((_, (This | Lvar _) as x), (_, Id (_, y)), _) ->
+        Some (Env.FakeMembers.make_id x y)
+    | Class_get (x, (_, y)) ->
+        Some (Env.FakeMembers.make_static_id x y)
+    | _ -> None
 
   let visitor =
     object(this)
-      inherit [string list SMap.t] NastVisitor.nast_visitor as parent
+      inherit [string list SMap.t] Nast_visitor.nast_visitor as parent
 
-      method on_expr acc (_, e_ as e) =
+      method! on_expr acc (_, e_ as e) =
         match e_ with
         | Binop (Ast.Eq _, (p, List el), x2) ->
-            List.fold_left begin fun acc e ->
+            List.fold_left ~f:begin fun acc e ->
               this#on_expr acc (p, Binop (Ast.Eq None, e, x2))
-            end acc el
+            end ~init:acc el
         | Binop (Ast.Eq _, x1, x2) ->
             this#on_assign acc x1 x2
         | _ -> parent#on_expr acc e
 
       method on_assign acc (_, e1) e2 =
-        if is_local e1
-        then Dep.expr (local_to_string e1) acc e2
-        else acc
+        Option.value_map (local_to_string e1) ~f:begin fun s ->
+          Dep.expr s acc e2
+        end ~default:acc
+
+      method! on_efun acc _ _ = acc
     end
 
   let make st = visitor#on_stmt SMap.empty st
@@ -143,7 +142,7 @@ module Depth: sig
   val get: AliasMap.t -> int
 end = struct
 
-  let rec fold aliases visited =
+  let rec fold aliases =
     SMap.fold begin fun k _ (visited, current_max) ->
       let visited, n = key aliases visited k in
       visited, max n current_max
@@ -155,11 +154,11 @@ end = struct
     else
       let visited = SMap.add k 0 visited in
       let kl = AliasMap.get k aliases in
-      let visited, depth_l = lfold (key aliases) visited kl in
-      let my_depth = 1 + List.fold_left max 0 depth_l in
+      let visited, depth_l = List.map_env visited kl (key aliases) in
+      let my_depth = 1 + List.fold_left ~f:max ~init:0 depth_l in
       SMap.add k my_depth visited, my_depth
 
-  let get aliases = snd (fold aliases SMap.empty)
+  let get aliases = snd (fold aliases)
 
 end
 

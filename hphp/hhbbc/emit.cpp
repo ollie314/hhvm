@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -49,6 +49,7 @@ namespace {
 //////////////////////////////////////////////////////////////////////
 
 const StaticString s_empty("");
+const StaticString s_invoke("__invoke");
 
 //////////////////////////////////////////////////////////////////////
 
@@ -174,6 +175,22 @@ struct EmitBcInfo {
   std::vector<BlockInfo> blockInfo;
 };
 
+MemberKey make_member_key(MKey mkey) {
+  switch (mkey.mcode) {
+    case MEC: case MPC:
+      return MemberKey{mkey.mcode, mkey.idx};
+    case MEL: case MPL:
+      return MemberKey{mkey.mcode, int32_t(mkey.local->id)};
+    case MET: case MPT: case MQT:
+      return MemberKey{mkey.mcode, mkey.litstr};
+    case MEI:
+      return MemberKey{mkey.mcode, mkey.int64};
+    case MW:
+      return MemberKey{};
+  }
+  not_reached();
+}
+
 EmitBcInfo emit_bytecode(EmitUnitState& euState,
                          UnitEmitter& ue,
                          const php::Func& func) {
@@ -196,42 +213,6 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 
     FTRACE(4, " emit: {} -- {} @ {}\n", currentStackDepth, show(inst),
       show(inst.srcLoc));
-
-    auto count_stack_elems = [&] (const MVector& mvec) {
-      int32_t ret = numLocationCodeStackVals(mvec.lcode);
-      for (auto& m : mvec.mcodes) ret += mcodeStackVals(m.mcode);
-      return ret;
-    };
-
-    auto emit_mvec = [&] (const MVector& mvec) {
-      immVec.clear();
-
-      auto const lcodeImms = numLocationCodeImms(mvec.lcode);
-      immVec.push_back(mvec.lcode);
-      assert(lcodeImms == 0 || lcodeImms == 1);
-      if (lcodeImms) encodeIvaToVector(immVec, mvec.locBase->id);
-
-      for (auto& m : mvec.mcodes) {
-        immVec.push_back(m.mcode);
-        switch (memberCodeImmType(m.mcode)) {
-        case MCodeImm::None:
-          break;
-        case MCodeImm::Local:
-          encodeIvaToVector(immVec, m.immLoc->id);
-          break;
-        case MCodeImm::Int:
-          encodeToVector(immVec, int64_t{m.immInt});
-          break;
-        case MCodeImm::String:
-          encodeToVector(immVec, int32_t{ue.mergeLitstr(m.immStr)});
-          break;
-        }
-      }
-
-      ue.emitInt32(immVec.size());
-      ue.emitInt32(count_stack_elems(mvec));
-      for (size_t i = 0; i < immVec.size(); ++i) ue.emitByte(immVec[i]);
-    };
 
     auto emit_vsa = [&] (const std::vector<SString>& keys) {
       auto n = keys.size();
@@ -283,10 +264,9 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 
     auto emit_srcloc = [&] {
       if (!inst.srcLoc.isValid()) return;
-      Location loc;
-      loc.first(inst.srcLoc.start.line, inst.srcLoc.start.col);
-      loc.last(inst.srcLoc.past.line, inst.srcLoc.past.col);
-      ue.recordSourceLocation(&loc, startOffset);
+      Location::Range loc(inst.srcLoc.start.line, inst.srcLoc.start.col,
+                          inst.srcLoc.past.line, inst.srcLoc.past.col);
+      ue.recordSourceLocation(loc, startOffset);
     };
 
     auto pop = [&] (int32_t n) {
@@ -326,7 +306,6 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
       euState.defClsMap[id] = startOffset;
     };
 
-#define IMM_MA(n)      emit_mvec(data.mvec);
 #define IMM_BLA(n)     emit_switch(data.targets);
 #define IMM_SLA(n)     emit_sswitch(data.targets);
 #define IMM_ILA(n)     emit_itertab(data.iterTab);
@@ -338,10 +317,11 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 #define IMM_SA(n)      ue.emitInt32(ue.mergeLitstr(data.str##n));
 #define IMM_RATA(n)    encodeRAT(ue, data.rat);
 #define IMM_AA(n)      ue.emitInt32(ue.mergeArray(data.arr##n));
-#define IMM_OA_IMPL(n) ue.emitByte(static_cast<uint8_t>(data.subop));
+#define IMM_OA_IMPL(n) ue.emitByte(static_cast<uint8_t>(data.subop##n));
 #define IMM_OA(type)   IMM_OA_IMPL
 #define IMM_BA(n)      emit_branch(*data.target);
 #define IMM_VSA(n)     emit_vsa(data.keys);
+#define IMM_KA(n)      encode_member_key(make_member_key(data.mkey), ue);
 
 #define IMM_NA
 #define IMM_ONE(x)           IMM_##x(1)
@@ -354,15 +334,15 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 #define POP_TWO(x, y)         pop(2);
 #define POP_THREE(x, y, z)    pop(3);
 
-#define POP_MMANY      pop(count_stack_elems(data.mvec));
-#define POP_C_MMANY    pop(1); pop(count_stack_elems(data.mvec));
-#define POP_R_MMANY    pop(1); pop(count_stack_elems(data.mvec));
-#define POP_V_MMANY    pop(1); pop(count_stack_elems(data.mvec));
+#define POP_MFINAL     pop(data.arg1);
+#define POP_F_MFINAL   pop(data.arg2);
+#define POP_C_MFINAL   pop(1); pop(data.arg1);
+#define POP_V_MFINAL   POP_C_MFINAL
 #define POP_CMANY      pop(data.arg##1);
 #define POP_SMANY      pop(data.keys.size());
 #define POP_FMANY      pop(data.arg##1);
-#define POP_CVMANY     pop(data.arg##1);
 #define POP_CVUMANY    pop(data.arg##1);
+#define POP_IDX_A      pop(data.arg2 + 1);
 
 #define PUSH_NOV
 #define PUSH_ONE(x)            push(1);
@@ -370,6 +350,7 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 #define PUSH_THREE(x, y, z)    push(3);
 #define PUSH_INS_1(x)          push(1);
 #define PUSH_INS_2(x)          push(1);
+#define PUSH_IDX_A             push(data.arg2);
 
 #define O(opcode, imms, inputs, outputs, flags)                   \
     auto emit_##opcode = [&] (const bc::opcode& data) {           \
@@ -409,6 +390,7 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 #undef IMM_OA_IMPL
 #undef IMM_OA
 #undef IMM_VSA
+#undef IMM_KA
 
 #undef IMM_NA
 #undef IMM_ONE
@@ -423,13 +405,13 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 
 #undef POP_CMANY
 #undef POP_SMANY
-#undef POP_MMANY
 #undef POP_FMANY
-#undef POP_CVMANY
 #undef POP_CVUMANY
-#undef POP_C_MMANY
-#undef POP_R_MMANY
-#undef POP_V_MMANY
+#undef POP_MFINAL
+#undef POP_F_MFINAL
+#undef POP_C_MFINAL
+#undef POP_V_MFINAL
+#undef POP_IDX_A
 
 #undef PUSH_NOV
 #undef PUSH_ONE
@@ -437,6 +419,7 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 #undef PUSH_THREE
 #undef PUSH_INS_1
 #undef PUSH_INS_2
+#undef PUSH_IDX_A
 
 #define O(opcode, ...)                                        \
     case Op::opcode:                                          \
@@ -751,6 +734,8 @@ void emit_finish_func(const php::Func& func,
   fe.isAsync = func.isAsync;
   fe.isGenerator = func.isGenerator;
   fe.isPairGenerator = func.isPairGenerator;
+  fe.isNative = func.isNative;
+
   if (func.nativeInfo) {
     fe.returnType = func.nativeInfo->returnType;
   }
@@ -830,6 +815,18 @@ void merge_repo_auth_type(UnitEmitter& ue, RepoAuthType rat) {
   case T::OptArr:
   case T::SArr:
   case T::Arr:
+  case T::OptSVec:
+  case T::OptVec:
+  case T::SVec:
+  case T::Vec:
+  case T::OptSDict:
+  case T::OptDict:
+  case T::SDict:
+  case T::Dict:
+  case T::OptSKeyset:
+  case T::OptKeyset:
+  case T::SKeyset:
+  case T::Keyset:
     // We don't need to merge the litstrs in the array, because rats
     // in arrays in the array type table must be using global litstr
     // ids.  (As the array type table itself is not associated with
@@ -868,6 +865,9 @@ void emit_class(EmitUnitState& state,
   for (auto& x : cls.requirements)       pce->addClassRequirement(x);
   for (auto& x : cls.traitPrecRules)     pce->addTraitPrecRule(x);
   for (auto& x : cls.traitAliasRules)    pce->addTraitAliasRule(x);
+  pce->setNumDeclMethods(cls.numDeclMethods);
+
+  pce->setIfaceVtableSlot(state.index.lookup_iface_vtable_slot(&cls));
 
   for (auto& m : cls.methods) {
     FTRACE(2, "    method: {}\n", m->name->data());
@@ -878,26 +878,45 @@ void emit_class(EmitUnitState& state,
     emit_finish_func(*m, *fe, info);
   }
 
+  std::vector<Type> useVars;
+  if (is_closure(cls)) {
+    auto f = find_method(&cls, s_invoke.get());
+    useVars = state.index.lookup_closure_use_vars(f);
+  }
+  auto uvIt = useVars.begin();
+
   auto const privateProps   = state.index.lookup_private_props(&cls);
   auto const privateStatics = state.index.lookup_private_statics(&cls);
   for (auto& prop : cls.properties) {
-    auto const repoTy = [&] (const PropState& ps) -> RepoAuthType {
-      /*
-       * Skip closures, because the types of their used vars can be
-       * communicated via assert opcodes right now.  At the time of this
-       * writing there was nothing to gain by including RAT's for the
-       * properties, since closure properties are only used internally by the
-       * runtime, not directly via opcodes like CGetM.
-       */
-      if (is_closure(cls)) return RepoAuthType{};
-
-      auto it = ps.find(prop.name);
-      if (it == end(ps)) return RepoAuthType{};
-      auto const rat = make_repo_type(*state.index.array_table_builder(),
-                                      it->second);
+    auto const makeRat = [&] (const Type& ty) -> RepoAuthType {
+      if (ty.couldBe(TCls)) {
+        return RepoAuthType{};
+      }
+      auto const rat = make_repo_type(*state.index.array_table_builder(), ty);
       merge_repo_auth_type(ue, rat);
       return rat;
     };
+
+    auto const privPropTy = [&] (const PropState& ps) -> Type {
+      if (is_closure(cls)) {
+        // For closures use variables will be the first properties of the
+        // closure object, in declaration order
+        if (uvIt != useVars.end()) return *uvIt++;
+        return Type{};
+      }
+
+      auto it = ps.find(prop.name);
+      if (it == end(ps)) return Type{};
+      return it->second;
+    };
+
+    Type propTy;
+    auto const attrs = prop.attrs;
+    if (attrs & AttrPrivate) {
+      propTy = privPropTy((attrs & AttrStatic) ? privateStatics : privateProps);
+    } else if ((attrs & AttrPublic) && (attrs & AttrStatic)) {
+      propTy = state.index.lookup_public_static(&cls, prop.name);
+    }
 
     pce->addProperty(
       prop.name,
@@ -905,20 +924,35 @@ void emit_class(EmitUnitState& state,
       prop.typeConstraint,
       prop.docComment,
       &prop.val,
-      (prop.attrs & AttrStatic) ? repoTy(privateStatics) : repoTy(privateProps)
+      makeRat(propTy)
     );
   }
+  assert(uvIt == useVars.end());
 
   for (auto& cconst : cls.constants) {
-    pce->addConstant(
-      cconst.name,
-      cconst.typeConstraint,
-      &cconst.val,
-      cconst.phpCode
-    );
+    if (!cconst.val.hasValue()) {
+      pce->addAbstractConstant(
+        cconst.name,
+        cconst.typeConstraint,
+        cconst.isTypeconst
+      );
+    } else {
+      pce->addConstant(
+        cconst.name,
+        cconst.typeConstraint,
+        &cconst.val.value(),
+        cconst.phpCode,
+        cconst.isTypeconst
+      );
+    }
   }
 
   pce->setEnumBaseTy(cls.enumBaseTy);
+}
+
+void emit_typealias(UnitEmitter& ue, const php::TypeAlias& alias) {
+  auto const id = ue.addTypeAlias(alias);
+  ue.pushMergeableTypeAlias(HPHP::Unit::MergeKind::TypeAlias, id);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -934,6 +968,8 @@ std::unique_ptr<UnitEmitter> emit_unit(const Index& index,
   FTRACE(1, "  unit {}\n", unit.filename->data());
   ue->m_filepath = unit.filename;
   ue->m_preloadPriority = unit.preloadPriority;
+  ue->m_isHHFile = unit.isHHFile;
+  ue->m_useStrictTypes = unit.useStrictTypes;
 
   EmitUnitState state { index };
   state.defClsMap.resize(unit.classes.size(), kInvalidOffset);
@@ -966,7 +1002,7 @@ std::unique_ptr<UnitEmitter> emit_unit(const Index& index,
   emit_pseudomain(state, *ue, unit);
   for (auto& c : unit.classes)     emit_class(state, *ue, *c);
   for (auto& f : unit.funcs)       emit_func(state, *ue, *f);
-  for (auto& t : unit.typeAliases) ue->addTypeAlias(*t);
+  for (auto& t : unit.typeAliases) emit_typealias(*ue, *t);
 
   for (size_t id = 0; id < unit.classes.size(); ++id) {
     // We may not have a DefCls PC if we're a closure, or a

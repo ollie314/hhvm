@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,11 @@
 #ifndef incl_HPHP_TV_COMPARISONS_H_
 #define incl_HPHP_TV_COMPARISONS_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
+
+struct ResourceData;
 
 //////////////////////////////////////////////////////////////////////
 // Php's operator ===
@@ -49,6 +51,7 @@ bool cellEqual(Cell, double);
 bool cellEqual(Cell, const StringData*);
 bool cellEqual(Cell, const ArrayData*);
 bool cellEqual(Cell, const ObjectData*);
+bool cellEqual(Cell, const ResourceData*);
 
 /*
  * Returns whether two Cells have the same value, in the same of php's
@@ -76,6 +79,7 @@ bool cellLess(Cell, double);
 bool cellLess(Cell, const StringData*);
 bool cellLess(Cell, const ArrayData*);
 bool cellLess(Cell, const ObjectData*);
+bool cellLess(Cell, const ResourceData*);
 
 /*
  * Returns whether a Cell is greater than another Cell, in the sense
@@ -102,6 +106,7 @@ bool cellGreater(Cell, double);
 bool cellGreater(Cell, const StringData*);
 bool cellGreater(Cell, const ArrayData*);
 bool cellGreater(Cell, const ObjectData*);
+bool cellGreater(Cell, const ResourceData*);
 
 /*
  * Returns whether a Cell is greater than another Cell, in the sense
@@ -126,6 +131,35 @@ bool tvGreater(TypedValue, TypedValue);
  */
 bool cellLessOrEqual(Cell, Cell);
 bool cellGreaterOrEqual(Cell, Cell);
+
+//////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////
+// Php's operator <=>
+
+/*
+ * Returns a Cell's comparison against an unpackaged type, in the sense of php's
+ * <=> operator.
+ */
+int64_t cellCompare(Cell, bool);
+int64_t cellCompare(Cell, int);
+int64_t cellCompare(Cell, int64_t);
+int64_t cellCompare(Cell, double);
+int64_t cellCompare(Cell, const StringData*);
+int64_t cellCompare(Cell, const ArrayData*);
+int64_t cellCompare(Cell, const ObjectData*);
+int64_t cellCompare(Cell, const ResourceData*);
+
+/*
+ * Returns the result of a Cell's comparison against another Cell, in the sense
+ * of php's <=> operator.
+ */
+int64_t cellCompare(Cell, Cell);
+
+/*
+ * Returns the result of tv1's comparison against tv2, as in php's <=> operator.
+ */
+int64_t tvCompare(TypedValue, TypedValue);
 
 //////////////////////////////////////////////////////////////////////
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,17 +17,16 @@
 #ifndef incl_HPHP_RUNTIME_VM_NAMEVALUETABLE_H_
 #define incl_HPHP_RUNTIME_VM_NAMEVALUETABLE_H_
 
-#include <boost/noncopyable.hpp>
-
 #include <folly/Bits.h>
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
 struct ActRec;
+struct StringData;
 
 /*
  * This class implements a name to TypedValue map.  Basically a hashtable from
@@ -42,7 +41,7 @@ struct ActRec;
  * VarEnv in their normal location, but still make them accessible by name
  * through this table.
  */
-struct NameValueTable : private boost::noncopyable {
+struct NameValueTable {
   struct Iterator {
     explicit Iterator(const NameValueTable* tab);
     static Iterator getLast(const NameValueTable* tab);
@@ -97,6 +96,9 @@ struct NameValueTable : private boost::noncopyable {
 
   ~NameValueTable();
 
+  NameValueTable(const NameValueTable&) = delete;
+  NameValueTable& operator=(const NameValueTable&) = delete;
+
   /**
    * Suspend locals into an in-resumable ActRec.
    */
@@ -123,6 +125,7 @@ struct NameValueTable : private boost::noncopyable {
    * we shouldn't be running destructors.
    */
   void leak();
+  bool leaked() const { return !m_table; }
 
   /*
    * Set the slot for the supplied name to `val', allocating it if
@@ -156,9 +159,22 @@ struct NameValueTable : private boost::noncopyable {
   TypedValue* lookupAdd(const StringData* name);
 
 private:
+  // Dummy DT for named locals; keep out of conflict with actual DataTypes in
+  // base/datatype.h.
+  static constexpr auto kNamedLocalDataType = kExtraInvalidDataType;
+
+  // Element type for the name/value hashtable.
   struct Elm {
     TypedValue        m_tv;
     const StringData* m_name;
+    template<class F> void scan(F& mark) const {
+      if (m_name) {
+        mark(m_name);
+        if (m_tv.m_type != kNamedLocalDataType) {
+          mark(m_tv);
+        }
+      }
+    }
   };
 
 private:
@@ -170,6 +186,16 @@ private:
   Elm* insert(const StringData* name);
   void rehash(Elm* const oldTab, const size_t oldMask);
   Elm* findElm(const StringData* name) const;
+
+public:
+  template<class F> void scan(F& mark) const {
+    // TODO #6511877 need to access ActRec::scan() here.
+    //m_fp->scan(mark);
+    if (leaked()) return;
+    for (unsigned i = 0, n = m_tabMask+1; i < n; ++i) {
+      m_table[i].scan(mark);
+    }
+  }
 
 private:
   ActRec* m_fp{nullptr};

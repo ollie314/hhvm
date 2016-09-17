@@ -25,6 +25,7 @@
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "zend_constants.h"
 
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/zend-printf.h"
 #include "hphp/util/thread-local.h"
 #include "hphp/runtime/ext_zend_compat/hhvm/zend-class-entry.h"
@@ -32,6 +33,18 @@
 #include "hphp/runtime/ext_zend_compat/hhvm/zval-helpers.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/native.h"
+
+namespace {
+
+void releaseZval(zval* v) {
+  if (v->zRefcount() > 1) {
+    v->zDelRef();
+  } else {
+    FREE_ZVAL(v);
+  }
+}
+
+}
 
 ZEND_API const char *zend_get_type_by_const(int type) {
   return HPHP::getDataTypeString((HPHP::DataType)type).data();
@@ -417,7 +430,7 @@ static const char *zend_parse_arg_impl(int arg_num, zval **arg, va_list *va, con
         if (check_null && Z_TYPE_PP(arg) == IS_NULL) {
           *p = NULL;
         } else {
-          not_implemented();
+          *p = arg;
         }
       }
       break;
@@ -574,22 +587,14 @@ static int zend_parse_va_args(int num_args, const char *type_spec, va_list *va, 
 
         *n_varargs = num_varargs;
 
-        /* Allocate space for the args. Zend already has single pointers
-         * persistently stored, and only needs to allocate space for the double
-         * pointers, but we need to allocate space for both.
-         *
-         * We need to allocate it in such a way that a single efree(varargs)
-         * in the caller will free all relevant memory. So we allocate a single
-         * block and then split it.
+        /* Allocate space for the args. We need to allocate it in such a way
+         * that a single efree(varargs) in the caller will free all relevant
+         * memory.
          */
-        zval *** double_ptrs = (zval***)safe_emalloc(num_varargs * 2,
-                                                     sizeof(void*), 0);
-        *varargs = double_ptrs;
-        zval ** single_ptrs = (zval**)(double_ptrs + num_varargs);
+        *varargs = (zval***)safe_emalloc(num_varargs, sizeof(void*), 0);
 
         for (iv = 0; iv < num_varargs; iv++) {
-          double_ptrs[iv] = &single_ptrs[iv];
-          single_ptrs[iv] = HPHP::ZendExecutionStack::getArg(i + iv);
+          (*varargs)[iv] = HPHP::ZendExecutionStack::getArg(i + iv);
         }
 
         /* adjust how many args we have left and restart loop */
@@ -602,8 +607,7 @@ static int zend_parse_va_args(int num_args, const char *type_spec, va_list *va, 
       }
     }
 
-    auto tmp = HPHP::ZendExecutionStack::getArg(i);
-    arg = &tmp;
+    arg = HPHP::ZendExecutionStack::getArg(i);
 
     if (zend_parse_arg(i+1, arg, va, &type_spec, quiet TSRMLS_CC) == FAILURE) {
       /* clean up varargs array if it was used */
@@ -1088,11 +1092,14 @@ ZEND_API int array_set_zval_key(HashTable *ht, zval *key, zval *value) /* {{{ */
 ZEND_API zend_bool zend_is_callable_ex(zval *callable, zval *object_ptr, uint check_flags, char **callable_name, int *callable_name_len, zend_fcall_info_cache *fcc, char **error TSRMLS_DC) /* {{{ */
 {
   HPHP::Variant name;
+  HPHP::RefData* nameRef = nullptr;
   int callable_name_len_local;
   zend_fcall_info_cache fcc_local;
 
   if (callable_name) {
     *callable_name = NULL;
+    tvBox(name.asTypedValue());
+    nameRef = name.asTypedValue()->m_data.pref;
   }
   if (callable_name_len == NULL) {
     callable_name_len = &callable_name_len_local;
@@ -1107,10 +1114,10 @@ ZEND_API zend_bool zend_is_callable_ex(zval *callable, zval *object_ptr, uint ch
   fcc->calling_scope = NULL;
   fcc->object_ptr = NULL;
 
-  bool b = HHVM_FN(is_callable)(
-      tvAsVariant(callable->tv()),
-      check_flags & IS_CALLABLE_CHECK_SYNTAX_ONLY,
-      HPHP::ref(name));
+  bool b = is_callable(
+    tvAsVariant(callable->tv()),
+    check_flags & IS_CALLABLE_CHECK_SYNTAX_ONLY,
+    nameRef);
   if (b) {
     if (callable_name) {
       HPHP::StringData *sd = name.getStringData();
@@ -1258,8 +1265,8 @@ ZEND_API void zend_update_property_null(zend_class_entry *scope, zval *object, c
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_NULL(tmp);
+  SCOPE_EXIT { releaseZval(tmp); };
   zend_update_property(scope, object, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1270,8 +1277,8 @@ ZEND_API void zend_update_property_bool(zend_class_entry *scope, zval *object, c
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_BOOL(tmp, value);
+  SCOPE_EXIT { releaseZval(tmp); };
   zend_update_property(scope, object, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1282,8 +1289,8 @@ ZEND_API void zend_update_property_long(zend_class_entry *scope, zval *object, c
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_LONG(tmp, value);
+  SCOPE_EXIT { releaseZval(tmp); };
   zend_update_property(scope, object, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1294,8 +1301,8 @@ ZEND_API void zend_update_property_double(zend_class_entry *scope, zval *object,
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_DOUBLE(tmp, value);
+  SCOPE_EXIT { releaseZval(tmp); };
   zend_update_property(scope, object, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1306,8 +1313,8 @@ ZEND_API void zend_update_property_string(zend_class_entry *scope, zval *object,
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_STRING(tmp, value, 1);
+  SCOPE_EXIT { releaseZval(tmp); };
   zend_update_property(scope, object, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1318,8 +1325,8 @@ ZEND_API void zend_update_property_stringl(zend_class_entry *scope, zval *object
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_STRINGL(tmp, value, value_len, 1);
+  SCOPE_EXIT { releaseZval(tmp); };
   zend_update_property(scope, object, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1453,7 +1460,7 @@ ZEND_API int zend_declare_class_constant_stringl(zend_class_entry *ce,
   Native::registerClassConstant(
       makeStaticString(ce->name, ce->name_length),
       makeStaticString(name, name_length),
-      make_tv<KindOfStaticString>(
+      make_tv<KindOfPersistentString>(
         makeStaticString(value, value_length)));
   return SUCCESS;
 }
@@ -1466,7 +1473,7 @@ ZEND_API int zend_declare_class_constant_string(zend_class_entry *ce,
   Native::registerClassConstant(
       makeStaticString(ce->name, ce->name_length),
       makeStaticString(name, name_length),
-      make_tv<KindOfStaticString>(makeStaticString(value)));
+      make_tv<KindOfPersistentString>(makeStaticString(value)));
   return SUCCESS;
 }
 /* }}} */
@@ -1485,12 +1492,12 @@ ZEND_API int zend_update_static_property(zend_class_entry *scope, const char *na
   }
 
   HPHP::String sname(name, name_length, HPHP::CopyString);
-  bool visible, accessible;
-  auto tv = cls->getSProp(cls, sname.get(), visible, accessible);
-  if (!tv) {
-    return FAILURE;
-  }
-  HPHP::tvSetZval(value, tv);
+
+  auto const lookup = cls->getSProp(cls, sname.get());
+
+  if (!lookup.prop) return FAILURE;
+
+  HPHP::tvSetZval(value, lookup.prop);
   return SUCCESS;
 }
 
@@ -1500,8 +1507,8 @@ ZEND_API int zend_update_static_property_null(zend_class_entry *scope, const cha
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_NULL(tmp);
+  SCOPE_EXIT { releaseZval(tmp); };
   return zend_update_static_property(scope, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1512,8 +1519,8 @@ ZEND_API int zend_update_static_property_bool(zend_class_entry *scope, const cha
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_BOOL(tmp, value);
+  SCOPE_EXIT { releaseZval(tmp); };
   return zend_update_static_property(scope, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1524,8 +1531,8 @@ ZEND_API int zend_update_static_property_long(zend_class_entry *scope, const cha
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_LONG(tmp, value);
+  SCOPE_EXIT { releaseZval(tmp); };
   return zend_update_static_property(scope, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1536,8 +1543,8 @@ ZEND_API int zend_update_static_property_double(zend_class_entry *scope, const c
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_DOUBLE(tmp, value);
+  SCOPE_EXIT { releaseZval(tmp); };
   return zend_update_static_property(scope, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1548,8 +1555,8 @@ ZEND_API int zend_update_static_property_string(zend_class_entry *scope, const c
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_STRING(tmp, value, 1);
+  SCOPE_EXIT { releaseZval(tmp); };
   return zend_update_static_property(scope, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1560,8 +1567,8 @@ ZEND_API int zend_update_static_property_stringl(zend_class_entry *scope, const 
 
   ALLOC_ZVAL(tmp);
   Z_UNSET_ISREF_P(tmp);
-  Z_SET_REFCOUNT_P(tmp, 0);
   ZVAL_STRINGL(tmp, value, value_len, 1);
+  SCOPE_EXIT { releaseZval(tmp); };
   return zend_update_static_property(scope, name, name_length, tmp TSRMLS_CC);
 }
 /* }}} */
@@ -1596,7 +1603,7 @@ ZEND_API zend_class_entry *zend_register_internal_class(zend_class_entry *orig_c
         name += "->";
       }
       name += fe->fname;
-      HPHP::Native::registerBuiltinFunction(name, fe->handler);
+      HPHP::Native::registerBuiltinZendFunction(name, fe->handler);
       fe++;
     }
   }
@@ -1624,8 +1631,7 @@ ZEND_API int _object_and_properties_init(zval *arg, zend_class_entry *class_type
         "Is the system library not loaded yet?", class_type->name);
     return FAILURE;
   }
-  Z_OBJVAL_P(arg) = HPHP::ObjectData::newInstance(cls);
-  Z_OBJVAL_P(arg)->incRefCount();
+  Z_OBJVAL_P(arg) = HPHP::Object{cls}.detach();
   Z_TYPE_P(arg) = IS_OBJECT;
   return SUCCESS;
 }
@@ -1638,16 +1644,19 @@ ZEND_API zval *zend_read_property(zend_class_entry *scope, zval *object, const c
     ctx = HPHP::Unit::lookupClass(scope_name.get());
   }
 
-  bool visible, accessible, unset;
-  auto ret = Z_OBJVAL_P(object)->zGetProp(ctx, prop_name.get(), visible, accessible, unset);
-  if (!accessible || unset) {
-    return nullptr;
+  auto const lookup = Z_OBJVAL_P(object)->getProp(ctx, prop_name.get());
+  auto const prop = lookup.prop;
+
+  if (!lookup.accessible || prop->m_type == HPHP::KindOfUninit) return nullptr;
+
+  if (prop->m_type != HPHP::KindOfRef) {
+    tvBox(prop);
   }
-  return ret;
+  return prop->m_data.pref;
 }
 
 ZEND_API zval *zend_read_static_property(zend_class_entry *scope, const char *name, int name_length, zend_bool silent TSRMLS_DC) {
-  HPHP::Class * cls = HPHP::zend_hphp_class_entry_to_class(scope);
+  auto const cls = HPHP::zend_hphp_class_entry_to_class(scope);
   if (!cls) {
     // You can't call this function from MINIT, sorry
     HPHP::raise_error("cannot read property of class %s. "
@@ -1655,12 +1664,19 @@ ZEND_API zval *zend_read_static_property(zend_class_entry *scope, const char *na
     return nullptr;
   }
   HPHP::String sname(name, name_length, HPHP::CopyString);
-  bool visible, accessible;
-  auto ret = cls->zGetSProp(cls, sname.get(), visible, accessible);
-  if (!accessible || !visible) {
-    return nullptr;
+
+  auto const lookup = cls->getSProp(cls, sname.get());
+  auto const prop = lookup.prop;
+
+  // Static properties should never be Uninit.
+  assert(!prop || prop->m_type != HPHP::KindOfUninit);
+
+  if (!prop || !lookup.accessible) return nullptr;
+
+  if (prop->m_type != HPHP::KindOfRef) {
+    tvBox(prop);
   }
-  return ret;
+  return prop->m_data.pref;
 }
 
 ZEND_API zend_class_entry *zend_register_internal_class_ex(zend_class_entry *class_entry, zend_class_entry *parent_ce, char *parent_name TSRMLS_DC) {

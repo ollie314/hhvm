@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,18 +19,25 @@
 
 #include <vector>
 
+#include "hphp/runtime/base/types.h"
+
 #include "hphp/util/assertions.h"
 #include "hphp/util/hash-map-typedefs.h"
 
-#include "hphp/runtime/base/types.h"
-
 namespace HPHP { namespace jit {
+
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * Core types.
  */
 typedef unsigned char* TCA; // "Translation cache address."
 typedef const unsigned char* CTCA;
+
+using LowTCA = LowPtr<uint8_t>;
+using AtomicLowTCA = AtomicLowPtr<uint8_t,
+                                  std::memory_order_acquire,
+                                  std::memory_order_release>;
 
 struct ctca_identity_hash {
   size_t operator()(CTCA val) const {
@@ -43,30 +50,39 @@ struct ctca_identity_hash {
   }
 };
 
-typedef hphp_hash_set<TransID> TransIDSet;
-typedef std::vector<TransID>   TransIDVec;
+///////////////////////////////////////////////////////////////////////////////
+
+using TransIDSet = hphp_hash_set<TransID>;
+using TransIDVec = std::vector<TransID>;
+
+using Annotation = std::pair<std::string, std::string>;
+using Annotations = std::vector<Annotation>;
+
+///////////////////////////////////////////////////////////////////////////////
 
 /**
  * The different kinds of translations that the JIT generates:
  *
- *   - Anchor   : a service request for retranslating
- *   - Prologue : function prologue
- *   - Interp   : a service request to interpret at least one instruction
- *   - Live     : translate one tracelet by inspecting live VM state
- *   - Profile  : translate one block by inspecting live VM state and
- *                inserting profiling counters
- *   - Optimize : translate one region performing optimizations that may
- *                leverage data collected by Profile translations
- *   - Proflogue: a profiling function prologue
+ *   - Anchor       : a service request for retranslating
+ *   - Interp       : a service request to interpret at least one instruction
+ *   - Live         : translate one tracelet by inspecting live VM state
+ *   - Profile      : translate one block by inspecting live VM state and
+ *                    inserting profiling counters
+ *   - Optimize     : translate one region performing optimizations that may
+ *                    leverage data collected by Profile translations
+ *   - LivePrologue : prologue for a function being JITed in Live mode
+ *   - ProfPrologue : prologue for a function being JITed in Profile mode
+ *   - OptPrologue  : prologue for a function being JITed in Optimize mode
  */
 #define TRANS_KINDS \
     DO(Anchor)      \
-    DO(Prologue)    \
     DO(Interp)      \
     DO(Live)        \
     DO(Profile)     \
     DO(Optimize)    \
-    DO(Proflogue)   \
+    DO(LivePrologue)\
+    DO(ProfPrologue)\
+    DO(OptPrologue) \
     DO(Invalid)     \
 
 enum class TransKind {
@@ -93,11 +109,12 @@ inline std::string show(TransKind k) {
  * hints or demands for retranslations.
  */
 struct TransFlags {
-  explicit TransFlags(uint64_t flags = 0) : packed(flags) {}
+  /* implicit */ TransFlags(uint64_t flags = 0) : packed(flags) {}
 
   union {
     struct {
       bool noinlineSingleton : 1;
+      bool noProfiledFPush : 1;
     };
     uint64_t packed;
   };
@@ -105,8 +122,38 @@ struct TransFlags {
 
 static_assert(sizeof(TransFlags) <= sizeof(uint64_t), "Too many TransFlags!");
 
-// Enumeration representing the various areas that we emit code.
-enum class AreaIndex : unsigned { Main, Cold, Frozen, Max };
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * The "kind" of code being generated.
+ *
+ * Different contexts of code generation constrain codegen differently; e.g.,
+ * cross-trace code has fewer available registers.
+ */
+enum class CodeKind : uint8_t {
+  /*
+   * Normal PHP code in the TC.
+   */
+  Trace,
+
+  /*
+   * Code at the TC boundaries, e.g., service requests, unique stubs.
+   */
+  CrossTrace,
+
+  /*
+   * Helper code that uses scratch registers only.
+   */
+  Helper,
+};
+
+/*
+ * Enumeration representing the various areas that we emit code.
+ *
+ * kNumAreas must be kept up to date.
+ */
+enum class AreaIndex : unsigned { Main, Cold, Frozen };
+constexpr size_t kNumAreas = 3;
 
 inline std::string areaAsString(AreaIndex area) {
   switch (area) {
@@ -116,13 +163,22 @@ inline std::string areaAsString(AreaIndex area) {
     return "Cold";
   case AreaIndex::Frozen:
     return "Frozen";
-  case AreaIndex::Max:
-    not_reached();
-    return "";
   }
-  not_reached();
-  return "";
+  always_assert(false);
 }
+
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Some data structures are accessed often enough from translated code that we
+ * have shortcuts for getting offsets into them.
+ */
+#define TVOFF(nm) int(offsetof(TypedValue, nm))
+#define AROFF(nm) int(offsetof(ActRec, nm))
+#define AFWHOFF(nm) int(offsetof(c_AsyncFunctionWaitHandle, nm))
+#define GENDATAOFF(nm) int(offsetof(Generator, nm))
+
+///////////////////////////////////////////////////////////////////////////////
 
 }}
 

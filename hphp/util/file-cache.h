@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,18 +19,20 @@
 
 #include <memory>
 #include <string>
+#include <vector>
+
+#include "hphp/util/cache/cache-manager.h"
+#include "hphp/util/file.h"
 
 namespace HPHP {
+////////////////////////////////////////////////////////////////////////////////
 
 /**
  * Stores file contents in memory. Used by web server for faster static
  * content serving.
  */
 
-class CacheManager;
-
-class FileCache {
- public:
+struct FileCache {
   static std::string SourceRoot;
   static bool UseNewCache;
 
@@ -42,28 +44,45 @@ class FileCache {
    * Archiving data.
    */
 
-  void write(const char *name);   // just the name
-  void write(const char *name, const char *fullpath); // name + data
+  void write(const char* name);   // just the name
+  void write(const char* name, const char* fullpath); // name + data
 
-  void save(const char *filename);
+  void save(const char* filename);
 
   /**
    * Reading data.
    */
-  void loadMmap(const char *filename);
+  void loadMmap(const char* filename);
   bool fileExists(const char *name, bool isRelative = true) const;
-  bool dirExists(const char *name, bool isRelative = true) const;
-  bool exists(const char *name, bool isRelative = true) const;
-  char *read(const char *name, int &len, bool &compressed) const;
-  int64_t fileSize(const char *name, bool isRelative) const;
+  bool dirExists(const char* name, bool isRelative = true) const;
+  bool exists(const char* name, bool isRelative = true) const;
+  char *read(const char* name, int& len, bool& compressed) const;
+  int64_t fileSize(const char* name, bool sRelative) const;
   void dump() const;
 
-  static std::string GetRelativePath(const char *path);
+  static std::string GetRelativePath(const char* path);
+
+  // Check if path is file, directory, unknown, or not in cache
+  VFileType getFileType(const char* name) const {
+    if (name && FileUtil::isAbsolutePath(name)) {
+      return cache_manager_->getFileType(GetRelativePath(name).c_str());
+    }
+    return cache_manager_->getFileType(name);
+  }
+
+  // Read list of files in directory
+  std::vector<std::string> readDirectory(const char* name) const {
+    if (name && FileUtil::isAbsolutePath(name)) {
+      return cache_manager_->readDirectory(GetRelativePath(name).c_str());
+    }
+    return cache_manager_->readDirectory(name);
+  }
 
  private:
   std::unique_ptr<CacheManager> cache_manager_;
 };
 
-}   // namespace HPHP
+////////////////////////////////////////////////////////////////////////////////
+}
 
-#endif  // incl_HPHP_FILE_CACHE_H_
+#endif

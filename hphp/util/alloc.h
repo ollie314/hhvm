@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,9 +23,10 @@
 
 #include <folly/Portability.h>
 
+#include "hphp/util/assertions.h"
 #include "hphp/util/exception.h"
 
-#ifdef FOLLY_SANITIZE_ADDRESS
+#if defined(FOLLY_SANITIZE_ADDRESS) || defined(FOLLY_SANITIZE_THREAD)
 // ASan is less precise than valgrind so we'll need a superset of those tweaks
 # define VALGRIND
 // TODO: (t2869817) ASan doesn't play well with jemalloc
@@ -35,7 +36,7 @@
 #endif
 
 #ifdef USE_TCMALLOC
-#include <google/malloc_extension.h>
+#include <gperftools/malloc_extension.h>
 #endif
 
 #ifndef USE_JEMALLOC
@@ -49,6 +50,9 @@
 # undef MALLOCX_LG_ALIGN
 # undef MALLOCX_ZERO
 # include <jemalloc/jemalloc.h>
+# if JEMALLOC_VERSION_MAJOR == 4
+#  define USE_JEMALLOC_CHUNK_HOOKS 1
+# endif
 #endif
 
 #include "hphp/util/maphuge.h"
@@ -89,7 +93,7 @@ inline void* operator new(size_t, NotNull, void* location) {
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-const bool use_jemalloc =
+constexpr bool use_jemalloc =
 #ifdef USE_JEMALLOC
   true
 #else
@@ -97,11 +101,18 @@ const bool use_jemalloc =
 #endif
   ;
 
-class OutOfMemoryException : public Exception {
-public:
+// ASAN modifies the generated code in ways that cause abnormally high C++
+// stack usage.
+constexpr size_t kStackSizeMinimum =
+#ifdef FOLLY_SANITIZE_ADDRESS
+  16 << 20;
+#else
+  8 << 20;
+#endif
+
+struct OutOfMemoryException : Exception {
   explicit OutOfMemoryException(size_t size)
     : Exception("Unable to allocate %zu bytes of memory", size) {}
-  virtual ~OutOfMemoryException() throw() {}
   EXCEPTION_COMMON_IMPL(OutOfMemoryException);
 };
 
@@ -110,6 +121,53 @@ public:
 #ifdef USE_JEMALLOC
 extern unsigned low_arena;
 extern std::atomic<int> low_huge_pages;
+
+inline int low_mallocx_flags() {
+  // Allocate from low_arena, and bypass the implicit tcache to assure that the
+  // result actually comes from low_arena.
+#ifdef MALLOCX_TCACHE_NONE
+  return MALLOCX_ARENA(low_arena)|MALLOCX_TCACHE_NONE;
+#else
+  return MALLOCX_ARENA(low_arena);
+#endif
+}
+
+inline int low_dallocx_flags() {
+#ifdef MALLOCX_TCACHE_NONE
+  // Bypass the implicit tcache for this deallocation.
+  return MALLOCX_TCACHE_NONE;
+#else
+  // Prior to the introduction of MALLOCX_TCACHE_NONE, explicitly specifying
+  // MALLOCX_ARENA(a) caused jemalloc to bypass tcache.
+  return MALLOCX_ARENA(low_arena);
+#endif
+}
+
+#ifdef USE_JEMALLOC_CHUNK_HOOKS
+extern unsigned low_huge1g_arena;
+
+inline int low_mallocx_huge1g_flags() {
+  // Allocate from low_arena, and bypass the implicit tcache to assure that the
+  // result actually comes from low_arena.
+#ifdef MALLOCX_TCACHE_NONE
+  return MALLOCX_ARENA(low_huge1g_arena) | MALLOCX_TCACHE_NONE;
+#else
+  return MALLOCX_ARENA(low_huge1g_arena);
+#endif
+}
+
+inline int low_dallocx_huge1g_flags() {
+#ifdef MALLOCX_TCACHE_NONE
+  // Bypass the implicit tcache for this deallocation.
+  return MALLOCX_TCACHE_NONE;
+#else
+  // Prior to the introduction of MALLOCX_TCACHE_NONE, explicitly specifying
+  // MALLOCX_ARENA(a) caused jemalloc to bypass tcache.
+  return MALLOCX_ARENA(low_huge1g_arena);
+#endif
+}
+#endif
+
 #endif
 
 inline void* low_malloc(size_t size) {
@@ -125,7 +183,7 @@ inline void low_free(void* ptr) {
 #ifndef USE_JEMALLOC
   free(ptr);
 #else
-  dallocx(ptr, MALLOCX_ARENA(low_arena));
+  if (ptr) dallocx(ptr, low_dallocx_flags());
 #endif
 }
 
@@ -136,6 +194,32 @@ inline void low_malloc_huge_pages(int pages) {
 }
 
 void low_malloc_skip_huge(void* start, void* end);
+
+inline void* low_malloc_data(size_t size) {
+#ifndef USE_JEMALLOC_CHUNK_HOOKS
+  return low_malloc(size);
+#else
+  if (low_huge1g_arena == 0) return low_malloc(size);
+  extern void* low_malloc_huge1g_impl(size_t);
+  auto ret = low_malloc_huge1g_impl(size);
+  if (ret != nullptr) return ret;
+  return low_malloc(size);
+#endif
+}
+
+inline void low_free_data(void* ptr) {
+#ifndef USE_JEMALLOC_CHUNK_HOOKS
+  low_free(ptr);
+#else
+  if (ptr) {
+    if (low_huge1g_arena != 0) {
+      dallocx(ptr, low_dallocx_huge1g_flags());
+    } else {
+      low_free(ptr);
+    }
+  }
+#endif
+}
 
 /**
  * Safe memory allocation.
@@ -176,9 +260,16 @@ void flush_thread_caches();
 void flush_thread_stack();
 
 /**
+ * Free all unused memory back to system. On error, returns false and, if
+ * not null, sets an error message in *errStr.
+ */
+bool purge_all(std::string* errStr = nullptr);
+
+/**
  * Like scoped_ptr, but calls free() on destruct
  */
-class ScopedMem {
+struct ScopedMem {
+ private:
   ScopedMem(const ScopedMem&); // disable copying
   ScopedMem& operator=(const ScopedMem&);
  public:
@@ -237,16 +328,118 @@ void numa_local(void* start, size_t size);
  */
 void numa_bind_to(void* start, size_t size, int node);
 
-#ifdef USE_JEMALLOC
+/*
+ * mallctl wrappers.
+ */
 
-/**
+/*
+ * Call mallctl, reading/writing values of type <T> if out/in are non-null,
+ * respectively.  Assert/log on error, depending on errOk.
+ */
+template <typename T>
+int mallctlHelper(const char *cmd, T* out, T* in, bool errOk) {
+#ifdef USE_JEMALLOC
+  assert(mallctl != nullptr);
+  size_t outLen = sizeof(T);
+  int err = mallctl(cmd,
+                    out, out ? &outLen : nullptr,
+                    in, in ? sizeof(T) : 0);
+  assert(err != 0 || outLen == sizeof(T));
+#else
+  int err = ENOENT;
+#endif
+  if (err != 0) {
+    if (!errOk) {
+      std::string errStr =
+        folly::format("mallctl {}: {} ({})", cmd, strerror(err), err).str();
+      // Do not use Logger here because JEMallocInitializer() calls this
+      // function and JEMallocInitializer has the highest constructor priority.
+      // The static variables in Logger are not initialized yet.
+      fprintf(stderr, "%s\n", errStr.c_str());
+    }
+    always_assert(errOk || err == 0);
+  }
+  return err;
+}
+
+template <typename T>
+int mallctlReadWrite(const char *cmd, T* out, T in, bool errOk=false) {
+  return mallctlHelper(cmd, out, &in, errOk);
+}
+
+template <typename T>
+int mallctlRead(const char* cmd, T* out, bool errOk=false) {
+  return mallctlHelper(cmd, out, static_cast<T*>(nullptr), errOk);
+}
+
+template <typename T>
+int mallctlWrite(const char* cmd, T in, bool errOk=false) {
+  return mallctlHelper(cmd, static_cast<T*>(nullptr), &in, errOk);
+}
+
+int mallctlCall(const char* cmd, bool errOk=false);
+
+/*
  * jemalloc pprof utility functions.
  */
 int jemalloc_pprof_enable();
 int jemalloc_pprof_disable();
 int jemalloc_pprof_dump(const std::string& prefix, bool force);
 
-#endif // USE_JEMALLOC
+template <class T>
+struct LowAllocator {
+  typedef T              value_type;
+  typedef T*             pointer;
+  typedef const T*       const_pointer;
+  typedef T&             reference;
+  typedef const T&       const_reference;
+  typedef std::size_t    size_type;
+  typedef std::ptrdiff_t difference_type;
+
+  template <class U>
+  struct rebind { using other = LowAllocator<U>; };
+
+  pointer address(reference value) {
+    return &value;
+  }
+  const_pointer address(const_reference value) const {
+    return &value;
+  }
+
+  LowAllocator() noexcept {}
+  template<class U> LowAllocator(const LowAllocator<U>&) noexcept {}
+  ~LowAllocator() noexcept {}
+
+  size_type max_size() const {
+    return std::numeric_limits<std::size_t>::max() / sizeof(T);
+  }
+
+  pointer allocate(size_type num, const void* = 0) {
+    pointer ret = (pointer)low_malloc(num * sizeof(T));
+    return ret;
+  }
+
+  template<class U, class... Args>
+  void construct(U* p, Args&&... args) {
+    ::new ((void*)p) U(std::forward<Args>(args)...);
+  }
+
+  void destroy(pointer p) {
+    p->~T();
+  }
+
+  void deallocate(pointer p, size_type num) {
+    low_free((void*)p);
+  }
+
+  template<class U> bool operator==(const LowAllocator<U>&) const {
+    return true;
+  }
+
+  template<class U> bool operator!=(const LowAllocator<U>&) const {
+    return false;
+  }
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 }

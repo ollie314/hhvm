@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,12 +29,23 @@ inline bool PreClass::isBuiltin() const {
   return m_attrs & AttrBuiltin;
 }
 
+inline bool PreClass::hasConstant(const StringData* cnsName) const {
+  return m_constants.contains(cnsName);
+}
+
 inline bool PreClass::hasMethod(const StringData* methName) const {
   return m_methods.contains(methName);
 }
 
 inline bool PreClass::hasProp(const StringData* propName) const {
   return m_properties.contains(propName);
+}
+
+inline const PreClass::Const*
+PreClass::lookupConstant(const StringData* cnsName) const {
+  Slot s = m_constants.findIndex(cnsName);
+  assert(s != kInvalidSlot);
+  return &m_constants[s];
 }
 
 inline Func* PreClass::lookupMethod(const StringData* methName) const {
@@ -129,6 +140,11 @@ inline bool PreClass::ClassRequirement::is_implements() const {
   return !is_extends();
 }
 
+inline bool PreClass::ClassRequirement::is_same(
+    const ClassRequirement* other) const {
+  return m_word == other->m_word;
+}
+
 /*
  * Deserialization.
  */
@@ -151,4 +167,28 @@ PreClass::ClassRequirement::serde(SerDe& sd) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// PreClass::Const.
+
+/*
+ * Ser(ialization)-De(serialization).
+ */
+template<class SerDe>
+inline void PreClass::Const::serde(SerDe& sd) {
+  TypedValue sd_tv = m_val;
+  auto sd_modifiers = m_val.constModifiers();
+  sd(m_name)
+    (m_phpCode)
+    (sd_tv)
+    (sd_modifiers);
+
+  if (SerDe::deserializing) {
+    // tvCopy inlined here to avoid header dependency issues
+    m_val.m_data.num = sd_tv.m_data.num;
+    m_val.m_type = sd_tv.m_type;
+    m_val.constModifiers() = sd_modifiers;
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 }

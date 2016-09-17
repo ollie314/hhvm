@@ -1,5 +1,7 @@
 #include "hphp/runtime/ext/icu/icu.h"
 
+#include "hphp/runtime/base/array-init.h"
+
 #include <unicode/uidna.h>
 #include <unicode/parseerr.h>
 
@@ -101,31 +103,33 @@ static Variant doIdnTranslateUTS46(const String& domain, int64_t options,
   auto capacity = result.capacity() + 1;
   if (toUtf8) {
     len = uidna_nameToUnicodeUTF8(idna, domain.c_str(), domain.size(),
-                                  result.bufferSlice().ptr, capacity,
+                                  result.mutableData(), capacity,
                                   &info, &error);
   } else {
     len = uidna_nameToASCII_UTF8(idna, domain.c_str(), domain.size(),
-                                 result.bufferSlice().ptr, capacity,
+                                 result.mutableData(), capacity,
                                  &info, &error);
   }
+  // retInfo will be empty array in case of error
+  retInfo.assignIfRef(Variant(staticEmptyArray()));
   if (len > capacity) {
-    s_intl_error->setError(U_INTERNAL_PROGRAM_ERROR);
+    s_intl_error->setError(U_IDNA_DOMAIN_NAME_TOO_LONG_ERROR);
     return false;
   }
   if (U_FAILURE(error)) {
     s_intl_error->setError(error);
     return false;
   }
-  if (info.errors) {
-    return false;
-  }
   result.setSize(len);
 
   ArrayInit arr(3, ArrayInit::Map{});
   arr.set(s_result, result);
-  arr.set(s_isTransitionalDifferent, info.isTransitionalDifferent);
+  arr.set(s_isTransitionalDifferent, (bool)info.isTransitionalDifferent);
   arr.set(s_errors, (long)info.errors);
-  retInfo = arr.toVariant();
+  retInfo.assignIfRef(arr.toVariant());
+  if (info.errors) {
+    return false;
+  }
   return result;
 
 #else
@@ -162,10 +166,6 @@ static Variant HHVM_FUNCTION(idn_to_utf8, const String& domain,
 
 /////////////////////////////////////////////////////////////////////////////
 
-const StaticString
-  s_INTL_IDNA_VARIANT_2003("INTL_IDNA_VARIANT_2003"),
-  s_INTL_IDNA_VARIANT_UTS46("INTL_IDNA_VARIANT_UTS46");
-
 void IntlExtension::initMisc() {
   HHVM_FE(intl_get_error_code);
   HHVM_FE(intl_get_error_message);
@@ -175,10 +175,63 @@ void IntlExtension::initMisc() {
   HHVM_FE(idn_to_ascii);
   HHVM_FE(idn_to_utf8);
 
-  Native::registerConstant<KindOfInt64>(s_INTL_IDNA_VARIANT_2003.get(),
-                                          INTL_IDNA_VARIANT_2003);
-  Native::registerConstant<KindOfInt64>(s_INTL_IDNA_VARIANT_UTS46.get(),
-                                          INTL_IDNA_VARIANT_UTS46);
+  HHVM_RC_INT_SAME(INTL_IDNA_VARIANT_2003);
+  HHVM_RC_INT_SAME(INTL_IDNA_VARIANT_UTS46);
+
+  HHVM_RC_INT_SAME(U_IDNA_ACE_PREFIX_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_CHECK_BIDI_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_DOMAIN_NAME_TOO_LONG_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_ERROR_LIMIT);
+  HHVM_RC_INT_SAME(U_IDNA_ERROR_START);
+  HHVM_RC_INT_SAME(U_IDNA_LABEL_TOO_LONG_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_PROHIBITED_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_STD3_ASCII_RULES_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_UNASSIGNED_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_VERIFICATION_ERROR);
+  HHVM_RC_INT_SAME(U_IDNA_ZERO_LENGTH_LABEL_ERROR);
+
+#define UHHVM_RC_INT_SAME(cns) HHVM_RC_INT(cns, U ## cns)
+  UHHVM_RC_INT_SAME(IDNA_DEFAULT);
+  UHHVM_RC_INT_SAME(IDNA_ALLOW_UNASSIGNED);
+  UHHVM_RC_INT_SAME(IDNA_USE_STD3_RULES);
+#ifdef UIDNA_INFO_INITIALIZER /* ICU 46 */
+  UHHVM_RC_INT_SAME(IDNA_CHECK_BIDI);
+  UHHVM_RC_INT_SAME(IDNA_CHECK_CONTEXTJ);
+  UHHVM_RC_INT_SAME(IDNA_NONTRANSITIONAL_TO_ASCII);
+  UHHVM_RC_INT_SAME(IDNA_NONTRANSITIONAL_TO_UNICODE);
+
+  UHHVM_RC_INT_SAME(IDNA_ERROR_EMPTY_LABEL);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_LABEL_TOO_LONG);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_DOMAIN_NAME_TOO_LONG);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_LEADING_HYPHEN);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_TRAILING_HYPHEN);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_HYPHEN_3_4);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_LEADING_COMBINING_MARK);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_DISALLOWED);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_PUNYCODE);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_LABEL_HAS_DOT);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_INVALID_ACE_LABEL);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_BIDI);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_CONTEXTJ);
+#endif
+#ifdef UIDNA_CHECK_CONTEXTO /* ICU 49 */
+  UHHVM_RC_INT_SAME(IDNA_CHECK_CONTEXTO);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_CONTEXTO_PUNCTUATION);
+  UHHVM_RC_INT_SAME(IDNA_ERROR_CONTEXTO_DIGITS);
+#endif
+#undef UHHVM_RC_INT_SAME
+
+  /* Constants not found in ICU library */
+  HHVM_RC_INT(IDNA_CONTAINS_ACE_PREFIX, 8);
+  HHVM_RC_INT(IDNA_CONTAINS_MINUS, 4);
+  HHVM_RC_INT(IDNA_CONTAINS_NON_LDH, 3);
+  HHVM_RC_INT(IDNA_ICONV_ERROR, 9);
+  HHVM_RC_INT(IDNA_INVALID_LENGTH, 5);
+  HHVM_RC_INT(IDNA_MALLOC_ERROR, 201);
+  HHVM_RC_INT(IDNA_NO_ACE_PREFIX, 6);
+  HHVM_RC_INT(IDNA_PUNYCODE_ERROR, 2);
+  HHVM_RC_INT(IDNA_ROUNDTRIP_VERIFY_ERROR, 7);
+  HHVM_RC_INT(IDNA_STRINGPREP_ERROR, 1);
 
   loadSystemlib("icu_misc");
 }

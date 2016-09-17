@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,15 +13,18 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/debugger/cmd/cmd_list.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
-#include "hphp/runtime/debugger/cmd/cmd_info.h"
 #include "hphp/runtime/base/file.h"
+#include "hphp/runtime/debugger/cmd/cmd_info.h"
+#include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -175,7 +178,6 @@ const StaticString
 bool CmdList::listFunctionOrClass(DebuggerClient &client) {
   assert(client.argCount() == 1);
   auto cmdInfo = std::make_shared<CmdInfo>();
-  DebuggerCommandPtr deleter(cmdInfo);
   std::string subsymbol;
   cmdInfo->parseOneArg(client, subsymbol);
   auto cmd = client.xend<CmdInfo>(cmdInfo.get());

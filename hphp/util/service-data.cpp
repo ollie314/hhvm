@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -123,8 +123,7 @@ void ExportedHistogram::exportAll(const std::string& prefix,
 
 namespace detail {
 template <class ClassWithPrivateDestructor>
-class FriendDeleter {
- public:
+struct FriendDeleter {
   template <class... Args>
   explicit FriendDeleter(Args&&... args)
       : m_instance(new ClassWithPrivateDestructor(
@@ -197,8 +196,7 @@ Value* getOrCreateWithArgs(tbb::concurrent_unordered_map<Key, Value*>& map,
   return result.first->second;
 }
 
-class Impl {
- public:
+struct Impl {
   ExportedCounter* createCounter(const std::string& name) {
     return getOrCreateWithArgs(m_counterMap, name);
   }
@@ -234,6 +232,15 @@ class Impl {
 
     for (auto& histogram : m_histogramMap) {
       histogram.second->exportAll(histogram.first, statsMap);
+    }
+  }
+
+  folly::Optional<int64_t> exportCounterByKey(std::string& key) {
+    ExportedCounterMap::const_iterator it = m_counterMap.find(key);
+    if (it != m_counterMap.end()) {
+      return folly::Optional<int64_t>(it->second->getValue());
+    } else {
+      return folly::Optional<int64_t>();
     }
   }
 
@@ -320,6 +327,10 @@ ExportedHistogram* createHistogram(
 
 void exportAll(std::map<std::string, int64_t>& statsMap) {
   return getServiceDataInstance().exportAll(statsMap);
+}
+
+folly::Optional<int64_t> exportCounterByKey(std::string& key) {
+  return getServiceDataInstance().exportCounterByKey(key);
 }
 
 }  // namespace ServiceData.

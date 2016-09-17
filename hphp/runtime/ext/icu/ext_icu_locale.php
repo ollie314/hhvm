@@ -243,7 +243,7 @@ class Locale {
    * @return string - The closest matching language tag or default
    *   value.
    */
-  <<__Native>>
+  <<__Native, __ParamCoerceModeFalse>>
   public static function lookup(array $langtag,
                                 string $locale,
                                 bool $canonicalize = false,
@@ -504,7 +504,7 @@ function locale_get_script(string $locale): mixed {
 function locale_lookup(array $langtag,
                        string $locale,
                        bool $canonicalize = false,
-                       string $default): string {
+                       string $default = ""): string {
   return Locale::lookup($langtag, $locale, $canonicalize, $default);
 }
 

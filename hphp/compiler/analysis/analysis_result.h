@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,7 +29,6 @@
 #include "hphp/util/string-bag.h"
 #include "hphp/util/thread-local.h"
 
-#include <boost/graph/adjacency_list.hpp>
 #include <tbb/concurrent_hash_map.h>
 #include <atomic>
 #include <map>
@@ -42,15 +41,15 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 
-DECLARE_BOOST_TYPES(ClassScope);
+DECLARE_EXTENDED_BOOST_TYPES(ClassScope);
 DECLARE_EXTENDED_BOOST_TYPES(FileScope);
 DECLARE_BOOST_TYPES(FunctionScope);
-DECLARE_BOOST_TYPES(Location);
 DECLARE_BOOST_TYPES(AnalysisResult);
 DECLARE_BOOST_TYPES(ScalarExpression);
 
-class AnalysisResult : public BlockScope, public FunctionContainer {
-public:
+struct UnitEmitter;
+
+struct AnalysisResult : BlockScope, FunctionContainer {
   /**
    * There are multiple passes over our syntax trees. This lists all of them.
    */
@@ -66,12 +65,6 @@ public:
     FirstPreOptimize,
 
     CodeGen,
-  };
-
-  enum FindClassBy {
-    ClassName,
-    MethodName,
-    PropertyName
   };
 
   enum GlobalSymbolType {
@@ -90,8 +83,7 @@ public:
     GlobalSymbolTypeCount
   };
 
-  class Locker {
-  public:
+  struct Locker {
     explicit Locker(const AnalysisResult *ar) :
         m_ar(const_cast<AnalysisResult*>(ar)),
         m_mutex(m_ar->getMutex()) {
@@ -149,7 +141,6 @@ public:
 
   int getFunctionCount() const;
   int getClassCount() const;
-  void countReturnTypes(std::map<std::string, int> &counts);
 
   void addEntryPoint(const std::string &name);
   void addEntryPoints(const std::vector<std::string> &names);
@@ -159,36 +150,15 @@ public:
   void addSystemFunction(FunctionScopeRawPtr fs);
   void addSystemClass(ClassScopeRawPtr cs);
   void analyzeProgram(bool system = false);
-  void analyzeIncludes();
   void analyzeProgramFinal();
-  void analyzePerfectVirtuals();
   void dump();
 
-  void docJson(const std::string &filename);
   void visitFiles(void (*cb)(AnalysisResultPtr, StatementPtr, void*),
                   void *data);
 
   void getScopesSet(BlockScopeRawPtrQueue &v);
 
   void preOptimize();
-
-  /**
-   * Force all class variables to be variants, since l-val or reference
-   * of dynamic properties are used.
-   */
-  void forceClassVariants(
-      ClassScopePtr curScope,
-      bool doStatic,
-      bool acquireLocks = false);
-
-  /**
-   * Force specified variable of all classes to be variants.
-   */
-  void forceClassVariants(
-      const std::string &name,
-      ClassScopePtr curScope,
-      bool doStatic,
-      bool acquireLocks = false);
 
   /**
    * Code generation functions.
@@ -208,8 +178,9 @@ public:
   void parseOnDemandByConstant(const std::string &name) const {
     parseOnDemandBy(name, Option::AutoloadConstMap);
   }
+  template <class Map>
   void parseOnDemandBy(const std::string &name,
-                       const std::map<std::string,std::string>& amap) const;
+                       const Map& amap) const;
   FileScopePtr findFileScope(const std::string &name) const;
   const StringToFileScopePtrMap &getAllFiles() { return m_files;}
   const std::vector<FileScopePtr> &getAllFilesVector() {
@@ -226,45 +197,20 @@ public:
   void declareUnknownClass(const std::string &name);
   bool declareConst(FileScopePtr fs, const std::string &name);
 
-  /**
-   * Dependencies
-   */
-  void link(FileScopePtr user, FileScopePtr provider);
-  bool addClassDependency(FileScopePtr usingFile,
-                          const std::string &className);
-  bool addFunctionDependency(FileScopePtr usingFile,
-                             const std::string &functionName);
-  bool addIncludeDependency(FileScopePtr usingFile,
-                            const std::string &includeFilename);
-  bool addConstantDependency(FileScopePtr usingFile,
-                             const std::string &constantName);
-
   ClassScopePtr findClass(const std::string &className) const;
-  ClassScopePtr findClass(const std::string &className,
-                          FindClassBy by);
-
-  /*
-   * Returns: whether the given name is the name of any type aliases
-   * in the whole program.
-   */
-  bool isTypeAliasName(const std::string& name) const {
-    return m_typeAliasNames.count(name);
-  }
 
   /**
    * Find all the redeclared classes by the name, excluding system classes.
    * Note that system classes cannot be redeclared.
    */
-  const ClassScopePtrVec &findRedeclaredClasses(
+  const std::vector<ClassScopePtr>& findRedeclaredClasses(
     const std::string &className) const;
 
   /**
    * Find all the classes by the name, including system classes.
    */
-  ClassScopePtrVec findClasses(const std::string &className) const;
-  bool classMemberExists(const std::string &name, FindClassBy by) const;
+  std::vector<ClassScopePtr> findClasses(const std::string &className) const;
   ClassScopePtr findExactClass(ConstructPtr cs, const std::string &name) const;
-  bool checkClassPresent(ConstructPtr cs, const std::string &name) const;
   FunctionScopePtr findFunction(const std::string &funcName) const ;
   BlockScopeConstPtr findConstantDeclarer(const std::string &constName) const {
     return const_cast<AnalysisResult*>(this)->findConstantDeclarer(constName);
@@ -313,6 +259,8 @@ public:
   StringToClassScopePtrVecMap getExtensionClasses();
   void addInteger(int64_t n);
 
+  void addHhasFile(std::unique_ptr<UnitEmitter>&& ue);
+  std::vector<std::unique_ptr<UnitEmitter>> getHhasFiles();
 private:
   std::function<void(AnalysisResultPtr)> m_finish;
   Package *m_package;
@@ -321,7 +269,8 @@ private:
   std::set<std::pair<ConstructPtr, FileScopePtr> > m_nsFallbackFuncs;
   Phase m_phase;
   StringToFileScopePtrMap m_files;
-  FileScopePtrVec m_fileScopes;
+  std::vector<FileScopePtr> m_fileScopes;
+  std::vector<std::unique_ptr<UnitEmitter>> m_hhasFiles;
 
   StringBag m_extraCodeFileNames;
   std::map<std::string, std::string> m_extraCodes;
@@ -330,7 +279,6 @@ private:
   StringToFunctionScopePtrMap m_functionDecs;
   StringToFunctionScopePtrVecMap m_functionReDecs;
   StringToClassScopePtrVecMap m_classDecs;
-  StringToClassScopePtrVecMap m_methodToClassDecs;
   StringToFileScopePtrMap m_constDecs;
   std::set<std::string> m_constRedeclared;
 
@@ -341,9 +289,7 @@ private:
   // Names of type aliases.
   std::set<std::string> m_typeAliasNames;
 
-  bool m_classForcedVariants[2];
-
-  StatementPtrVec m_stmts;
+  std::vector<StatementPtr> m_stmts;
   StatementPtr m_stmt;
 
   std::string m_outputPath;
@@ -359,15 +305,7 @@ public:
   }
 
 private:
-  BlockScopePtrVec m_ignoredScopes;
-
-  typedef boost::adjacency_list<boost::setS, boost::vecS> Graph;
-  typedef boost::graph_traits<Graph>::vertex_descriptor vertex_descriptor;
-  typedef boost::graph_traits<Graph>::adjacency_iterator adjacency_iterator;
-  Mutex m_depGraphMutex;
-  Graph m_depGraph;
-  typedef std::map<vertex_descriptor, FileScopePtr> VertexToFileScopePtrMap;
-  VertexToFileScopePtrMap m_fileVertMap;
+  std::vector<BlockScopePtr> m_ignoredScopes;
 
   /**
    * Checks whether the file is in one of the on-demand parsing directories.
@@ -409,221 +347,9 @@ public:
   static DECLARE_THREAD_LOCAL(BlockScopeRawPtrFlagsHashMap,
                               s_changedScopesMapThreadLocal);
 
-#ifdef HPHP_INSTRUMENT_PROCESS_PARALLEL
-  static std::atomic<int>                     s_NumDoJobCalls;
-  static ConcurrentBlockScopeRawPtrIntHashMap s_DoJobUniqueScopes;
-  static std::atomic<int>                     s_NumForceRerunGlobal;
-  static std::atomic<int>                     s_NumReactivateGlobal;
-  static std::atomic<int>                     s_NumForceRerunUseKinds;
-  static std::atomic<int>                     s_NumReactivateUseKinds;
-#endif /* HPHP_INSTRUMENT_PROCESS_PARALLEL */
-
 private:
-  template <typename Visitor>
-  void processScopesParallel(const char *id, void *opaque = nullptr);
-
-  template <typename Visitor>
-  void preWaitCallback(bool first,
-                       const BlockScopeRawPtrQueue &scopes,
-                       void *opaque);
-
-  template <typename Visitor>
-  bool postWaitCallback(bool first,
-                        bool again,
-                        const BlockScopeRawPtrQueue &scopes,
-                        void *opaque);
+  void processScopesParallel(const char* id, void* context = nullptr);
 };
-
-///////////////////////////////////////////////////////////////////////////////
-// Type Inference
-
-class RescheduleException : public Exception {
-public:
-  explicit RescheduleException(BlockScopeRawPtr scope) :
-    Exception(), m_scope(scope) {}
-  BlockScopeRawPtr &getScope() { return m_scope; }
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  static std::atomic<int> s_NumReschedules;
-  static std::atomic<int> s_NumForceRerunSelfCaller;
-  static std::atomic<int> s_NumRetTypesChanged;
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-private:
-  BlockScopeRawPtr m_scope;
-};
-
-class SetCurrentScope {
-public:
-  explicit SetCurrentScope(BlockScopeRawPtr scope) {
-    assert(!((*AnalysisResult::s_currentScopeThreadLocal).get()));
-    *AnalysisResult::s_currentScopeThreadLocal = scope;
-    scope->setInVisitScopes(true);
-  }
-  ~SetCurrentScope() {
-    (*AnalysisResult::s_currentScopeThreadLocal)->setInVisitScopes(false);
-    AnalysisResult::s_currentScopeThreadLocal.destroy();
-  }
-};
-
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-typedef std::pair < const char *, int > LEntry;
-
-struct LEntryHasher {
-  bool equal(const LEntry &l1, const LEntry &l2) const {
-    assert(l1.first);
-    assert(l2.first);
-    return l1.second == l2.second &&
-           strcmp(l1.first, l2.first) == 0;
-  }
-  size_t hash(const LEntry &l) const {
-    assert(l.first);
-    return hash_string(l.first) ^ l.second;
-  }
-};
-
-typedef tbb::concurrent_hash_map < LEntry, int, LEntryHasher >
-        LProfileMap;
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-
-class BaseTryLock {
-  friend class TryLock;
-  friend class ConditionalTryLock;
-public:
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  static LProfileMap s_LockProfileMap;
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-private:
-  inline bool acquireImpl(BlockScopeRawPtr scopeToLock) {
-    // A class scope can NEVER grab a lock on a function scope
-    BlockScopeRawPtr current ATTRIBUTE_UNUSED =
-      *(AnalysisResult::s_currentScopeThreadLocal.get());
-    assert(current);
-    assert(!current->is(BlockScope::ClassScope) ||
-           !scopeToLock->is(BlockScope::FunctionScope));
-    return m_mutex.tryLock();
-  }
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  BaseTryLock(BlockScopeRawPtr scopeToLock,
-              const char * fromFunction,
-              int fromLine,
-              bool lockCondition = true,
-              bool profile = true)
-    : m_profiler(profile),
-      m_mutex(scopeToLock->getInferTypesMutex()),
-      m_acquired(false) {
-    if (LIKELY(lockCondition)) {
-      bool success = acquireImpl(scopeToLock);
-      if (UNLIKELY(!success)) {
-        // put entry in profiler
-        LProfileMap::accessor acc;
-        LEntry key(fromFunction, fromLine);
-        if (!s_LockProfileMap.insert(acc, key)) {
-          // pre-existing
-          acc->second++;
-        } else {
-          acc->second = 1;
-        }
-        // could not acquire lock, throw reschedule exception
-        throw RescheduleException(scopeToLock);
-      }
-      assert(success);
-      m_acquired = true;
-      m_mutex.assertOwnedBySelf();
-    }
-  }
-#else
-  explicit BaseTryLock(BlockScopeRawPtr scopeToLock,
-                       bool lockCondition = true,
-                       bool profile = true)
-    : m_profiler(profile),
-      m_mutex(scopeToLock->getInferTypesMutex()),
-      m_acquired(false) {
-    if (LIKELY(lockCondition)) {
-      bool success = acquireImpl(scopeToLock);
-      if (UNLIKELY(!success)) {
-        // could not acquire lock, throw reschedule exception
-        throw RescheduleException(scopeToLock);
-      }
-      assert(success);
-      m_acquired = true;
-      m_mutex.assertOwnedBySelf();
-    }
-  }
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-
-  ~BaseTryLock() {
-    if (m_acquired) m_mutex.unlock();
-  }
-
-  LockProfiler     m_profiler;
-  InferTypesMutex& m_mutex;
-  bool             m_acquired;
-};
-
-class TryLock : public BaseTryLock {
-public:
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  TryLock(BlockScopeRawPtr scopeToLock,
-          const char * fromFunction,
-          int fromLine,
-          bool profile = true) :
-    BaseTryLock(scopeToLock, fromFunction, fromLine, true, profile) {}
-#else
-  explicit TryLock(BlockScopeRawPtr scopeToLock,
-                   bool profile = true) :
-    BaseTryLock(scopeToLock, true, profile) {}
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-};
-
-class ConditionalTryLock : public BaseTryLock {
-public:
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  ConditionalTryLock(BlockScopeRawPtr scopeToLock,
-                     const char * fromFunction,
-                     int fromLine,
-                     bool condition,
-                     bool profile = true) :
-    BaseTryLock(scopeToLock, fromFunction, fromLine, condition, profile) {}
-#else
-  ConditionalTryLock(BlockScopeRawPtr scopeToLock,
-                     bool condition,
-                     bool profile = true) :
-    BaseTryLock(scopeToLock, condition, profile) {}
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-};
-
-#define GET_LOCK(scopeToLock) \
-  SimpleLock _lock((scopeToLock)->getInferTypesMutex())
-
-#define COND_GET_LOCK(scopeToLock, condition) \
-  SimpleConditionalLock _clock((scopeToLock)->getInferTypesMutex(), \
-                               (condition))
-
-#define GET_LOCK_THIS() \
-  SimpleLock _lock(this->getInferTypesMutex())
-
-#define COND_GET_LOCK_THIS(condition) \
-  SimpleConditionalLock _clock(this->getInferTypesMutex(), (condition))
-
-#ifdef HPHP_INSTRUMENT_TYPE_INF
-  #define TRY_LOCK(scopeToLock) \
-    TryLock _tl((scopeToLock), __PRETTY_FUNCTION__, __LINE__)
-
-  #define COND_TRY_LOCK(scopeToLock, condition) \
-    ConditionalTryLock _ctl((scopeToLock), __PRETTY_FUNCTION__, \
-                            __LINE__, condition)
-#else
-  #define TRY_LOCK(scopeToLock) \
-    TryLock _tl((scopeToLock))
-
-  #define COND_TRY_LOCK(scopeToLock, condition) \
-    ConditionalTryLock _ctl((scopeToLock), (condition))
-#endif /* HPHP_INSTRUMENT_TYPE_INF */
-
-#define TRY_LOCK_THIS() \
-  TRY_LOCK(BlockScopeRawPtr(this))
-
-#define COND_TRY_LOCK_THIS(condition) \
-  COND_TRY_LOCK(BlockScopeRawPtr(this), condition)
 
 ///////////////////////////////////////////////////////////////////////////////
 }

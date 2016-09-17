@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,26 +19,33 @@
 
 #include <folly/Format.h>
 
+#include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/srckey.h"
 
 namespace HPHP { namespace Trace {
 
 void dumpEntry(const RingBufferEntry* e) {
+  if (e->m_type == RBTypeUninit) return;
+
   std::cerr <<
     folly::format("{:#x} {:10} {:20}",
                   e->m_threadId, e->m_seq, ringbufferName(e->m_type));
+  auto const msgFormat = "{:50} {:#16x}\n";
 
   switch (e->m_type) {
     case RBTypeUninit: return;
     case RBTypeMsg:
-    case RBTypeFuncPrologueTry: {
+    case RBTypeFuncPrologue: {
       // The strings in thread-private ring buffers are not null-terminated;
       // we also can't trust their length, since they might wrap around.
-      fwrite(e->m_msg,
-             std::min(size_t(e->m_len), strlen(e->m_msg)),
-             1,
-             stderr);
-      fprintf(stderr, "\n");
+      auto len = std::min(size_t(e->m_len), strlen(e->m_msg));
+
+      // We append our own newline so ignore any newlines in the msg.
+      while (len > 0 && e->m_msg[len - 1] == '\n') --len;
+      std::cerr <<
+        folly::format(msgFormat,
+                      folly::StringPiece(e->m_msg, e->m_msg + len),
+                      e->m_truncatedRip);
       break;
     }
     case RBTypeFuncEntry:
@@ -57,14 +64,22 @@ void dumpEntry(const RingBufferEntry* e) {
       // entries and exits can get confused.
       indentDepth -= e->m_type == RBTypeFuncExit;
       if (indentDepth < 0) indentDepth = 0;
-      std::cerr << folly::format("{}{}\n",
-                                 std::string(indentDepth * 4, ' '), e->m_msg);
+      auto const indentedName =
+        folly::sformat("{}{}", std::string(indentDepth * 4, ' '), e->m_msg);
+      std::cerr << folly::format(msgFormat,
+                                 indentedName, e->m_truncatedRip);
       indentDepth += e->m_type == RBTypeFuncEntry;
+      break;
+    }
+    case RBTypeServiceReq: {
+      auto req = static_cast<jit::ServiceRequest>(e->m_sk);
+      std::cerr << folly::format(msgFormat,
+                                 jit::svcreq::to_name(req), e->m_data);
       break;
     }
     default: {
       std::cerr <<
-        folly::format("{:50} {:#16x}\n",
+        folly::format(msgFormat,
                       showShort(SrcKey::fromAtomicInt(e->m_sk)),
                       e->m_data);
       break;

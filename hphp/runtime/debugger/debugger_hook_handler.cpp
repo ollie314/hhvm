@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,7 +36,10 @@ static void addBreakPointInUnit(BreakPointInfoPtr bp, Unit* unit) {
   bp->m_bindState = BreakPointInfo::KnownToBeValid;
   TRACE(3, "Add to breakpoint filter for %s:%d, unit %p:\n",
       unit->filepath()->data(), bp->m_line1, unit);
-  phpAddBreakPointRange(unit, offsets);
+
+  assertx(offsets.size() > 0);
+  auto bpOffset = offsets[0].base;
+  phpAddBreakPoint(unit, bpOffset);
 }
 
 void proxySetBreakPoints(DebuggerProxy* proxy) {
@@ -79,7 +82,7 @@ void proxySetBreakPoints(DebuggerProxy* proxy) {
       for (auto& kv : g_context->m_evaledFiles) {
         auto const unit = kv.second;
         if (!BreakPointInfo::MatchFile(fileName,
-                                       unit->filepath()->data())) {
+                            unit->filepath()->toCppString())) {
           continue;
         }
         addBreakPointInUnit(bp, unit);
@@ -117,12 +120,12 @@ void proxySetBreakPoints(DebuggerProxy* proxy) {
   }
 }
 
-DebugHookHandler* DebuggerHookHandler::GetInstance() {
-  static DebugHookHandler* instance = new DebuggerHookHandler;
+DebuggerHook* HphpdHook::GetInstance() {
+  static DebuggerHook* instance = new HphpdHook();
   return instance;
 }
 
-void DebuggerHookHandler::onFileLoad(Unit* unit) {
+void HphpdHook::onFileLoad(Unit* unit) {
   DebuggerProxy* proxy = Debugger::GetProxy().get();
   if (proxy == nullptr) return;
 
@@ -133,13 +136,13 @@ void DebuggerHookHandler::onFileLoad(Unit* unit) {
   for (unsigned int i = 0; i < bps.size(); i++) {
     BreakPointInfoPtr bp = bps[i];
     if (BreakPointInfo::MatchFile(bp->m_file,
-                                        unit->filepath()->data())) {
+                                        unit->filepath()->toCppString())) {
       addBreakPointInUnit(bp, unit);
     }
   }
 }
 
-void DebuggerHookHandler::onDefClass(const Class* cls) {
+void HphpdHook::onDefClass(const Class* cls) {
   // Make sure we have a proxy
   DebuggerProxy* proxy = Debugger::GetProxy().get();
   if (proxy == nullptr) return;
@@ -169,7 +172,7 @@ void DebuggerHookHandler::onDefClass(const Class* cls) {
   }
 }
 
-void DebuggerHookHandler::onDefFunc(const Func* f) {
+void HphpdHook::onDefFunc(const Func* f) {
   // Make sure we have a proxy
   DebuggerProxyPtr proxy = Debugger::GetProxy();
   if (proxy == nullptr) return;

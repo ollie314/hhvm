@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -46,12 +46,14 @@ StatementPtr UseTraitStatement::clone() {
 // parser functions
 
 void UseTraitStatement::onParseRecur(AnalysisResultConstPtr ar,
+                                     FileScopeRawPtr fs,
                                      ClassScopePtr scope) {
   if (scope->isInterface()) {
-    parseTimeFatal(Compiler::InvalidTraitStatement,
+    parseTimeFatal(fs,
+                   Compiler::InvalidTraitStatement,
                    "Interfaces cannot use traits");
   }
-  vector<string> usedTraits;
+  std::vector<std::string> usedTraits;
   getUsedTraitNames(usedTraits);
   for (auto &t : usedTraits) {
     ar->parseOnDemandByClass(toLower(t));
@@ -103,19 +105,6 @@ void UseTraitStatement::setNthKid(int n, ConstructPtr cp) {
       assert(false);
       break;
   }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void UseTraitStatement::outputCodeModel(CodeGenerator &cg) {
-  cg.printObjectHeader("UseTraitStatement", 3);
-  cg.printPropertyHeader("typeExpressions");
-  cg.printTypeExpressionVector(m_exp);
-  cg.printPropertyHeader("block");
-  cg.printAsBlock(m_stmt);
-  cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
-  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

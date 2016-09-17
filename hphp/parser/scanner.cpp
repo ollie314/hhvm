@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,13 @@
 
 #include <fstream>
 
+#include "hphp/util/assertions.h"
 #include "hphp/util/text-util.h"
 #include "hphp/util/logger.h"
 #include "hphp/zend/zend-string.h"
 #include "hphp/zend/zend-html.h"
 #include "hphp/util/string-vsnprintf.h"
+#include "hphp/parser/parse-time-fatal-exception.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -88,14 +90,28 @@ void ScannerToken::xhpDecode() {
 Scanner::Scanner(const std::string& filename, int type, bool md5 /* = false */)
     : m_filename(filename), m_stream(nullptr), m_source(nullptr), m_len(0), m_pos(0),
       m_state(Start), m_type(type), m_yyscanner(nullptr), m_token(nullptr),
-      m_loc(nullptr), m_lastToken(-1), m_isHHFile(0), m_lookaheadLtDepth(0),
-      m_listener(nullptr) {
+      m_loc(nullptr), m_lastToken(-1), m_isHHFile(0), m_lookaheadLtDepth(0) {
+#ifdef _MSC_VER
+  // I really don't know why this doesn't work properly with MSVC,
+  // but I know this fixes the problem, so use it instead.
+  std::ifstream ifs =
+    std::ifstream(m_filename, std::ifstream::in | std::ifstream::binary);
+  if (ifs.fail()) {
+    throw FileOpenException(m_filename);
+  }
+
+  std::stringstream ss;
+  ss << ifs.rdbuf();
+  m_stream = new std::istringstream(ss.str());
+  m_streamOwner = true;
+#else
   m_stream = new std::ifstream(m_filename);
   m_streamOwner = true;
   if (m_stream->fail()) {
     delete m_stream; m_stream = nullptr;
     throw FileOpenException(m_filename);
   }
+#endif
   if (md5) computeMd5();
   init();
 }
@@ -105,8 +121,7 @@ Scanner::Scanner(std::istream &stream, int type,
                  bool md5 /* = false */)
     : m_filename(fileName), m_source(nullptr), m_len(0), m_pos(0),
       m_state(Start), m_type(type), m_yyscanner(nullptr), m_token(nullptr),
-      m_loc(nullptr), m_lastToken(-1), m_isHHFile(0), m_lookaheadLtDepth(0),
-      m_listener(nullptr) {
+      m_loc(nullptr), m_lastToken(-1), m_isHHFile(0), m_lookaheadLtDepth(0) {
   m_stream = &stream;
   m_streamOwner = false;
   if (md5) computeMd5();
@@ -118,7 +133,7 @@ Scanner::Scanner(const char *source, int len, int type,
     : m_filename(fileName), m_stream(nullptr), m_source(source), m_len(len),
       m_pos(0), m_state(Start), m_type(type), m_yyscanner(nullptr),
       m_token(nullptr), m_loc(nullptr), m_lastToken(-1), m_isHHFile(0),
-      m_lookaheadLtDepth(0), m_listener(nullptr) {
+      m_lookaheadLtDepth(0) {
   assert(m_source);
   m_streamOwner = false;
   if (md5) {
@@ -131,18 +146,18 @@ Scanner::Scanner(const char *source, int len, int type,
 }
 
 void Scanner::computeMd5() {
-  auto startpos = m_stream->tellg();
+  size_t startpos = m_stream->tellg();
   always_assert(startpos != -1 &&
                 startpos <= std::numeric_limits<int32_t>::max());
   m_stream->seekg(0, std::ios::end);
-  auto length = m_stream->tellg();
+  size_t length = m_stream->tellg();
   always_assert(length != -1 &&
                 length <= std::numeric_limits<int32_t>::max());
   m_stream->seekg(0, std::ios::beg);
-  char *ptr = (char*)malloc(length);
+  auto const ptr = (char*)malloc(length);
   m_stream->read(ptr, length);
   m_stream->seekg(startpos, std::ios::beg);
-  m_md5 = string_md5(ptr, length);
+  m_md5 = string_md5(folly::StringPiece{ptr, length});
   free(ptr);
 }
 
@@ -230,14 +245,26 @@ bool Scanner::nextIfToken(TokenStore::iterator& pos, int tok) {
 }
 
 bool Scanner::tryParseTypeList(TokenStore::iterator& pos) {
-  for (;;) {
+  for (int parsed = 0;; parsed++) {
     if (pos->t == '+' || pos->t == '-') {
       nextLookahead(pos);
     }
-    if (!tryParseNSType(pos)) return false;
-    if (pos->t == T_AS) {
+    auto cpPos = pos;
+    if (!tryParseNSType(cpPos)) {
+      if (parsed > 0) {
+        pos = cpPos;
+        return true;
+      } else {
+        return false;
+      }
+    }
+    pos = cpPos;
+
+    while (pos->t == T_AS || pos->t == T_SUPER) {
       nextLookahead(pos);
-      if (!tryParseNSType(pos)) return false;
+      if (!tryParseNSType(pos)) {
+        return false;
+      }
     }
     if (pos->t != ',') return true;
     nextLookahead(pos);
@@ -246,6 +273,7 @@ bool Scanner::tryParseTypeList(TokenStore::iterator& pos) {
 
 bool Scanner::tryParseNonEmptyLambdaParams(TokenStore::iterator& pos) {
   for (;; nextLookahead(pos)) {
+    if (pos->t == ')' || pos->t == T_LAMBDA_CP) return true;
     if (pos->t != T_VARIABLE) {
       if (pos->t == T_ELLIPSIS) {
         nextLookahead(pos);
@@ -344,8 +372,9 @@ void Scanner::parseApproxParamDefVal(TokenStore::iterator& pos) {
       case T_NAMESPACE:
       case T_SHAPE:
       case T_ARRAY:
-      case T_MIARRAY:
-      case T_MSARRAY:
+      case T_DICT:
+      case T_VEC:
+      case T_KEYSET:
       case T_FUNCTION:
       case T_DOUBLE_ARROW:
       case T_DOUBLE_COLON:
@@ -362,12 +391,21 @@ void Scanner::parseApproxParamDefVal(TokenStore::iterator& pos) {
 }
 
 bool Scanner::tryParseFuncTypeList(TokenStore::iterator& pos) {
-  for (;;) {
+  for (int parsed = 0;;parsed++) {
     if (pos->t == T_ELLIPSIS) {
       nextLookahead(pos);
       return true;
     }
-    if (!tryParseNSType(pos)) return false;
+    auto cpPos = pos;
+    if (!tryParseNSType(cpPos)) {
+      if (parsed > 0) {
+        pos = cpPos;
+        return true;
+      } else {
+        return false;
+      }
+    }
+    pos = cpPos;
     if (pos->t != ',') return true;
     nextLookahead(pos);
   }
@@ -418,12 +456,16 @@ Scanner::tryParseNSType(TokenStore::iterator& pos) {
   for (;;) {
     switch (pos->t) {
       case T_STRING:
+      case T_SUPER:
       case T_XHP_ATTRIBUTE:
       case T_XHP_CATEGORY:
       case T_XHP_CHILDREN:
       case T_XHP_REQUIRED:
       case T_ENUM:
       case T_ARRAY:
+      case T_DICT:
+      case T_VEC:
+      case T_KEYSET:
       case T_CALLABLE:
       case T_UNRESOLVED_TYPE:
       case T_UNRESOLVED_NEWTYPE:
@@ -452,7 +494,7 @@ Scanner::tryParseNSType(TokenStore::iterator& pos) {
       nextLookahead(pos);
       return true;
     }
-    if (pos->t != T_NS_SEPARATOR) {
+    if (pos->t != T_NS_SEPARATOR && pos->t != T_DOUBLE_COLON) {
       return true;
     }
     nextLookahead(pos);
@@ -505,6 +547,84 @@ static bool isUnresolved(int tokid) {
          tokid == T_UNRESOLVED_OP;
 }
 
+static bool isValidClassConstantName(int tokid) {
+  switch (tokid) {
+  case T_STRING:
+  case T_SUPER:
+  case T_XHP_ATTRIBUTE:
+  case T_XHP_CATEGORY:
+  case T_XHP_CHILDREN:
+  case T_XHP_REQUIRED:
+  case T_ENUM:
+  case T_CALLABLE:
+  case T_TRAIT:
+  case T_EXTENDS:
+  case T_IMPLEMENTS:
+  case T_STATIC:
+  case T_ABSTRACT:
+  case T_FINAL:
+  case T_PRIVATE:
+  case T_PROTECTED:
+  case T_PUBLIC:
+  case T_CONST:
+  case T_ENDDECLARE:
+  case T_ENDFOR:
+  case T_ENDFOREACH:
+  case T_ENDIF:
+  case T_ENDWHILE:
+  case T_LOGICAL_AND:
+  case T_GLOBAL:
+  case T_GOTO:
+  case T_INSTANCEOF:
+  case T_INSTEADOF:
+  case T_INTERFACE:
+  case T_NAMESPACE:
+  case T_NEW:
+  case T_LOGICAL_OR:
+  case T_LOGICAL_XOR:
+  case T_TRY:
+  case T_USE:
+  case T_VAR:
+  case T_EXIT:
+  case T_LIST:
+  case T_CLONE:
+  case T_INCLUDE:
+  case T_INCLUDE_ONCE:
+  case T_THROW:
+  case T_ARRAY:
+  case T_PRINT:
+  case T_ECHO:
+  case T_REQUIRE:
+  case T_REQUIRE_ONCE:
+  case T_RETURN:
+  case T_ELSE:
+  case T_ELSEIF:
+  case T_DEFAULT:
+  case T_BREAK:
+  case T_CONTINUE:
+  case T_SWITCH:
+  case T_YIELD:
+  case T_FUNCTION:
+  case T_IF:
+  case T_ENDSWITCH:
+  case T_FINALLY:
+  case T_FOR:
+  case T_FOREACH:
+  case T_DECLARE:
+  case T_CASE:
+  case T_DO:
+  case T_WHILE:
+  case T_AS:
+  case T_CATCH:
+  case T_DICT:
+  case T_VEC:
+  case T_KEYSET:
+    return true;
+  default:
+    return false;
+  }
+}
+
 int Scanner::getNextToken(ScannerToken &t, Location &l) {
   int tokid;
   bool la = !m_lookahead.empty();
@@ -534,7 +654,7 @@ int Scanner::getNextToken(ScannerToken &t, Location &l) {
     auto pos = m_lookahead.begin();
     auto typePos = pos;
     nextLookahead(pos);
-    if (pos->t == T_STRING) {
+    if (isValidClassConstantName(pos->t)) {
       typePos->t = tokid == T_UNRESOLVED_TYPE ? T_TYPE : T_NEWTYPE;
     } else {
       typePos->t = T_STRING;
@@ -642,15 +762,12 @@ void Scanner::warn(const char* fmt, ...) {
   va_end(ap);
 
   Logger::Warning("%s: %s (Line: %d, Char %d)", msg.c_str(),
-                  m_filename.c_str(), m_loc->line0, m_loc->char0);
+                  m_filename.c_str(), m_loc->r.line0, m_loc->r.char0);
 }
 
 void Scanner::incLoc(const char *rawText, int rawLeng, int type) {
   assert(rawText);
   assert(rawLeng > 0);
-  if (m_listener) {
-    m_token->setID(m_listener->publish(rawText, rawLeng, type));
-  }
 
   m_loc->cursor += rawLeng;
 
@@ -658,12 +775,12 @@ void Scanner::incLoc(const char *rawText, int rawLeng, int type) {
     case Start:
       break; // scanner set to (1, 1, 1, 1) already
     case NoLineFeed:
-      m_loc->line0 = m_loc->line1;
-      m_loc->char0 = m_loc->char1 + 1;
+      m_loc->r.line0 = m_loc->r.line1;
+      m_loc->r.char0 = m_loc->r.char1 + 1;
       break;
     case HadLineFeed:
-      m_loc->line0 = m_loc->line1 + 1;
-      m_loc->char0 = 1;
+      m_loc->r.line0 = m_loc->r.line1 + 1;
+      m_loc->r.char0 = 1;
       break;
   }
   const char *p = rawText;
@@ -672,11 +789,11 @@ void Scanner::incLoc(const char *rawText, int rawLeng, int type) {
       case Start:
         break; // scanner set to (1, 1, 1, 1) already
       case NoLineFeed:
-        m_loc->char1++;
+        m_loc->r.char1++;
         break;
       case HadLineFeed:
-        m_loc->line1++;
-        m_loc->char1 = 1;
+        m_loc->r.line1++;
+        m_loc->r.char1 = 1;
         break;
     }
     m_state = (*p++ == '\n' ? HadLineFeed : NoLineFeed);
@@ -743,6 +860,70 @@ std::string Scanner::escape(const char *str, int len, char quote_type) const {
                 output += ch;
                 output += str[i];
               }
+              break;
+            }
+            case 'u': {
+              // Unicode escape sequence
+              //   "\u{123456}"
+              if (str[i+1] != '{') {
+                // BC for "\u1234" passthrough
+                output += ch;
+                output += str[i];
+                break;
+              }
+
+              bool valid = true;
+              auto start = str + i + 2;
+              auto closebrace = strchr(start, '}');
+              if (closebrace > start) {
+                for (auto p = start; p < closebrace; ++p) {
+                  if (!isxdigit(*p)) {
+                    valid = false;
+                    break;
+                  }
+                }
+              } else {
+                valid = false;
+              }
+
+              auto fatal = [this](const char *msg) {
+                auto loc = getLocation();
+                return ParseTimeFatalException(
+                  loc->file,
+                  loc->r.line0,
+                  "%s", msg);
+              };
+              if (!valid) {
+                throw fatal("Invalid UTF-8 codepoint escape sequence");
+              }
+
+              std::string codepoint(start, closebrace - start);
+              char *end = nullptr;
+              int32_t uchar = strtol(codepoint.c_str(), &end, 16);
+              if ((end && *end) || (uchar > 0x10FFFF)) {
+                throw fatal(
+                  "Invalid UTF-8 codepoint escape sequence: "
+                  "Codepoint too large");
+              }
+              if (uchar <= 0x0007F) {
+                output += (char)uchar;
+              } else if (uchar <= 0x007FF) {
+                output += (char)(0xC0 | ( uchar >> 6         ));
+                output += (char)(0x80 | ( uchar        & 0x3F));
+              } else if (uchar <= 0x00FFFF) {
+                output += (char)(0xE0 | ( uchar >> 12        ));
+                output += (char)(0x80 | ((uchar >>  6) & 0x3F));
+                output += (char)(0x80 | ( uchar        & 0x3F));
+              } else if (uchar <= 0x10FFFF) {
+                output += (char)(0xF0 | ( uchar >> 18        ));
+                output += (char)(0x80 | ((uchar >> 12) & 0x3F));
+                output += (char)(0x80 | ((uchar >>  6) & 0x3F));
+                output += (char)(0x80 | ( uchar        & 0x3F));
+              } else {
+                not_reached();
+                assert(false);
+              }
+              i += codepoint.size() + 2 /* strlen("{}") */;
               break;
             }
             default: {

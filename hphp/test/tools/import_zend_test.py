@@ -61,24 +61,18 @@ no_import = (
     '/ext/mssql',
     '/ext/mysqlnd',
     '/ext/oci8',
-    '/ext/odbc',
     '/ext/pdo_dblib',
     '/ext/pdo_firebird',
     '/ext/pdo_oci',
-    '/ext/pdo_odbc',
     '/ext/pdo_pgsql',
     '/ext/pspell',
     '/ext/recode',
-    '/ext/shmop',
     '/ext/skeleton',
-    '/ext/snmp',
     '/ext/sybase_ct',
     '/ext/sysvmsg',
     '/ext/sysvsem',
     '/ext/sysvshm',
     '/ext/tidy',
-    '/ext/wddx',
-    '/ext/xmlrpc',
     '/sapi',
 
     # conscious decision not to match these
@@ -99,6 +93,11 @@ flaky_tests = (
 
     # our build machines have no members in group 0...
     '/ext/posix/tests/posix_getgrgid.php',
+
+    # Checking stat of ' ' races with mkdir_variation1
+    '/ext/standard/tests/file/lstat_stat_variation22.php',
+    '/ext/standard/tests/file/copy_variation3.php',
+    '/ext/standard/tests/file/file_exists_variation1.php',
 
     # concurrency issues
     '/ext/mysql/tests/001.php',
@@ -176,6 +175,9 @@ flaky_tests = (
     '/ext/ftp/tests/ftp_nb_fget_basic1.php',
 
     # flaky: t3851970
+    '/ext/sockets/tests/socket_write_params.php',
+    '/ext/sockets/tests/socket_bind_params.php',
+    '/ext/sockets/tests/socket_getpeername.php',
     '/ext/session/tests/009.php',
     '/ext/standard/tests/file/bug39538.php',
     '/ext/standard/tests/file/bug53848.php',
@@ -319,6 +321,15 @@ flaky_tests = (
     '/ext/soap/tests/schema/schema021.php',
     '/ext/soap/tests/schema/schema035.php',
     '/ext/standard/tests/network/http-stream.php',
+
+    # Socket based test that are possibly port clowny
+    # Github commit: 6ae44fc92acb63e7fa31b5fd4fcd4cf939c3ef54
+    '/ext/sockets/tests/socket_getsockname.php',
+
+    # Rely on system service configuration being a particular way.
+    '/ext/standard/tests/general_functions/getservbyname_variation9.php',
+    '/ext/standard/tests/general_functions/getservbyname_variation10.php',
+    '/ext/standard/tests/general_functions/getservbyport_variation1.php',
 )
 
 # Tests that work but not in repo mode
@@ -536,6 +547,9 @@ norepo_tests = (
     '/tests/lang/static_variation_001.php',
     '/tests/lang/static_variation_002.php',
 
+    # This test passes "by accident".
+    'ext/dom/tests/DOMNode_hasChildNodes.php',
+
     # These tests use eval(), which is banned in repo mode.
     '/Zend/tests/bug31102.php',
     '/Zend/tests/bug33116.php',
@@ -614,12 +628,24 @@ norepo_tests = (
     '/tests/lang/bug22690.php',
     '/tests/lang/bug24926.php',
 
+    # These tests use assert with a string argument, which is also basically
+    # eval.
+    '/ext/dom/tests/DOMNode_insertBefore_error2.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error3.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error4.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error5.php',
+    '/ext/dom/tests/DOMNode_insertBefore_error6.php',
+    '/tests/lang/bug23922.php',
+
     # This creates an interface with the same name as a builtin, which
     # hphpc doesn't correctly support AttrUnique flags on.
     '/Zend/tests/inter_06.php',
 
     # Tests use banned reflection features
     '/ext/reflection/tests/bug30146.php',
+
+    # Closure::bind.
+    '/Zend/tests/anon/013.php',
 )
 
 # Random other files that zend wants
@@ -668,6 +694,7 @@ other_files = (
     '/ext/dom/tests/xinclude.xml',
     '/ext/exif/tests/bug34704.jpg',
     '/ext/exif/tests/bug48378.jpeg',
+    '/ext/exif/tests/bug50845.jpg',
     '/ext/exif/tests/bug60150.jpg',
     '/ext/exif/tests/bug62523_1.jpg',
     '/ext/exif/tests/bug62523_2.jpg',
@@ -710,6 +737,7 @@ other_files = (
     '/ext/ftp/tests/cert.pem',
     '/ext/ftp/tests/server.inc',
     '/ext/ftp/tests/skipif.inc',
+    '/ext/gd/tests/bug37360.gif',
     '/ext/gd/tests/bug37346.gif',
     '/ext/gd/tests/bug38112.gif',
     '/ext/gd/tests/bug43121.gif',
@@ -726,6 +754,8 @@ other_files = (
     '/ext/gd/tests/test8859.ttf',
     '/ext/gd/tests/test.png',
     '/ext/gd/tests/Tuffy.ttf',
+    '/ext/gd/tests/libgd00094.xbm',
+    '/ext/gd/tests/logo_noise.png',
     '/ext/gettext/tests/locale/en/LC_CTYPE/dgettextTest.mo',
     '/ext/gettext/tests/locale/en/LC_CTYPE/dgettextTest.po',
     '/ext/gettext/tests/locale/en/LC_CTYPE/dgettextTest_switched.po',
@@ -743,6 +773,8 @@ other_files = (
     '/ext/gettext/tests/locale/en/LC_MESSAGES/messages.po',
     '/ext/gettext/tests/locale/fi/LC_MESSAGES/messages.mo',
     '/ext/gettext/tests/locale/fi/LC_MESSAGES/messages.po',
+    '/ext/iconv/tests/iconv_stream_filter.txt',
+    '/ext/iconv/tests/Quotes.UTF-8',
     '/ext/iconv/tests/skipif.inc',
     '/ext/imap/tests/skipif.inc',
     '/ext/interbase/tests/skipif.inc',
@@ -859,6 +891,7 @@ other_files = (
     '/ext/standard/tests/file/test2.csv',
     '/ext/standard/tests/file/test3.csv',
     '/ext/standard/tests/file/test.csv',
+    '/ext/standard/tests/filters/filter_errors.inc',
     '/ext/standard/tests/general_functions/004.data',
     '/ext/standard/tests/general_functions/bug49692.ini',
     '/ext/standard/tests/general_functions/bug52138.data',
@@ -1001,28 +1034,6 @@ other_files = (
     '/Zend/tests/use_function/includes/global_baz.php',
 )
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    "-o",
-    "--only",
-    type=str,
-    action='append',
-    help="only import tests whose path contains this substring."
-)
-parser.add_argument(
-    "--dirty",
-    action='store_true',
-    help="leave around test/zend/all directory."
-)
-parser.add_argument(
-    "-v",
-    "--verbose",
-    action='store_true',
-    help="print out extra stuff."
-)
-args = parser.parse_args()
-
-
 def mkdir_p(path):
     try:
         os.makedirs(path)
@@ -1036,8 +1047,10 @@ def walk(filename, dest_subdir):
     full_dest_filename = os.path.join(dest_subdir, dest_filename)
 
     # Exactly mirror zend's directories incase some tests depend on random crap.
-    # We'll only move things we want into 'good'
-    shutil.copyfile(filename, full_dest_filename)
+    # We'll only move things we want into 'good'. The condition below is in case
+    # of using --local on a file already in the current workind directory.
+    if os.path.abspath(filename) != os.path.abspath(full_dest_filename):
+        shutil.copyfile(filename, full_dest_filename)
 
     full_dest_filename = full_dest_filename.replace('.phpt', '.php')
 
@@ -1277,6 +1290,8 @@ def walk(filename, dest_subdir):
         test = test.replace('"*"', '__DIR__."/../../../../../../sample_dir/*"')
         test = test.replace('opendir(".")', 'opendir(__DIR__."/../../../../../../sample_dir/")')
         test = test.replace('is_dir($file)', 'is_dir(__DIR__."/../../../../../../sample_dir/".$file)')
+    if '/ext/standard/tests/file/touch_variation1.php' in full_dest_filename:
+        test = test.replace('touch.dat', 'touch_variation1.dat')
     if '/ext/standard/tests/file/bug45181.php' in full_dest_filename:
         test = test.replace('chdir("bug45181_x");', '$origdir = getcwd();\nchdir("bug45181_x");')
         test = test.replace('rmdir("bug45181_x");', 'rmdir($origdir . "/bug45181_x");')
@@ -1354,6 +1369,15 @@ def walk(filename, dest_subdir):
     if '/ext/json/tests/unsupported_type_error.php' in full_dest_filename:
         exp = exp.replace('resource(5)', 'resource(%d)')
         open(full_dest_filename + '.expectf', 'w').write(exp)
+    if ('/ext/gd/tests/imagegd_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagegd2_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagegif_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagepng_nullbyte_injection.php' in full_dest_filename or
+       '/ext/gd/tests/imagewbmp_nullbyte_injection.php' in full_dest_filename):
+        test = test.replace("'/php-gdtest';\nif",
+                            "'/php-gdtest'.rand();\nif")
+        test = test.replace("$tempdir = sys_get_temp_dir(). '/php-gdtest';\n",
+                            "\n")
     if ('/ext/xmlreader/tests/007.php' in full_dest_filename or
        '/ext/xmlreader/tests/008.php' in full_dest_filename or
        '/ext/xmlreader/tests/012.php' in full_dest_filename or
@@ -1650,6 +1674,49 @@ def should_import(filename):
         if bad in filename:
             return False
     return True
+
+# -- main --
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-o",
+    "--only",
+    type=str,
+    action='append',
+    help="only import tests whose path contains this substring."
+)
+parser.add_argument(
+    "--dirty",
+    action='store_true',
+    help="leave around test/zend/all directory."
+)
+parser.add_argument(
+    "-v",
+    "--verbose",
+    action='store_true',
+    help="print out extra stuff."
+)
+parser.add_argument(
+    "--local",
+    type=str,
+    help="Convert a single local .phpt into *.php and expect files in the CWD.")
+args = parser.parse_args()
+
+if args.local:
+    if args.only:
+        print("--only and --local are not compatible; choose one.")
+        sys.exit(1)
+    if not os.path.exists(args.local):
+        print("--local file not found")
+        sys.exit(1)
+    if not args.local.endswith('.phpt'):
+        print("Invalid --local file. Must be a .phpt file")
+        sys.exit(1)
+
+    print("Converting %s into php and expect files..." % (args.local, ))
+    walk(args.local, os.getcwd())
+
+    sys.exit(0)
 
 script_dir = os.path.dirname(__file__)
 zend_dir = os.path.normpath(os.path.join(script_dir, '../zend'))

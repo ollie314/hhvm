@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -14,4 +14,6 @@
 (*****************************************************************************)
 
 val check_implements:
-    Typing_env.env -> Typing_defs.ty -> Typing_defs.ty -> unit
+    Typing_env.env ->
+    Typing_defs.decl Typing_defs.ty ->
+    Typing_defs.decl Typing_defs.ty -> unit

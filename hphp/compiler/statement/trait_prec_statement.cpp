@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,13 +15,16 @@
 */
 
 #include "hphp/compiler/statement/trait_prec_statement.h"
-#include <set>
-#include "hphp/compiler/statement/statement_list.h"
+
+#include "hphp/compiler/analysis/class_scope.h"
+#include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/statement/class_statement.h"
 #include "hphp/compiler/statement/method_statement.h"
-#include "hphp/compiler/expression/expression_list.h"
-#include "hphp/compiler/analysis/class_scope.h"
+#include "hphp/compiler/statement/statement_list.h"
+
 #include "hphp/util/text-util.h"
+
+#include <unordered_set>
 
 using namespace HPHP;
 
@@ -45,14 +48,14 @@ StatementPtr TraitPrecStatement::clone() {
   return new_stmt;
 }
 
-void TraitPrecStatement::getOtherTraitNames(std::set<string> &namesSet) const {
-  vector<string> namesVec;
-  m_otherTraitNames->getStrings(namesVec);
-  for (unsigned int i = 0; i < namesVec.size(); i++) {
-    namesVec[i] = toLower(namesVec[i]);
-  }
+void TraitPrecStatement::getOtherTraitNames(
+  hphp_string_iset& namesSet) const {
   namesSet.clear();
-  namesSet.insert(namesVec.begin(), namesVec.end());
+  for (int i = 0; i < m_otherTraitNames->getCount(); i++) {
+    auto s = dynamic_pointer_cast<ScalarExpression>(
+      (*m_otherTraitNames)[i]);
+    namesSet.insert(s->getString());
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -104,21 +107,6 @@ void TraitPrecStatement::setNthKid(int n, ConstructPtr cp) {
       assert(false);
       break;
   }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void TraitPrecStatement::outputCodeModel(CodeGenerator &cg) {
-  cg.printObjectHeader("TraitInsteadStatement", 3);
-  cg.printPropertyHeader("traitName");
-  m_traitName->outputCodeModel(cg);
-  cg.printPropertyHeader("methodName");
-  m_methodName->outputCodeModel(cg);
-  cg.printPropertyHeader("otherTraitNames");
-  cg.printExpressionVector(m_otherTraitNames);
-  cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
-  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

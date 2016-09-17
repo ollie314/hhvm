@@ -1,6 +1,11 @@
 set(OCAMLC_FOUND FALSE)
 set(OCAMLC_OPT_SUFFIX "")
 
+if(IS_PPC64)
+  # No OCaml port for PPC64 yet, skip it
+  return()
+endif()
+
 find_program(OCAMLC_EXECUTABLE ocamlc DOC "path to ocamlc")
 mark_as_advanced(OCAMLC_EXECUTABLE)
 
@@ -9,9 +14,11 @@ if(OCAMLC_EXECUTABLE)
   execute_process(COMMAND ${OCAMLC_EXECUTABLE} -version
     OUTPUT_VARIABLE OCAMLC_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if ("${OCAMLC_VERSION}" VERSION_LESS "3.12")
-    message(STATUS "OCaml version ${OCAMLC_VERSION} is too old "
-      "to build the Hack typechecker, need at least 3.12")
+  if ("${OCAMLC_VERSION}" VERSION_LESS "4.01")
+    message(FATAL_ERROR "OCaml version ${OCAMLC_VERSION} is too old "
+      "to build the Hack typechecker, need at least 4.01. Directions "
+      "at https://github.com/facebook/hhvm/wiki/Building-and-Installing-HHVM "
+      "may have instructions how to get a newer version for your distro.")
   else()
     set(OCAMLC_FOUND TRUE)
 
@@ -27,5 +34,5 @@ if(OCAMLC_EXECUTABLE)
     endif()
   endif()
 else()
-  message(STATUS "OCaml not found, will not build Hack typechecker")
+  message(FATAL_ERROR "OCaml not found, can not build Hack typechecker")
 endif()

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_FUNCTION_H_
 #define incl_HPHP_EXT_FUNCTION_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/std/ext_std.h"
 
 namespace HPHP {
@@ -27,12 +27,8 @@ namespace HPHP {
 Array HHVM_FUNCTION(get_defined_functions);
 bool HHVM_FUNCTION(function_exists, const String& function_name,
   bool autoload = true);
-bool HHVM_FUNCTION(is_callable, const Variant& v, bool syntax = false,
-  VRefParam name = uninit_null());
 Variant HHVM_FUNCTION(call_user_func, const Variant& function,
   const Array& params = null_array);
-Variant HHVM_FUNCTION(call_user_func_array, const Variant& function,
-  const Array& params);
 Variant HHVM_FUNCTION(forward_static_call_array, const Variant& function,
   const Array& params);
 Variant HHVM_FUNCTION(forward_static_call, const Variant& function,

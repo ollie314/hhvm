@@ -13,7 +13,7 @@ type myshape = shape('my_optional_field' => ?int);
 
 function test(): myshape {
   $x = shape('my_optional_field' => 0);
-  if(true) {
+  if (true) {
     $x['my_optional_field'] = null;
   }
   return $x;

@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,6 +7,8 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
+
+open Core
 
 type raw_color =
   | Default
@@ -22,9 +24,20 @@ type raw_color =
 type style =
   | Normal of raw_color
   | Bold of raw_color
+  | Dim of raw_color
+  | Underline of raw_color
+  | BoldUnderline of raw_color
+  | DimUnderline of raw_color
+  | NormalWithBG of raw_color * raw_color
+  | BoldWithBG of raw_color * raw_color
 
-let color_num = function
-  | Default -> "0"
+type color_mode =
+  | Color_Always
+  | Color_Never
+  | Color_Auto
+
+let text_num = function
+  | Default -> "39"
   | Black   -> "30"
   | Red     -> "31"
   | Green   -> "32"
@@ -34,20 +47,57 @@ let color_num = function
   | Cyan    -> "36"
   | White   -> "37"
 
+let background_num = function
+  | Default -> "49"
+  | Black   -> "40"
+  | Red     -> "41"
+  | Green   -> "42"
+  | Yellow  -> "43"
+  | Blue    -> "44"
+  | Magenta -> "45"
+  | Cyan    -> "46"
+  | White   -> "47"
+
+let color_num = function
+  | Default -> "0"
+  | x -> text_num x
+
 let style_num = function
   | Normal c -> color_num c
   | Bold c   -> color_num c ^ ";1"
+  | Dim c    -> color_num c ^ ";2"
+  | Underline c -> color_num c ^ ";4"
+  | BoldUnderline c -> color_num c ^ ";1;4"
+  | DimUnderline c -> color_num c ^ ";2;4"
+  | NormalWithBG (text, bg) -> (text_num text) ^ ";" ^ (background_num bg)
+  | BoldWithBG (text, bg) -> (text_num text) ^ ";" ^ (background_num bg) ^ ";1"
 
-let print_one (c,s) =
-  Printf.printf "\x1b[%sm%s\x1b[0m" (style_num c) (s)
+let print_one ?(color_mode=Color_Auto) ?(out_channel=stdout) c s =
+  let should_color = match color_mode with
+    | Color_Always -> true
+    | Color_Never -> false
+    | Color_Auto ->
+      begin
+        match Sys_utils.getenv_term () with
+          | None -> false
+          | Some term ->
+            Unix.isatty Unix.stdout && term <> "dumb"
+      end in
+  if should_color
+  then Printf.fprintf out_channel "\x1b[%sm%s\x1b[0m" (style_num c) (s)
+  else Printf.fprintf out_channel "%s" s
 
-let print strs = List.iter print_one strs
+let cprint ?(color_mode=Color_Auto) ?(out_channel=stdout) strs =
+  List.iter strs (fun (c, s) -> print_one ~color_mode ~out_channel c s)
+
+let cprintf ?(color_mode=Color_Auto) ?(out_channel=stdout) c =
+  Printf.ksprintf (print_one ~color_mode ~out_channel c)
 
 let (spinner, spinner_used) =
   let state = ref 0 in
   (fun () ->
     begin
-      let str = List.nth ["-"; "\\"; "|"; "/"] (!state mod 4) in
+      let str = List.nth_exn ["-"; "\\"; "|"; "/"] (!state mod 4) in
       state := !state + 1;
       str
     end),
@@ -59,4 +109,37 @@ let clear_line_seq = "\r\x1b[0K"
 let print_clear_line chan =
   if Unix.isatty (Unix.descr_of_out_channel chan)
   then Printf.fprintf chan "%s%!" clear_line_seq
-  else Printf.fprintf chan "\n%!"
+  else ()
+
+(* Read a single char and return immediately, without waiting for a newline.
+ * `man termios` to see how termio works. *)
+let read_char () =
+  let tty = Unix.(openfile "/dev/tty" [O_RDWR] 0o777) in
+  let termio = Unix.tcgetattr tty in
+  let new_termio = {termio with Unix.
+    c_icanon = false;
+    c_vmin = 1;
+    c_vtime = 0;
+  } in
+  Unix.tcsetattr tty Unix.TCSANOW new_termio;
+  let buf = String.create 1 in
+  let bytes_read = UnixLabels.read tty ~buf ~pos:0 ~len:1 in
+  Unix.tcsetattr tty Unix.TCSANOW termio;
+  assert (bytes_read = 1);
+  buf.[0]
+
+(* Prompt the user to pick one character out of a given list. If other
+ * characters are entered, the prompt repeats indefinitely. *)
+let read_choice message choices =
+  let rec loop () =
+    Printf.printf "%s (%s)%!" message
+      (String.concat "|" (List.map choices String_utils.string_of_char));
+    let choice = read_char () in
+    print_newline ();
+    if List.mem choices choice then choice else loop ()
+  in loop ()
+
+let eprintf fmt =
+  if Unix.(isatty stderr)
+  then Printf.eprintf fmt
+  else Printf.ifprintf stderr fmt

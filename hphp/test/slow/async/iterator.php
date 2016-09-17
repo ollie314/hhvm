@@ -1,6 +1,11 @@
 <?hh
 
-function block() { return RescheduleWaitHandle::create(1,1); };
+function block() {
+  return RescheduleWaitHandle::create(
+    RescheduleWaitHandle::QUEUE_NO_PENDING_IO,
+    1,
+  );
+};
 
 async function test() {
   $arr3 = array(1,2,3);
@@ -28,9 +33,9 @@ async function test2() {
 
 $t = test();
 echo "\n";
-$t->join();
+HH\Asio\join($t);
 echo "\n";
 $t2 = test2();
 echo "\n";
-$t2->join();
+HH\Asio\join($t2);
 echo "\n";

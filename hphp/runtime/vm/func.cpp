@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,24 +17,31 @@
 #include "hphp/runtime/vm/func.h"
 
 #include "hphp/runtime/base/attr.h"
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/intercept.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/type-string.h"
-
 #include "hphp/runtime/vm/class.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/reverse-data-map.h"
 #include "hphp/runtime/vm/treadmill.h"
 #include "hphp/runtime/vm/type-constraint.h"
 #include "hphp/runtime/vm/unit.h"
 
+#include "hphp/runtime/vm/jit/func-guard.h"
+#include "hphp/runtime/vm/jit/mcgen.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/types.h"
+
+#include "hphp/system/systemlib.h"
+
 #include "hphp/util/atomic-vector.h"
 #include "hphp/util/fixed-vector.h"
 #include "hphp/util/debug.h"
+#include "hphp/util/struct-log.h"
 #include "hphp/util/trace.h"
 
 #include <atomic>
@@ -46,24 +53,18 @@ namespace HPHP {
 
 TRACE_SET_MOD(hhbc);
 
-using jit::mcg;
-
 const StringData*     Func::s___call       = makeStaticString("__call");
 const StringData*     Func::s___callStatic = makeStaticString("__callStatic");
 std::atomic<bool>     Func::s_treadmill;
-std::atomic<uint32_t> Func::s_totalClonedClosures;
-
-/*
- * This size hint will create a ~6MB vector and is rarely hit in practice.
- * Note that this is just a hint and exceeding it won't affect correctness.
- */
-constexpr size_t kFuncVecSizeHint = 750000;
 
 /*
  * FuncId high water mark and FuncId -> Func* table.
  */
-static std::atomic<FuncId> s_nextFuncId(0);
-static AtomicVector<const Func*> s_funcVec(kFuncVecSizeHint, nullptr);
+static std::atomic<FuncId> s_nextFuncId{0};
+static AtomicVector<const Func*> s_funcVec{0, nullptr};
+static AtomicVectorInit s_funcVecInit{
+  s_funcVec, RuntimeOption::EvalFuncCountHint
+};
 
 const AtomicVector<const Func*>& Func::getFuncVec() {
   return s_funcVec;
@@ -77,21 +78,22 @@ Func::Func(Unit& unit, const StringData* name, Attr attrs)
   , m_unit(&unit)
   , m_attrs(attrs)
 {
+  m_isPreFunc = false;
   m_hasPrivateAncestor = false;
   m_shared = nullptr;
+  m_shouldSampleJit = StructuredLog::coinflip(
+      RuntimeOption::EvalJitSampleRate
+  );
 }
 
 Func::~Func() {
   if (m_fullName != nullptr && m_maybeIntercepted != -1) {
     unregister_intercept_flag(fullNameStr(), &m_maybeIntercepted);
   }
-  int maxNumPrologues = getMaxNumPrologues(numParams());
-  int numPrologues =
-    maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
-                                         : kNumFixedPrologues;
-  if (mcg != nullptr) {
-    mcg->smashPrologueGuards((jit::TCA*)m_prologueTable,
-                             numPrologues, this);
+  if (jit::mcgen::initialized() && !RuntimeOption::EvalEnableReusableTC) {
+    // If Reusable TC is enabled then the prologue may have already been smashed
+    // and the memory may now be in use by another function.
+    jit::clobberFuncGuards(this);
   }
 #ifdef DEBUG
   validate();
@@ -99,123 +101,101 @@ Func::~Func() {
 #endif
 }
 
-void* Func::allocFuncMem(
-  const StringData* name, int numParams,
-  bool needsNextClonedClosure,
-  bool lowMem) {
+void* Func::allocFuncMem(int numParams) {
   int maxNumPrologues = Func::getMaxNumPrologues(numParams);
-  int numExtraPrologues =
-    maxNumPrologues > kNumFixedPrologues ?
-    maxNumPrologues - kNumFixedPrologues :
-    0;
-  int numExtraFuncPtrs = (int) needsNextClonedClosure;
-  size_t funcSize =
-    sizeof(Func) +
-    numExtraPrologues * sizeof(unsigned char*) +
-    numExtraFuncPtrs * sizeof(Func*);
+  int numExtraPrologues = std::max(maxNumPrologues - kNumFixedPrologues, 0);
 
-  if (needsNextClonedClosure) s_totalClonedClosures++;
+  auto const funcSize =
+    sizeof(Func) + numExtraPrologues * sizeof(m_prologueTable[0]);
 
-  void* mem = lowMem ? low_malloc(funcSize) : malloc(funcSize);
-
-  /**
-   * The Func object can have optional nextClonedClosure pointer to Func
-   * in front of the actual object. The layout is as follows:
-   *
-   *               +--------------------------------+ low address
-   *               |  nextClonedClosure (optional)  |
-   *               |  in closures                   |
-   *               +--------------------------------+ Func* address
-   *               |  Func object                   |
-   *               +--------------------------------+ high address
-   */
-  memset(mem, 0, numExtraFuncPtrs * sizeof(Func*));
-  return ((Func**) mem) + numExtraFuncPtrs;
+  return low_malloc_data(funcSize);
 }
 
 void Func::destroy(Func* func) {
   if (func->m_funcId != InvalidFuncId) {
+    if (jit::mcgen::initialized() && RuntimeOption::EvalEnableReusableTC) {
+      // Free TC-space associated with func
+      jit::tc::reclaimFunction(func);
+    }
+
     DEBUG_ONLY auto oldVal = s_funcVec.exchange(func->m_funcId, nullptr);
     assert(oldVal == func);
     func->m_funcId = InvalidFuncId;
+
+    if (RuntimeOption::EvalEnableReverseDataMap) {
+      // We register Funcs to data_map in Func::init() and Func::clone(), both
+      // of which are accompanied by calls to Func::setNewFuncId().
+      data_map::deregister(func);
+    }
+
     if (s_treadmill.load(std::memory_order_acquire)) {
       Treadmill::enqueue([func](){ destroy(func); });
       return;
     }
   }
-
-  /*
-   * Funcs in PreClasses are just templates, and don't get used
-   * until they are cloned so we don't put them in low memory.
-   */
-  bool lowMem = !func->preClass() || func->m_cls;
-  void* mem = func;
-  if (func->isClosureBody()) {
-    Func** startOfFunc = ((Func**) mem) - 1; // move back by a pointer
-    mem = startOfFunc;
-    if (Func* f = *startOfFunc) {
-      /*
-       * cloned closures use the prolog array to hold
-       * the per-clone post-prolog entry points.
-       * They're not real prologs, and they shouldn't be
-       * smashed, so clear them out here.
-       */
-      f->initPrologues(f->numParams());
-      Func::destroy(f);
-    }
-  }
   func->~Func();
-  if (lowMem) {
-    low_free(mem);
+  low_free_data(func);
+}
+
+void Func::freeClone() {
+  assert(isPreFunc());
+  assert(m_cloned.flag.test_and_set());
+
+  if (jit::mcgen::initialized() && RuntimeOption::EvalEnableReusableTC) {
+    // Free TC-space associated with func
+    jit::tc::reclaimFunction(this);
   } else {
-    free(mem);
+    jit::clobberFuncGuards(this);
   }
+
+  if (m_funcId != InvalidFuncId) {
+    DEBUG_ONLY auto oldVal = s_funcVec.exchange(m_funcId, nullptr);
+    assert(oldVal == this);
+    m_funcId = InvalidFuncId;
+  }
+
+  m_cloned.flag.clear();
 }
 
 Func* Func::clone(Class* cls, const StringData* name) const {
   auto numParams = this->numParams();
-  Func* f = new (allocFuncMem(
-                   m_name,
-                   numParams,
-                   isClosureBody(),
-                   cls || !preClass())) Func(*this);
 
+  // If this is a PreFunc (i.e., a Func on a PreClass) that is not already
+  // being used as a regular Func by a Class, and we aren't trying to change
+  // its name (since the name is part of the template for later clones), we can
+  // reuse this same Func as the clone.
+  bool const can_reuse =
+    m_isPreFunc && !name && !m_cloned.flag.test_and_set();
+
+  Func* f = !can_reuse
+    ? new (allocFuncMem(numParams)) Func(*this)
+    : const_cast<Func*>(this);
+
+  f->m_cloned.flag.test_and_set();
   f->initPrologues(numParams);
   f->m_funcId = InvalidFuncId;
-  if (name) {
-    f->m_name = name;
-  }
-  if (cls != f->m_cls) {
-    f->m_cls = cls;
-  }
+  if (name) f->m_name = name;
+  f->m_cls = cls;
   f->setFullName(numParams);
+
+  if (RuntimeOption::EvalEnableReverseDataMap) {
+    data_map::register_start(f);
+  }
+
+  if (f != this) {
+    f->m_cachedFunc = rds::Link<LowPtr<Func>>{rds::kInvalidHandle};
+    f->m_maybeIntercepted = -1;
+    f->m_isPreFunc = false;
+  }
+
   return f;
 }
 
-Func* Func::cloneAndModify(Class* cls, Attr attrs) const {
-  if (Func* ret = findCachedClone(cls, attrs)) {
-    return ret;
-  }
+void Func::rescope(Class* ctx, Attr attrs) {
+  m_cls = ctx;
+  if (attrs != AttrNone) m_attrs = attrs;
 
-  static Mutex s_clonedFuncListMutex;
-  Lock l(s_clonedFuncListMutex);
-  // Check again now that I'm the writer
-  if (Func* ret = findCachedClone(cls, attrs)) {
-    return ret;
-  }
-
-  Func* clonedFunc = clone(cls);
-  clonedFunc->setNewFuncId();
-  clonedFunc->setAttrs(attrs);
-
-  // Save it so we don't have to keep cloning it and retranslating
-  Func** nextFunc = &this->nextClonedClosure();
-  while (*nextFunc) {
-    nextFunc = &nextFunc[0]->nextClonedClosure();
-  }
-  *nextFunc = clonedFunc;
-
-  return clonedFunc;
+  setFullName(numParams());
 }
 
 void Func::rename(const StringData* name) {
@@ -235,6 +215,10 @@ void Func::init(int numParams) {
   if (!preClass()) {
     setNewFuncId();
     setFullName(numParams);
+
+    if (RuntimeOption::EvalEnableReverseDataMap) {
+      data_map::register_start(this);
+    }
   } else {
     m_fullName = nullptr;
   }
@@ -258,7 +242,7 @@ void Func::initPrologues(int numParams) {
     maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
                                          : kNumFixedPrologues;
 
-  if (mcg == nullptr) {
+  if (!jit::mcgen::initialized()) {
     m_funcBody = nullptr;
     for (int i = 0; i < numPrologues; i++) {
       m_prologueTable[i] = nullptr;
@@ -266,7 +250,7 @@ void Func::initPrologues(int numParams) {
     return;
   }
 
-  auto const& stubs = mcg->tx().uniqueStubs;
+  auto const& stubs = jit::tc::ustubs();
 
   m_funcBody = stubs.funcBodyHelperThunk;
 
@@ -283,22 +267,15 @@ void Func::setFullName(int numParams) {
       std::string(m_cls->name()->data()) + "::" + m_name->data());
   } else {
     m_fullName = m_name;
-    m_namedEntity = NamedEntity::get(m_name);
-  }
-  if (RuntimeOption::EvalPerfDataMap) {
-    int numPre = isClosureBody() ? 1 : 0;
-    char* from = (char*)this - numPre * sizeof(Func);
 
-    int maxNumPrologues = Func::getMaxNumPrologues(numParams);
-    int numPrologues = maxNumPrologues > kNumFixedPrologues ?
-      maxNumPrologues : kNumFixedPrologues;
-    char* to = (char*)(m_prologueTable + numPrologues);
-    Debug::DebugInfo::recordDataMap(
-      from, to, folly::format("Func-{}-{}", numPre,
-                              (isPseudoMain() ?
-                               m_unit->filepath()->data() :
-                               m_fullName->data())).str());
+    // A scoped closure may not have a `cls', but we still need to preserve its
+    // `methodSlot', which refers to its slot in its `baseCls' (which still
+    // points to a subclass of Closure).
+    if (!isMethod()) {
+      setNamedEntity(NamedEntity::get(m_name));
+    }
   }
+
   if (RuntimeOption::DynamicInvokeFunctions.size()) {
     if (RuntimeOption::DynamicInvokeFunctions.find(m_fullName->data()) !=
         RuntimeOption::DynamicInvokeFunctions.end()) {
@@ -526,27 +503,6 @@ int Func::numSlotsInFrame() const {
 
 
 ///////////////////////////////////////////////////////////////////////////////
-// Closures.
-
-bool Func::isClonedClosure() const {
-  if (!isClosureBody()) return false;
-  if (!cls()) return true;
-  return cls()->lookupMethod(name()) != this;
-}
-
-Func* Func::findCachedClone(Class* cls, Attr attrs) const {
-  Func* nextFunc = const_cast<Func*>(this);
-  while (nextFunc) {
-    if (nextFunc->cls() == cls) {
-      if (LIKELY(nextFunc->attrs() == attrs)) return nextFunc;
-    }
-    nextFunc = nextFunc->nextClonedClosure();
-  }
-  return nullptr;
-}
-
-
-///////////////////////////////////////////////////////////////////////////////
 // Persistence.
 
 bool Func::isNameBindingImmutable(const Unit* fromUnit) const {
@@ -559,7 +515,7 @@ bool Func::isNameBindingImmutable(const Unit* fromUnit) const {
     return true;
   }
 
-  if (isUnique() && RuntimeOption::RepoAuthoritative) {
+  if (isUnique()) {
     return true;
   }
 
@@ -569,6 +525,19 @@ bool Func::isNameBindingImmutable(const Unit* fromUnit) const {
   return top() && (fromUnit == m_unit);
 }
 
+bool Func::isImmutableFrom(const Class* cls) const {
+  if (!RuntimeOption::RepoAuthoritative) return false;
+  assert(cls && cls->lookupMethod(name()) == this);
+  if (attrs() & AttrNoOverride) {
+    // Even if the func isn't overridden, we clone it into
+    // any derived classes if it has static locals
+    if (!hasStaticLocals()) return true;
+  }
+  if (cls->preClass()->attrs() & AttrNoOverride) {
+    return true;
+  }
+  return false;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Unit table entries.
@@ -626,7 +595,7 @@ int Func::numPrologues() const {
 }
 
 void Func::resetPrologue(int numParams) {
-  auto const& stubs = mcg->tx().uniqueStubs;
+  auto const& stubs = jit::tc::ustubs();
   m_prologueTable[numParams] = stubs.fcallHelperThunk;
 }
 
@@ -643,8 +612,10 @@ static void print_attrs(std::ostream& out, Attr attrs) {
   if (attrs & AttrFinal)     { out << " final"; }
   if (attrs & AttrPhpLeafFn) { out << " (leaf)"; }
   if (attrs & AttrHot)       { out << " (hot)"; }
+  if (attrs & AttrNoOverride){ out << " (nooverride)"; }
   if (attrs & AttrInterceptable) { out << " (interceptable)"; }
   if (attrs & AttrPersistent) { out << " (persistent)"; }
+  if (attrs & AttrMayUseVV) { out << " (mayusevv)"; }
 }
 
 void Func::prettyPrint(std::ostream& out, const PrintOpts& opts) const {
@@ -670,7 +641,7 @@ void Func::prettyPrint(std::ostream& out, const PrintOpts& opts) const {
   if (!opts.metadata) return;
 
   const ParamInfoVec& params = shared()->m_params;
-  for (uint i = 0; i < params.size(); ++i) {
+  for (uint32_t i = 0; i < params.size(); ++i) {
     if (params[i].funcletOff != InvalidAbsoluteOffset) {
       out << " DV for parameter " << i << " at " << params[i].funcletOff;
       if (params[i].phpCode) {
@@ -728,24 +699,6 @@ void Func::prettyPrint(std::ostream& out, const PrintOpts& opts) const {
 
 
 ///////////////////////////////////////////////////////////////////////////////
-// Other methods.
-
-bool Func::shouldPGO() const {
-  if (!RuntimeOption::EvalJitPGO) return false;
-
-  // Non-cloned closures simply contain prologues that redispacth to
-  // cloned closures.  They don't contain a translation for the
-  // function entry, which is what triggers an Optimize retranslation.
-  // So don't generate profiling translations for them -- there's not
-  // much to do with PGO anyway here, since they just have prologues.
-  if (isClosureBody() && !isClonedClosure()) return false;
-
-  if (!RuntimeOption::EvalJitPGOHotOnly) return true;
-  return attrs() & AttrHot;
-}
-
-
-///////////////////////////////////////////////////////////////////////////////
 // SharedData.
 
 Func::SharedData::SharedData(PreClass* preClass, Offset base, Offset past,
@@ -765,6 +718,7 @@ Func::SharedData::SharedData(PreClass* preClass, Offset base, Offset past,
   , m_isPairGenerator(false)
   , m_isGenerated(false)
   , m_hasExtendedSharedData(false)
+  , m_returnByValue(false)
   , m_originalFilename(nullptr)
 {
   m_pastDelta = std::min<uint32_t>(past - base, kSmallDeltaLimit);

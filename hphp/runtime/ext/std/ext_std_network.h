@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,7 +21,8 @@
 #include "hphp/runtime/ext/std/ext_std.h"
 #include "hphp/runtime/ext/stream/ext_stream.h"
 #include "hphp/util/network.h"
-#include <syslog.h>
+
+#include <folly/portability/Syslog.h>
 
 namespace HPHP {
 
@@ -37,7 +38,7 @@ Variant HHVM_FUNCTION(getservbyport, int64_t port, const String& protocol);
 Variant HHVM_FUNCTION(inet_ntop, const String& in_addr);
 Variant HHVM_FUNCTION(inet_pton, const String& address);
 Variant HHVM_FUNCTION(ip2long, const String& ip_address);
-String HHVM_FUNCTION(long2ip, int64_t proper_address);
+String HHVM_FUNCTION(long2ip, const String& proper_address);
 bool HHVM_FUNCTION(checkdnsrr, const String& host,
                                const String& type = null_string);
 Variant HHVM_FUNCTION(dns_get_record, const String& hostname, int type = -1,
@@ -73,6 +74,8 @@ bool HHVM_FUNCTION(openlog, const String& ident, int option, int facility);
 bool HHVM_FUNCTION(closelog);
 bool HHVM_FUNCTION(syslog, int priority, const String& message);
 
+bool validate_dns_arguments(const String& host, const String& type,
+                            int& ntype);
 }
 
 #endif // incl_HPHP_EXT_NETWORK_H_

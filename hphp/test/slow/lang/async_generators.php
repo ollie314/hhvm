@@ -43,7 +43,7 @@ async function foo() {
 
 async function bar() {
   echo "bar before\n";
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
   echo "bar after\n";
   return 47;
 }
@@ -108,6 +108,10 @@ async function main($exit_type) {
     $res = (bool)$res;
     $awaitable = null;
   } while ($res);
+}
+
+function my_join(WaitHandle $awaitable) {
+  return $awaitable->join();
 }
 
 echo "start\n";

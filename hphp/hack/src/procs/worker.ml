@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,287 +8,358 @@
  *
  *)
 
-external hh_worker_init: unit -> unit = "hh_worker_init"
+open Core
 
-(*****************************************************************************)
-(* Module building workers
+(*****************************************************************************
+ * Module building workers
+ *
  * A worker is a subprocess executing an arbitrary function
+ *
  * You should first create a fixed amount of workers and then use those
  * because the amount of workers is limited and to make the load-balancing
  * of tasks better (cf multiWorker.ml)
- *)
-(*****************************************************************************)
+ *
+ * On Unix, we "spawn" workers when initializing Hack. Then, this
+ * worker, "fork" a slave for each incoming request. The forked "slave"
+ * will die after processing a single request.
+ *
+ * On Windows, we do not "prespawn" when initializing Hack, but we just
+ * allocate all the required information into a record. Then, we
+ * spawn a slave for each incoming request. It will also die after
+ * one request.
+ *
+ * A worker never handle more than one request at a time.
+ *
+ *****************************************************************************)
+
+(* Should we 'prespawn' the worker ? *)
+let use_prespawned = not Sys.win32
 
 (* The maximum amount of workers *)
 let max_workers = 1000
 
-(*****************************************************************************)
-(* The handle is what we get back when we start a job. It's a "future"
+
+
+(*****************************************************************************
+ * The job executed by the worker.
+ *
+ * The 'serializer' is the job continuation: it is a function that must
+ * be called at the end of the request ir order to send back the result
+ * to the master (this is "internal business", this is not visible outside
+ * this module). The slave will provide the expected function.
+ * cf 'send_result' in 'slave_main'.
+ *
+ *****************************************************************************)
+
+type request = Request of (serializer -> unit)
+and serializer = { send: 'a. 'a -> unit }
+and void (* an empty type *)
+
+
+
+(*****************************************************************************
+ * Everything we need to know about a worker.
+ *
+ *****************************************************************************)
+
+type t = {
+
+  id: int; (* Simple id for the worker. This is not the worker pid: on
+              Windows, we spawn a new worker for each job. *)
+
+  (* Sanity check: is the worker still available ? *)
+  mutable killed: bool;
+
+  (* Sanity check: is the worker currently busy ? *)
+  mutable busy: bool;
+
+  (* On Unix, a reference to the 'prespawned' worker. *)
+  prespawned: (void, request) Daemon.handle option;
+
+  (* On Windows, a function to spawn a slave. *)
+  spawn: unit -> (void, request) Daemon.handle;
+
+}
+
+
+
+(*****************************************************************************
+ * The handle is what we get back when we start a job. It's a "future"
  * (sometimes called a "promise"). The scheduler uses the handle to retrieve
  * the result of the job when the task is done (cf multiWorker.ml).
- * Note that the scheduler has to use a handle for that. But the handle
- * is just a trick to get type-checking on workers, a handle is a
- * phantom type, it doesn't really have a value.
- *)
-(*****************************************************************************)
-type 'a handle
+ *
+ *****************************************************************************)
 
-(*****************************************************************************)
-(* Pipes, we need to keep some extra descriptors around to make select work.
- *)
-(*****************************************************************************)
+type 'a handle = 'a delayed ref
 
-type ('a, 'b) pipe = {
+and 'a delayed =
+  | Processing of 'a slave
+  | Cached of 'a
+  | Failed of exn
 
-    (* Inputs *)
-    pipe_descr_in  : Unix.file_descr ;
-    pipe_fin       : (unit -> 'a)    ;
+and 'a slave = {
 
-    (* Outputs *)
-    pipe_descr_out : Unix.file_descr ;
-    pipe_fout      : ('b -> unit)    ;
-  }
+  worker: t;      (* The associated worker *)
+  slave_pid: int; (* The actual slave pid *)
 
-let (make_pipe: unit -> ('a, 'b) pipe) = fun () ->
-  let descr_ic, descr_oc = Unix.pipe() in
-  (* close descriptors on exec so they are not leaked *)
-  Unix.set_close_on_exec descr_ic;
-  Unix.set_close_on_exec descr_oc;
+  (* The file descriptor we might pass to select in order to
+     wait for the slave to finish its job. *)
+  infd: Unix.file_descr;
 
-  let ic = Unix.in_channel_of_descr descr_ic in
-  let oc = Unix.out_channel_of_descr descr_oc in
-  let input() = Marshal.from_channel ic in
-  let output data = Marshal.to_channel oc data [Marshal.Closures]; flush oc in
-  { pipe_descr_in = descr_ic;
-    pipe_fin = input;
-    pipe_descr_out = descr_oc;
-    pipe_fout = output;
-  }
+  (* A blocking function that returns the job result. *)
+  result: unit -> 'a;
 
-(*****************************************************************************)
-(* The job executed by the worker. The worker will execute (msg.job msg.arg)
- *)
-(*****************************************************************************)
+}
 
-type ('a, 'b) msg = {
-    job: ('a -> 'b) ;
-    arg: 'a         ;
-  }
 
-(*****************************************************************************)
-(* Everything we need to know about a worker.
- * It is called real_t and not t because the type-system is not flexible
- * enough in this case. A worker is something very polymorphic, we want
- * to be able to use the same worker with any type.
- * To do so, we force the type-checker to consider a worker as a black-box.
- * Internally (within this file), a worker is a "real_t" (to preserve as much
- * typing as we can), externally it is a "t" (an abstract type).
- * We force the conversion using Obj.magic.
- *)
-(*****************************************************************************)
 
-type ('a, 'b) real_t = {
+(*****************************************************************************
+ * Entry point for spawned worker.
+ *
+ *****************************************************************************)
 
-    (* Unix process ID *)
-    pid         : int                    ;
+let slave_main ic oc =
+  let send_result data =
+    let stats = Measure.serialize (Measure.pop_global ()) in
+    let s = Marshal.to_string (data,stats) [Marshal.Closures] in
+    let len = String.length s in
+    if len > 10 * 1024 * 1024 (* 10 MB *) then begin
+      Hh_logger.log "WARNING: you are sending quite a lot of data (%d bytes), \
+        which may have an adverse performance impact. If you are sending \
+        closures, double-check to ensure that they have not captured large
+        values in their environment." len;
+      Printf.eprintf "%s" (Printexc.raw_backtrace_to_string
+        (Printexc.get_callstack 100));
+    end;
+    Daemon.output_string oc s;
+    Daemon.flush oc in
+  try
+    let Request do_process = Daemon.from_channel ic in
+    do_process { send = send_result };
+    exit 0
+  with
+  | End_of_file ->
+      exit 1
+  | SharedMem.Out_of_shared_memory ->
+      Exit_status.(exit Out_of_shared_memory)
+  | SharedMem.Hash_table_full ->
+      Exit_status.(exit Hash_table_full)
+  | e ->
+      let e_str = Printexc.to_string e in
+      Printf.printf "Exception: %s\n" e_str;
+      EventLogger.log_if_initialized (fun () ->
+        EventLogger.worker_exception e_str
+      );
+      print_endline "Potential backtrace:";
+      Printexc.print_backtrace stdout;
+      exit 2
 
-    (* Used by the worker to output the result of the job *)
-    send_task   : (('a, 'b) msg -> unit) ;
+let win32_worker_main restore state (ic, oc) =
+  restore state;
+  slave_main ic oc
 
-    (* Used by the scheduler to retrieve the result of a job *)
-    recv_result : (unit -> 'b)           ;
+let unix_worker_main restore state (ic, oc) =
+  restore state;
+  let in_fd = Daemon.descr_of_in_channel ic in
+  if !Utils.profile then Utils.log := prerr_endline;
+  try
+    while true do
+      (* Wait for an incoming job : is there something to read?
+         But we don't read it yet. It will be read by the forked slave. *)
+      let readyl, _, _ = Unix.select [in_fd] [] [] (-1.0) in
+      if readyl = [] then exit 0;
+      (* We fork a slave for every incoming request.
+         And let it die after one request. This is the quickest GC. *)
+      match Fork.fork() with
+      | 0 -> slave_main ic oc
+      | pid ->
+          (* Wait for the slave termination... *)
+          match snd (Unix.waitpid [] pid) with
+          | Unix.WEXITED 0 -> ()
+          | Unix.WEXITED 1 ->
+              raise End_of_file
+          | Unix.WEXITED code ->
+              Printf.printf "Worker exited (code: %d)\n" code;
+              flush stdout;
+              Pervasives.exit code
+          | Unix.WSIGNALED x ->
+              let sig_str = PrintSignal.string_of_signal x in
+              Printf.printf "Worker interrupted with signal: %s\n" sig_str;
+              exit 2
+          | Unix.WSTOPPED x ->
+              Printf.printf "Worker stopped with signal: %d\n" x;
+              exit 3
+    done;
+    assert false
+  with End_of_file -> exit 0
 
-    (* We need to keep this file descriptors around to use Unix.select *)
-    descr_recv  : Unix.file_descr        ;
+type 'a entry_state = 'a * Gc.control * SharedMem.handle
+type 'a entry = ('a entry_state, request, void) Daemon.entry
 
-    (* parent's write end that should be closed by other worker childs *)
-    descr_send  : Unix.file_descr        ;
-  }
+let entry_counter = ref 0
+let register_entry_point ~restore =
+  incr entry_counter;
+  let restore (st, gc_control, heap_handle) =
+    restore st;
+    SharedMem.connect heap_handle ~is_master:false;
+    Gc.set gc_control in
+  let name = Printf.sprintf "slave_%d" !entry_counter in
+  Daemon.register_entry_point
+    name
+    (if Sys.win32
+      then win32_worker_main restore
+      else unix_worker_main restore)
 
-(* The type of a worker visible to the outside world *)
-type t
+(**************************************************************************
+ * Creates a pool of workers.
+ *
+ **************************************************************************)
 
-(*****************************************************************************)
-(* Our polling primitive on workers
- * Given a list workers, returns the ones that a ready for more work.
- *)
-(*****************************************************************************)
+let workers = ref []
 
-type ('a, 'b) worker_list = ('a, 'b) real_t list
+(* Build one worker. *)
+let make_one spawn id =
+  if id >= max_workers then failwith "Too many workers";
 
-let select: ('a, 'b) worker_list -> ('a, 'b) worker_list =
-fun tl ->
-  let fdl = List.map (fun x -> x.descr_recv) tl in
-  let readyl, _, _ = Unix.select fdl [] [] (-1.0) in
-  let res = List.filter (fun x -> List.mem x.descr_recv readyl) tl in
-  res
+  let prespawned = if not use_prespawned then None else Some (spawn ()) in
+  let worker = { id; busy = false; killed = false; prespawned; spawn } in
+  workers := worker :: !workers;
+  worker
 
-(*****************************************************************************)
-(* Creates a pool of workers. It's important to create them all at once,
- * because we would duplicate some file descriptors during the fork otherwise.
- *)
-(*****************************************************************************)
+let make ~saved_state ~entry ~nbr_procs ~gc_control ~heap_handle =
+  let spawn log_fd =
+    Unix.clear_close_on_exec heap_handle.SharedMem.h_fd;
+    let handle =
+      Daemon.spawn
+        Unix.(stdout, stderr)
+        entry
+        (saved_state, gc_control, heap_handle) in
+    Unix.set_close_on_exec heap_handle.SharedMem.h_fd;
+    handle
+  in
+  let made_workers = ref [] in
+  for n = 1 to nbr_procs do
+    made_workers := make_one spawn n :: !made_workers
+  done;
+  !made_workers
 
-module MakeWorker = struct
+(**************************************************************************
+ * Send a job to a worker
+ *
+ **************************************************************************)
 
-  (* The type of the accumulator *)
-  type ('a, 'b) acc = ('a, 'b) worker_list
+let call w (type a) (type b) (f : a -> b) (x : a) : b handle =
+  if w.killed then Printf.ksprintf failwith "killed worker (%d)" w.id;
+  if w.busy then Printf.ksprintf failwith "busy worker (%d)" w.id;
+  (* Spawn the slave, if not prespawned. *)
+  let { Daemon.pid = slave_pid; channels = (inc, outc) } as h =
+    match w.prespawned with
+    | None -> w.spawn ()
+    | Some handle -> handle in
+  (* Prepare ourself to read answer from the slave. *)
+  let result () : b =
+    match Unix.waitpid [Unix.WNOHANG] slave_pid with
+    | 0, _ | _, Unix.WEXITED 0 ->
+        let res : b * Measure.record_data = Daemon.input_value inc in
+        if w.prespawned = None then Daemon.close h;
+        Measure.merge (Measure.deserialize (snd res));
+        fst res
+    | _, Unix.WEXITED i when i = Exit_status.(exit_code Out_of_shared_memory) ->
+        raise SharedMem.Out_of_shared_memory
+    | _, Unix.WEXITED i ->
+        Printf.eprintf "Subprocess(%d): fail %d" slave_pid i;
+        Pervasives.exit i
+    | _, Unix.WSTOPPED i ->
+        Printf.ksprintf failwith "Subprocess(%d): stopped %d" slave_pid i
+    | _, Unix.WSIGNALED i ->
+        Printf.ksprintf failwith "Subprocess(%d): signaled %d" slave_pid i in
+  (* Mark the worker as busy. *)
+  let infd = Daemon.descr_of_in_channel inc in
+  let slave = { result; slave_pid; infd; worker = w; } in
+  w.busy <- true;
+  (* Send the job to the slave. *)
+  Daemon.to_channel outc
+    ~flush:true ~flags:[Marshal.Closures]
+    (Request (fun { send } -> send (f x)));
+  (* And returned the 'handle'. *)
+  ref (Processing slave)
 
-  (* The current amount of "live" workers *)
-  let current_workers = ref 0
 
-  let rec make: ('a, 'b) acc -> int -> ('a, 'b) acc =
-  fun acc n ->
-    incr current_workers;
-    if !current_workers > max_workers
-    then failwith "Too many workers"
-    else if n <= 0
-    then acc
-    else make_ acc n
+(**************************************************************************
+ * Read results from a handle.
+ * This might block if the worker hasn't finished yet.
+ *
+ **************************************************************************)
 
-  and make_: ('a, 'b) acc -> int -> ('a, 'b) acc =
-  fun acc n ->
-    (* Initializing a bidirectional pipe *)
-    let pipe_parent_reads_child_sends = make_pipe() in
-    let pipe_parent_sends_child_reads = make_pipe() in
-    let {
-      (* Parent reads *)
-      pipe_descr_in = descr_parent_reads;
-      pipe_fin = parent_reads_result;
+let get_result d =
+  match !d with
+  | Cached x -> x
+  | Failed exn -> raise exn
+  | Processing s ->
+      try
+        let res = s.result () in
+        s.worker.busy <- false;
+        d := Cached res;
+        res
+      with exn ->
+        s.worker.busy <- false;
+        d := Failed exn;
+        raise exn
 
-      (* Child sends *)
-      pipe_descr_out = descr_child_sends;
-      pipe_fout = child_sends_result;
-    } = pipe_parent_reads_child_sends in
-    let {
-      (* Child reads *)
-      pipe_descr_in = descr_child_reads;
-      pipe_fin = child_reads_task;
 
-      (* Parent sends *)
-      pipe_descr_out = descr_parent_sends;
-      pipe_fout = parent_sends_task;
-    } = pipe_parent_sends_child_reads in
-    match Fork.fork ~reason:(Some "worker") () with
-    | -1 ->
-        failwith "Could not create process"
-    | 0 ->
-        (* CHILD *)
-        (* Unix duplicates file descriptors during a fork, we make sure
-         * we close all the ones we don't need anymore.
-         *)
-        hh_worker_init();
-        close_parent descr_parent_reads descr_parent_sends acc;
-        (* And now start the daemon worker *)
-        start_worker descr_child_reads child_reads_task child_sends_result
-    | pid ->
-        (* PARENT *)
-        close_child descr_child_sends descr_child_reads;
-        let worker = {
-          pid = pid;
-          send_task = parent_sends_task;
-          recv_result = parent_reads_result;
-          descr_recv = descr_parent_reads;
-          descr_send = descr_parent_sends;
-        } in
-        let acc = worker :: acc in
-        make acc (n-1)
+(*****************************************************************************
+ * Our polling primitive on workers
+ * Given a list of handle, returns the ones that are ready.
+ *
+ *****************************************************************************)
 
-  and close_parent: Unix.file_descr -> Unix.file_descr -> ('a, 'b) acc
-    -> unit =
-  fun descr_parent_reads descr_parent_sends acc ->
-    close_in stdin;
-    Unix.close descr_parent_reads;
-    Unix.close descr_parent_sends;
-    (* Disconnect from the previously created workers
-     * This is a bit subtle. When we fork, the parent process has
-     * a file descriptor open on the pipe for the worker.
-     * When we fork for the next worker, all the previous pipes
-     * are duplicated. To avoid this, we need to close the pipes
-     * of the previously created workers.
-     *)
-    List.iter (fun w -> Unix.close w.descr_recv; Unix.close w.descr_send) acc;
-    ()
+type 'a selected = {
+  readys: 'a handle list;
+  waiters: 'a handle list;
+}
 
-  and start_worker: Unix.file_descr -> (unit -> 'a) -> ('b -> unit) -> 'c =
-  fun descr_in child_reads_task child_sends_result ->
-    (* Daemon *)
-    try
-      (* Let's virtually turn off the GC, it can still be
-       * triggered in extreme cases, but should not most
-       * of the time.
-       *)
-      let gc = Gc.get() in
-      Gc.set { gc with Gc.minor_heap_size = 8_000_000 };
-      while true do
-        (* This is a trick to use less memory and to be faster.
-         * If we fork now, the heap is very small, because no job
-         * was sent in yet.
-         *)
-        let readyl, _, _ = Unix.select [descr_in] [] [] (-1.0) in
-        if readyl = [] then exit 0;
-        match Unix.fork() with
-        | 0 ->
-            (try
-              let { job = job; arg = arg } = child_reads_task() in
-              let result = job arg in
-              child_sends_result result;
-              (* This is the interesting part. Since we die here,
-               * all the memory allocated during the job is reclaimed
-               * by the system. This makes memory consumption much much
-               * lower.
-               *)
-              exit 0
-            with
-            | End_of_file ->
-                exit 1
-            | e ->
-                Printf.printf "Exception: %s\n" (Printexc.to_string e);
-                print_endline "Potential backtrace:";
-                Printexc.print_backtrace stdout;
-                exit 2
-            )
-        | pid ->
-            (match snd (Unix.waitpid [] pid) with
-            | Unix.WEXITED 0 -> ()
-            | Unix.WEXITED 1 ->
-                raise End_of_file
-            | Unix.WEXITED x ->
-                Printf.printf "Worker exited (code: %d)\n" x;
-                flush stdout;
-                raise End_of_file
-            | Unix.WSIGNALED x ->
-                let sig_str = PrintSignal.string_of_signal x in
-                Printf.printf "Worker interruped with signal: %s\n" sig_str;
-                exit 2
-            | Unix.WSTOPPED x ->
-                Printf.printf "Worker stopped with signal: %d\n" x;
-                exit 3
-            )
-      done;
-      assert false
-    with End_of_file ->
-      exit 0
+let get_processing ds =
+  List.rev_filter_map
+    ds
+    ~f:(fun d -> match !d with Processing p -> Some p | _ -> None)
 
-  and close_child: Unix.file_descr -> Unix.file_descr -> unit =
-  fun descr_child_sends descr_child_reads ->
-    Unix.close descr_child_sends;
-    Unix.close descr_child_reads;
-    ()
+let select ds =
+  let processing = get_processing ds in
+  let fds = List.map ~f:(fun {infd; _} -> infd) processing in
+  let ready_fds, _, _ =
+    if fds = [] || List.length processing <> List.length ds then
+      [], [], []
+    else
+      Unix.select fds [] [] ~-.1. in
+  List.fold_right
+    ~f:(fun d { readys ; waiters } ->
+      match !d with
+      | Cached _ | Failed _ ->
+          { readys = d :: readys ; waiters }
+      | Processing s when List.mem ready_fds s.infd ->
+          { readys = d :: readys ; waiters }
+      | Processing _ ->
+          { readys ; waiters = d :: waiters})
+    ~init:{ readys = [] ; waiters = [] }
+    ds
 
-end
+let get_worker h =
+  match !h with
+  | Processing {worker; _} -> worker
+  | Cached _
+  | Failed _ -> invalid_arg "Worker.get_worker"
 
-(*****************************************************************************)
-(* As explained in the header, we wrap every function with Obj.magic, because
- * the type-checker does not allow us to have a polymorphic worker.
- *)
-(*****************************************************************************)
-let get_pid proc = (Obj.magic proc).pid
-let call proc f x = proc.send_task ({ job = f; arg = x })
-let get_result proc _ = proc.recv_result()
-let make heap = Obj.magic (MakeWorker.make [] heap)
-let call proc = Obj.magic (call (Obj.magic proc))
-let select procl = Obj.magic (select (Obj.magic procl))
-let get_result proc = get_result (Obj.magic proc)
-let get_file_descr proc = (Obj.magic proc).descr_recv
-let kill proc = try Unix.kill (Obj.magic proc).pid 9 with _ -> ()
+(**************************************************************************
+ * Worker termination
+ **************************************************************************)
+
+let kill w =
+  if not w.killed then begin
+    w.killed <- true;
+    match w.prespawned with
+    | None -> ()
+    | Some handle -> Daemon.kill handle
+  end
+
+let killall () =
+  List.iter ~f:kill !workers

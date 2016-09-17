@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_PHP_MAILPARSE_MIME_H_
 #define incl_HPHP_PHP_MAILPARSE_MIME_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/mailparse/rfc822.h"
 #include "hphp/runtime/base/string-buffer.h"
 
@@ -30,8 +30,7 @@ extern "C" {
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class MimePart : public ResourceData {
-public:
+struct MimePart : ResourceData {
   enum Decode {
     DecodeNone      = 0,  /* include headers but no section */
     Decode8Bit      = 1,  /* decode body into 8-bit */
@@ -39,7 +38,7 @@ public:
     DecodeNoBody    = 4,  /* don't include the body */
   };
 
-  static bool ProcessLine(MimePart *workpart, const String& line);
+  static bool ProcessLine(req::ptr<MimePart> workpart, const String& line);
 
 public:
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(MimePart);
@@ -47,8 +46,9 @@ public:
   MimePart();
 
   CLASSNAME_IS("mailparse_mail_structure")
-  // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override {
+    return classnameof();
+  }
 
   bool parse(const char *buf, int bufsize);
   Variant extract(const Variant& filename, const Variant& callbackfunc, int decode,
@@ -61,8 +61,7 @@ public:
   int filter(int c);
 
 private:
-  class MimeHeader {
-  public:
+  struct MimeHeader {
     MimeHeader();
     explicit MimeHeader(const char *value);
     explicit MimeHeader(php_rfc822_tokenized_t *toks);
@@ -83,10 +82,10 @@ private:
   };
 
 private:
-  static void UpdatePositions(MimePart *part, int newendpos,
+  static void UpdatePositions(req::ptr<MimePart> part, int newendpos,
                               int newbodyend, int deltanlines);
 
-  Resource m_parent;
+  req::ptr<MimePart> m_parent;
   Array  m_children;   /* child parts */
 
   int m_startpos, m_endpos;   /* offsets of this part in the message */
@@ -119,13 +118,13 @@ private:
 
     String workbuf;
     String headerbuf;
-    Resource lastpart;
+    req::ptr<MimePart> lastpart;
   } m_parsedata;
 
-  int extractImpl(int decode, File *src);
-  MimePart *createChild(int startpos, bool inherit);
+  int extractImpl(int decode, req::ptr<File> src);
+  req::ptr<MimePart> createChild(int startpos, bool inherit);
   bool processHeader();
-  MimePart *getParent();
+  const req::ptr<MimePart>& getParent() { return m_parent; }
 
   void decoderPrepare(bool do_decode);
   void decoderFeed(const String& str);

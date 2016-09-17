@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,14 +17,16 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
-#include "hphp/runtime/server/virtual-host.h"
-#include "hphp/runtime/server/transport.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/server/static-content-cache.h"
-#include "hphp/runtime/base/string-util.h"
+#include <folly/portability/Unistd.h>
+
 #include "hphp/runtime/base/file-util.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/server/static-content-cache.h"
+#include "hphp/runtime/server/transport.h"
+#include "hphp/runtime/server/virtual-host.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -169,7 +171,26 @@ bool RequestURI::rewriteURL(const VirtualHost *vhost, Transport *transport,
           m_rewrittenURL.substr(0, 8) != s_https) {
         PrependSlash(m_rewrittenURL);
       }
-      transport->redirect(m_rewrittenURL.c_str(), redirect);
+      if (redirect < 0) {
+        std::string error;
+        StringBuffer response;
+        int code = 0;
+        HttpProtocol::ProxyRequest(transport, true,
+                                   m_rewrittenURL.toCppString(),
+                                   code, error,
+                                   response);
+        if (!code) {
+          transport->sendString(error, 500, false, false, "proxyRequest");
+        } else {
+          const char* respData = response.data();
+          if (!respData) respData = "";
+          transport->sendRaw(const_cast<char*>(respData),
+                             response.size(), code);
+        }
+        transport->onSendEnd();
+      } else {
+        transport->redirect(m_rewrittenURL.c_str(), redirect);
+      }
       return false;
     }
     splitURL(m_rewrittenURL, m_rewrittenURL, m_queryString);
@@ -186,6 +207,11 @@ bool RequestURI::rewriteURL(const VirtualHost *vhost, Transport *transport,
   if (!url.empty() &&
       url.charAt(url.length() - 1) != '/') {
     if (virtualFolderExists(vhost, sourceRoot, pathTranslation, url)) {
+      if (m_originalURL.find("..") != String::npos) {
+        transport->sendString(getDefault404(), 404);
+        transport->onSendEnd();
+        return false;
+      }
       url += "/";
       m_rewritten = true;
       String queryStr;

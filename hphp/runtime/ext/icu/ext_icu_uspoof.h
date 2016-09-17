@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_USPOOF_H
 #define incl_HPHP_ICU_USPOOF_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/uspoof.h>
@@ -11,8 +11,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_SpoofChecker;
 
-class SpoofChecker : public IntlError {
- public:
+struct SpoofChecker : IntlError {
   SpoofChecker() {
     UErrorCode error = U_ZERO_ERROR;
     m_checker = uspoof_open(&error);
@@ -23,17 +22,17 @@ class SpoofChecker : public IntlError {
                      &error);
 
     if (U_FAILURE(error)) {
-      throw getException("Could not open spoof checker, error %d (%s)",
+      throwException("Could not open spoof checker, error %d (%s)",
                      error, u_errorName(error));
     }
   }
   SpoofChecker(const SpoofChecker&) = delete;
   SpoofChecker& operator=(const SpoofChecker& src) {
-    *this = src;
+    IntlError::operator =(src);
     UErrorCode error = U_ZERO_ERROR;
     m_checker = uspoof_clone(src.m_checker, &error);
     if (U_FAILURE(error)) {
-      throw getException("Could not clone spoof checker, error %d (%s)",
+      throwException("Could not clone spoof checker, error %d (%s)",
                      error, u_errorName(error));
     }
     return *this;

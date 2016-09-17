@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,21 +18,22 @@
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/named-entity.h"
 
-namespace HPHP { namespace RDS {
+namespace HPHP { namespace rds {
 
 //////////////////////////////////////////////////////////////////////
 
-Link<RefData> bindStaticLocal(const Func* func, const StringData* name) {
-  auto ret = bind<RefData>(
+Link<RefData, true /* normal_only */>
+bindStaticLocal(const Func* func, const StringData* name) {
+  auto ret = bind<RefData,true>(
     StaticLocal { func->getFuncId(), name },
     Mode::Normal
   );
   return ret;
 }
 
-Link<TypedValue> bindClassConstant(const StringData* clsName,
-                                   const StringData* cnsName) {
-  auto ret = bind<TypedValue,kTVSimdAlign>(
+Link<TypedValue, true /* normal_only */>
+bindClassConstant(const StringData* clsName, const StringData* cnsName) {
+  auto ret = bind<TypedValue,true,kTVSimdAlign>(
     ClsConstant { clsName, cnsName },
     Mode::Normal
   );

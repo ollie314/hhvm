@@ -1,16 +1,16 @@
 <?hh
-// Copyright 2004-present Facebook. All Rights Reserved.
+
 
 async function gen1($a) {
   $v1 = "v1-gen1";
-  await RescheduleWaitHandle::Create(1, 1);
+  await RescheduleWaitHandle::Create(0, 0);
   return $a + 1;
 }
 
 async function gen2($a) {
   $v1 = "v1-gen2";
-  await RescheduleWaitHandle::Create(1, 1);
-  $x = gen1($a)->join();
+  await RescheduleWaitHandle::Create(0, $a);
+  $x = HH\Asio\join(gen1($a));
   return $x;
 }
 
@@ -23,7 +23,7 @@ async function genBar($a) {
 async function genFoo($a) {
   $v1 = "v1-genFoo";
   $a++;
-  await GenArrayWaitHandle::Create(
+  await AwaitAllWaitHandle::fromArray(
     array(
       genBar($a),
       gen2($a + 2),
@@ -33,7 +33,7 @@ async function genFoo($a) {
 }
 
 function main($a) {
-  genFoo($a)->join();
+  HH\Asio\join(genFoo($a));
 }
 
 main(42);

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -51,17 +51,14 @@ ExpressionPtr DynamicFunctionCall::clone() {
 void DynamicFunctionCall::analyzeProgram(AnalysisResultPtr ar) {
   FunctionCall::analyzeProgram(ar);
   if (ar->getPhase() >= AnalysisResult::AnalyzeAll) {
-    if (!m_className.empty()) {
+    if (hasStaticClass()) {
       resolveClass();
     }
-    if (!m_class) {
-      addUserClass(ar, m_className);
-    }
     if (m_params) {
-      m_params->markParams(canInvokeFewArgs());
+      m_params->markParams();
     }
 
-    if (!m_class && m_className.empty()) {
+    if (!m_class && !hasStaticClass()) {
       FunctionScopePtr fs = getFunctionScope();
       VariableTablePtr vt = fs->getVariables();
       vt->setAttribute(VariableTable::ContainsDynamicFunctionCall);
@@ -71,52 +68,13 @@ void DynamicFunctionCall::analyzeProgram(AnalysisResultPtr ar) {
 
 ExpressionPtr DynamicFunctionCall::preOptimize(AnalysisResultConstPtr ar) {
   if (ExpressionPtr rep = FunctionCall::preOptimize(ar)) return rep;
-
-  if (m_nameExp->isScalar()) {
-    Variant v;
-    if (m_nameExp->getScalarValue(v) &&
-        v.isString()) {
-      string name = v.toString().c_str();
-      // if the name starts with a '\' give up any early optimizations and
-      // let FPushFunc manage the namespace normalizations at runtime
-      // (some static analyzer may still be able to optimize it - e.g. HHBBC)
-      if (name[0] != '\\') {
-        ExpressionPtr cls = m_class;
-        if (!cls && !m_className.empty()) {
-          cls = makeScalarExpression(ar, m_className);
-        }
-        return ExpressionPtr(NewSimpleFunctionCall(
-          getScope(), getLocation(),
-          name, false, m_params, cls));
-      }
-    }
-  }
   return ExpressionPtr();
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void DynamicFunctionCall::outputCodeModel(CodeGenerator &cg) {
-  if (m_class || !m_className.empty()) {
-    cg.printObjectHeader("ClassMethodCallExpression", 4);
-    StaticClassName::outputCodeModel(cg);
-    cg.printPropertyHeader("methodExpression");
-  } else {
-    cg.printObjectHeader("SimpleFunctionCallExpression", 3);
-    cg.printPropertyHeader("functionExpression");
-  }
-  m_nameExp->outputCodeModel(cg);
-  cg.printPropertyHeader("arguments");
-  cg.printExpressionVector(m_params);
-  cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(m_nameExp->getLocation());
-  cg.printObjectFooter();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 void DynamicFunctionCall::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
-  if (m_class || !m_className.empty()) {
+  if (m_class || hasStaticClass()) {
     StaticClassName::outputPHP(cg, ar);
     cg_printf("::");
     m_nameExp->outputPHP(cg, ar);

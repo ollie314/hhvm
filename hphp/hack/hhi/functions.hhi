@@ -31,15 +31,11 @@ function func_get_args(): array;
 function implode(string $glue, $pieces): string; // could be Container<Stringish>
 function explode(string $delimiter, ?Stringish $str, int $limit = 0x7FFFFFFF): array; // : array<string> & false for '' delimiter
 function is_array(mixed $arg): bool;
+function is_vec(mixed $arg): bool;
+function is_dict(mixed $arg): bool;
+function is_keyset(mixed $arg): bool;
 function ord(string $string): int;
 function strip_tags(string $str, string $allowable_tags = ''): string;
-
-function gzcompress(string $data, int $level = -1): mixed;
-function gzdecode(string $data, int $length = PHP_INT_MAX): mixed;
-function gzdeflate(string $data, int $level = -1): mixed;
-function gzencode(string $data, int $level = -1): mixed;
-function gzinflate(string $data, int $length = 0): mixed;
-function gzuncompress(string $data, int $length = 0): mixed;
 
 function intval($v, $base = 10): int;
 function doubleval($v): float;
@@ -52,3 +48,14 @@ function get_class_constants($class_name): array;
 // the return value is an instance with class $class
 // do **not** use this in your code, call newv() instead
 function hphp_create_object<T>(string $class_name, array $argv): T;
+
+namespace HH {
+  // autoload-map
+  function could_include($file): bool;
+  function autoload_set_paths(
+    \Indexish<string, \Indexish<string, string>> $map,
+    string $root,
+  ): bool;
+
+  function set_frame_metadata(mixed $metadata): void;
+}

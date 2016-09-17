@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,47 +14,20 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/mixed-array.h"
-
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/sort-helpers.h"
 #include "hphp/runtime/base/tv-helpers.h"
-
-#include "hphp/runtime/vm/jit/translator-inline.h"
-
 #include "hphp/runtime/base/mixed-array-defs.h"
+#include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/array-iterator-defs.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 
 #include <folly/ScopeGuard.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-
-struct KeyAccessor {
-  typedef const MixedArray::Elm& ElmT;
-  bool isInt(ElmT elm) const { return elm.hasIntKey(); }
-  bool isStr(ElmT elm) const { return elm.hasStrKey(); }
-  int64_t getInt(ElmT elm) const { return elm.ikey; }
-  StringData* getStr(ElmT elm) const { return elm.skey; }
-  Variant getValue(ElmT elm) const {
-    if (isInt(elm)) {
-      return getInt(elm);
-    }
-    assert(isStr(elm));
-    return getStr(elm);
-  }
-};
-
-struct ValAccessor {
-  typedef const MixedArray::Elm& ElmT;
-  bool isInt(ElmT elm) const { return elm.data.m_type == KindOfInt64; }
-  bool isStr(ElmT elm) const { return IS_STRING_TYPE(elm.data.m_type); }
-  int64_t getInt(ElmT elm) const { return elm.data.m_data.num; }
-  StringData* getStr(ElmT elm) const { return elm.data.m_data.pstr; }
-  Variant getValue(ElmT elm) const { return tvAsCVarRef(&elm.data); }
-};
 
 /**
  * preSort() does an initial pass over the array to do some preparatory work
@@ -64,10 +37,8 @@ struct ValAccessor {
  * and avoid performing type checks during the actual sort.
  */
 template <typename AccessorT>
-MixedArray::SortFlavor
-MixedArray::preSort(const AccessorT& acc, bool checkTypes) {
+SortFlavor MixedArray::preSort(const AccessorT& acc, bool checkTypes) {
   assert(m_size > 0);
-  assert(!isPacked());
   if (!checkTypes && m_size == m_used) {
     // No need to loop over the elements, we're done
     return GenericSort;
@@ -111,9 +82,8 @@ done:
   assert(m_size == m_used);
   if (checkTypes) {
     return allStrs ? StringSort : allInts ? IntegerSort : GenericSort;
-  } else {
-    return GenericSort;
   }
+  return GenericSort;
 }
 
 /**
@@ -124,40 +94,76 @@ done:
 void MixedArray::postSort(bool resetKeys) {   // nothrow guarantee
   assert(m_size > 0);
   auto const ht = hashTab();
-  initHash(ht, hashSize());
+  initHash(ht, m_scale);
+  auto mask = this->mask();
   if (resetKeys) {
     for (uint32_t pos = 0; pos < m_used; ++pos) {
       auto& e = data()[pos];
       if (e.hasStrKey()) decRefStr(e.skey);
-      e.setIntKey(pos);
-      ht[pos] = pos;
+      auto h = hashint(pos);
+      e.setIntKey(pos, h);
+      *findForNewInsert(ht, mask, h) = pos;
     }
     m_nextKI = m_size;
   } else {
-    auto mask = m_tableMask;
     auto data = this->data();
     for (uint32_t pos = 0; pos < m_used; ++pos) {
       auto& e = data[pos];
-      auto ei = findForNewInsert(ht, mask,
-                                 e.hasIntKey() ? e.ikey : e.hash());
-      *ei = pos;
+      *findForNewInsert(ht, mask, e.probe()) = pos;
     }
   }
 }
 
-ArrayData* MixedArray::EscalateForSort(ArrayData* ad) {
-  // task #1910931 only do this for refCount() > 1
-  return asMixed(ad)->copyMixed();
+ArrayData* MixedArray::EscalateForSort(ArrayData* ad, SortFunction sf) {
+  auto a = asMixed(ad);
+  // We can uncomment later if we want this feature.
+  // if (a->m_size <= 1 && !isSortFamily(sf)) {
+  //   return a;
+  // }
+  if (UNLIKELY(hasUserDefinedCmp(sf) || a->cowCheck())) {
+    auto ret = a->copyMixed();
+    assert(ret->hasExactlyOneRef());
+    return ret;
+  }
+  return a;
+}
+
+ArrayData* PackedArray::EscalateForSort(ArrayData* ad, SortFunction sf) {
+  if (sf == SORTFUNC_KSORT) {
+    return ad;                          // trivial for packed arrays.
+  }
+  if (isSortFamily(sf)) {               // sort/rsort/usort
+    if (UNLIKELY(ad->cowCheck())) {
+      auto ret = PackedArray::Copy(ad);
+      assert(ret->hasExactlyOneRef());
+      return ret;
+    }
+    return ad;
+  }
+  if (ad->m_size <= 1) {
+    if (ad->isVecArray()) {
+      auto ret = PackedArray::ToDictVec(ad, ad->cowCheck());
+      assert(ret->hasExactlyOneRef());
+      return ret;
+    }
+    return ad;
+  }
+  assert(checkInvariants(ad));
+  auto ret = ad->isVecArray()
+    ? PackedArray::ToDictVec(ad, ad->cowCheck())
+    : ToMixedCopy(ad);
+  assert(ret->hasExactlyOneRef());
+  return ret;
 }
 
 #define SORT_CASE(flag, cmp_type, acc_type) \
   case flag: { \
     if (ascending) { \
       cmp_type##Compare<acc_type, flag, true> comp; \
-      HPHP::Sort::sort(a->data(), a->data() + a->m_size, comp); \
+      HPHP::Sort::sort(data_begin, data_end, comp); \
     } else { \
       cmp_type##Compare<acc_type, flag, false> comp; \
-      HPHP::Sort::sort(a->data(), a->data() + a->m_size, comp); \
+      HPHP::Sort::sort(data_begin, data_end, comp); \
     } \
     break; \
   }
@@ -207,24 +213,40 @@ ArrayData* MixedArray::EscalateForSort(ArrayData* ad) {
 
 void MixedArray::Ksort(ArrayData* ad, int sort_flags, bool ascending) {
   auto a = asMixed(ad);
-  SORT_BODY(KeyAccessor, false);
+  auto data_begin = a->data();
+  auto data_end = data_begin + a->m_size;
+  SORT_BODY(AssocKeyAccessor<MixedArray::Elm>, false);
 }
 
 void MixedArray::Sort(ArrayData* ad, int sort_flags, bool ascending) {
   auto a = asMixed(ad);
-  SORT_BODY(ValAccessor, true);
-}
-
-void MixedArray::WarnAndSort(ArrayData* ad, int sort_flags, bool ascending) {
-  assert(ad->kind() != kMixedKind);
-  MixedArray::downgradeAndWarn(ad, Reason::kSort);
-  auto a = asMixed(ad);
-  SORT_BODY(ValAccessor, true);
+  auto data_begin = a->data();
+  auto data_end = data_begin + a->m_size;
+  SORT_BODY(AssocValAccessor<MixedArray::Elm>, true);
 }
 
 void MixedArray::Asort(ArrayData* ad, int sort_flags, bool ascending) {
   auto a = asMixed(ad);
-  SORT_BODY(ValAccessor, false);
+  auto data_begin = a->data();
+  auto data_end = data_begin + a->m_size;
+  SORT_BODY(AssocValAccessor<MixedArray::Elm>, false);
+}
+
+void PackedArray::Sort(ArrayData* ad, int sort_flags, bool ascending) {
+  assert(checkInvariants(ad));
+  if (ad->m_size <= 1) {
+    return;
+  }
+  assert(!ad->hasMultipleRefs());
+  auto a = ad;
+  if (UNLIKELY(strong_iterators_exist())) {
+    free_strong_iterators(a);
+  }
+  SortFlavor flav = preSort(ad);
+  a->m_pos = 0;
+  auto data_begin = packedData(ad);
+  auto data_end = data_begin + a->m_size;
+  CALL_SORT(TVAccessor);
 }
 
 #undef SORT_CASE
@@ -262,28 +284,56 @@ void MixedArray::Asort(ArrayData* ad, int sort_flags, bool ascending) {
 
 bool MixedArray::Uksort(ArrayData* ad, const Variant& cmp_function) {
   auto a = asMixed(ad);
-  USER_SORT_BODY(KeyAccessor, false);
+  USER_SORT_BODY(AssocKeyAccessor<MixedArray::Elm>, false);
 }
 
 bool MixedArray::Usort(ArrayData* ad, const Variant& cmp_function) {
   auto a = asMixed(ad);
-  USER_SORT_BODY(ValAccessor, true);
-}
-
-bool MixedArray::WarnAndUsort(ArrayData* ad, const Variant& cmp_function) {
-  assert(ad->kind() != kMixedKind);
-  MixedArray::downgradeAndWarn(ad, Reason::kUsort);
-  auto a = asMixed(ad);
-  USER_SORT_BODY(ValAccessor, true);
+  USER_SORT_BODY(AssocValAccessor<MixedArray::Elm>, true);
 }
 
 bool MixedArray::Uasort(ArrayData* ad, const Variant& cmp_function) {
   auto a = asMixed(ad);
-  USER_SORT_BODY(ValAccessor, false);
+  USER_SORT_BODY(AssocValAccessor<MixedArray::Elm>, false);
+}
+
+SortFlavor PackedArray::preSort(ArrayData* ad) {
+  assert(checkInvariants(ad));
+  auto const data = packedData(ad);
+  TVAccessor acc;
+  uint32_t sz = ad->m_size;
+  bool allInts = true;
+  bool allStrs = true;
+  for (uint32_t i = 0; i < sz; ++i) {
+    allInts = (allInts && acc.isInt(data[i]));
+    allStrs = (allStrs && acc.isStr(data[i]));
+  }
+  return allStrs ? StringSort : allInts ? IntegerSort : GenericSort;
+}
+
+bool PackedArray::Usort(ArrayData* ad, const Variant& cmp_function) {
+  assert(checkInvariants(ad));
+  if (ad->m_size <= 1) {
+    return true;
+  }
+  assert(!ad->hasMultipleRefs());
+  if (UNLIKELY(strong_iterators_exist())) {
+    free_strong_iterators(ad);
+  }
+  ElmUCompare<TVAccessor> comp;
+  CallCtx ctx;
+  CallerFrame cf;
+  vm_decode_function(cmp_function, cf(), false, ctx);
+  if (!ctx.func) {
+    return false;
+  }
+  comp.ctx = &ctx;
+  auto const data = packedData(ad);
+  Sort::sort(data, data + ad->m_size, comp);
+  return true;
 }
 
 #undef USER_SORT_BODY
 
 ///////////////////////////////////////////////////////////////////////////////
 }
-

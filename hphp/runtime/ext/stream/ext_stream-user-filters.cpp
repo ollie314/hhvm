@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,10 +17,12 @@
 
 #include "hphp/runtime/ext/stream/ext_stream-user-filters.h"
 #include "hphp/runtime/ext/stream/ext_stream.h"
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/file.h"
 #include "hphp/runtime/ext/array/ext_array.h"
 #include "hphp/runtime/ext/std/ext_std.h"
-#include "hphp/system/constants.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
@@ -38,12 +40,71 @@ const StaticString s_bucket_class("__SystemLib\\StreamFilterBucket");
 const StaticString s_default_filters_register_func(
   "__SystemLib\\register_default_stream_filters");
 
-class StreamUserFilters : public RequestEventHandler {
- public:
+///////////////////////////////////////////////////////////////////////////////
+
+struct StreamFilterRepository {
+  void add(const String& key, const Variant& v) {
+    m_filters.add(key, v);
+  }
+
+  void detach() {
+    m_filters.detach();
+  }
+
+  bool exists(const String& needle) const {
+    if (m_filters.exists(m_filters.convertKey(needle))) {
+      return true;
+    }
+    /* Could not find exact match, now try wildcard match */
+    int lastDotPos = needle.rfind('.');
+    if (String::npos == lastDotPos) {
+      return false;
+    }
+    String wildcard = needle.substr(0, lastDotPos) + ".*";
+    return m_filters.exists(m_filters.convertKey(wildcard));
+  }
+
+  Variant rvalAt(const String& needle) const {
+    /* First try to find exact match, afterwards try wildcard matches */
+    int lastDotPos = needle.rfind('.');
+    if (String::npos == lastDotPos ||
+        m_filters.exists(m_filters.convertKey(needle))) {
+      return m_filters.rvalAtRef(needle);
+    }
+    String wildcard = needle.substr(0, lastDotPos) + ".*";
+    return m_filters.rvalAtRef(wildcard);
+  }
+
+  const Array& filtersAsArray() const {
+    return m_filters;
+  }
+
+  bool isNull() const {
+    return m_filters.isNull();
+  }
+
+  template<class F> void scan(F& mark) const {
+    mark(m_filters);
+  }
+
+private:
+  Array m_filters;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
+struct StreamUserFilters final : RequestEventHandler {
   virtual ~StreamUserFilters() {}
-  Array m_registeredFilters;
 
   bool registerFilter(const String& name, const String& class_name) {
+    if (name.empty()) {
+      raise_warning("stream_filter_register(): Filter name cannot be empty");
+      return false;
+    }
+    if (class_name.empty()) {
+      raise_warning("stream_filter_register(): Class name cannot be empty");
+      return false;
+    }
     if (m_registeredFilters.exists(name)) {
       return false;
     }
@@ -73,13 +134,14 @@ class StreamUserFilters : public RequestEventHandler {
                                  /* append = */ true);
   }
 
-  virtual void requestInit() {
+  void requestInit() override {
     vm_call_user_func(s_default_filters_register_func, empty_array_ref);
   }
 
-  virtual void requestShutdown() {
+  void requestShutdown() override {
     m_registeredFilters.detach();
   }
+
 private:
   Variant appendOrPrependFilter(const Resource& stream,
                  const String& filtername,
@@ -96,9 +158,7 @@ private:
       return false;
     }
 
-    auto file = stream.getTyped<File>();
-    assert(file);
-
+    auto file = cast<File>(stream);
     int mode = readwrite.toInt32();
     if (!mode) {
       auto str = file->getMode();
@@ -120,13 +180,13 @@ private:
 
     // If it's ALL we create two resources, but only return one - this
     // matches Zend, and is the documented behavior.
-    Resource ret;
+    req::ptr<StreamFilter> ret;
     if (mode & k_STREAM_FILTER_READ) {
       auto resource = createInstance(func_name,
-                                     stream,
+                                     file,
                                      filtername,
                                      params);
-      if (resource.isNull()) {
+      if (!resource) {
         return false;
       }
       ret = resource;
@@ -138,10 +198,10 @@ private:
     }
     if (mode & k_STREAM_FILTER_WRITE) {
       auto resource = createInstance(func_name,
-                                     stream,
+                                     file,
                                      filtername,
                                      params);
-      if (resource.isNull()) {
+      if (!resource) {
         return false;
       }
       ret = resource;
@@ -151,23 +211,25 @@ private:
         file->prependWriteFilter(resource);
       }
     }
-    return ret;
+    return Variant(std::move(ret));
   }
 
-  Resource createInstance(const char* php_func,
-                          const Resource& stream,
-                          const String& filter,
-                          const Variant& params) {
+  req::ptr<StreamFilter> createInstance(const char* php_func,
+                                        req::ptr<File> stream,
+                                        const String& filter,
+                                        const Variant& params) {
     auto class_name = m_registeredFilters.rvalAt(filter).asCStrRef();
     Class* class_ = Unit::getClass(class_name.get(), true);
     Object obj = Object();
 
     if (LIKELY(class_ != nullptr)) {
       PackedArrayInit ctor_args(3);
-      ctor_args.append(stream);
+      ctor_args.append(Variant(stream));
       ctor_args.append(filter);
       ctor_args.append(params);
-      obj = g_context->createObject(class_name.get(), ctor_args.toArray());
+      obj = Object::attach(
+        g_context->createObject(class_name.get(), ctor_args.toArray())
+      );
       auto created = obj->o_invoke(s_onCreate, Array::Create());
       /* - true: documented value for success
        * - null: undocumented default successful value
@@ -189,26 +251,33 @@ private:
       raise_warning("%s: unable to create or locate filter \"%s\"",
                     php_func,
                     filter.data());
-      return Resource();
+      return nullptr;
     }
 
-    return Resource(newres<StreamFilter>(obj, stream));
+    return req::make<StreamFilter>(obj, stream);
   }
+
+public:
+  void vscan(IMarker& mark) const override {
+    m_registeredFilters.scan(mark);
+  }
+
+public:
+  StreamFilterRepository m_registeredFilters;
 };
 IMPLEMENT_STATIC_REQUEST_LOCAL(StreamUserFilters, s_stream_user_filters);
 
 ///////////////////////////////////////////////////////////////////////////////
 // StreamFilter
 
-int64_t StreamFilter::invokeFilter(Resource in,
-                                   Resource out,
+int64_t StreamFilter::invokeFilter(const req::ptr<BucketBrigade>& in,
+                                   const req::ptr<BucketBrigade>& out,
                                    bool closing) {
   auto consumedTV = make_tv<KindOfInt64>(0);
-  auto consumedRef = RefData::Make(consumedTV);
-
+  auto consumedRef = Variant::attach(RefData::Make(consumedTV));
   PackedArrayInit params(4);
-  params.append(in);
-  params.append(out);
+  params.append(Variant(in));
+  params.append(Variant(out));
   params.append(consumedRef);
   params.append(closing);
   return m_filter->o_invoke(s_filter, params.toArray()).toInt64();
@@ -219,13 +288,10 @@ void StreamFilter::invokeOnClose() {
 }
 
 bool StreamFilter::remove() {
-  if (m_stream.isNull()) {
+  if (!m_stream) {
     return false;
   }
-  auto file = m_stream.getTyped<File>();
-  assert(file);
-  Resource rthis(this);
-  auto ret = file->removeFilter(rthis);
+  auto ret = m_stream->removeFilter(req::ptr<StreamFilter>(this));
   m_stream.reset();
   return ret;
 }
@@ -238,7 +304,7 @@ BucketBrigade::BucketBrigade(const String& data) {
   ai.append(data);
   ai.append(data.length());
   auto bucket = g_context->createObject(s_bucket_class.get(), ai.toArray());
-  appendBucket(bucket);
+  appendBucket(Object::attach(bucket));
 }
 
 void BucketBrigade::appendBucket(const Object& bucket) {
@@ -279,7 +345,7 @@ Array HHVM_FUNCTION(stream_get_filters) {
   if (UNLIKELY(filters.isNull())) {
     return empty_array();
   }
-  return array_keys_helper(filters).toArray();
+  return array_keys_helper(filters.filtersAsArray()).toArray();
 }
 
 Variant HHVM_FUNCTION(stream_filter_append,
@@ -305,42 +371,25 @@ Variant HHVM_FUNCTION(stream_filter_prepend,
 }
 
 bool HHVM_FUNCTION(stream_filter_remove, const Resource& resource) {
-  auto filter = resource.getTyped<StreamFilter>();
-  assert(filter);
-  return filter->remove();
+  return cast<StreamFilter>(resource)->remove();
 }
 
 Variant HHVM_FUNCTION(stream_bucket_make_writeable, const Resource& bb_res) {
-  auto brigade = bb_res.getTyped<BucketBrigade>();
-  assert(brigade);
-  auto ret = brigade->popFront();
-  return ret;
+  return cast<BucketBrigade>(bb_res)->popFront();
 }
 
 void HHVM_FUNCTION(stream_bucket_append, const Resource& bb_res, const Object& bucket) {
-  auto brigade = bb_res.getTyped<BucketBrigade>();
-  assert(brigade);
-  brigade->appendBucket(bucket);
+  cast<BucketBrigade>(bb_res)->appendBucket(bucket);
 }
 
 void HHVM_FUNCTION(stream_bucket_prepend, const Resource& bb_res, const Object& bucket) {
-  auto brigade = bb_res.getTyped<BucketBrigade>();
-  assert(brigade);
-  brigade->prependBucket(bucket);
+  cast<BucketBrigade>(bb_res)->prependBucket(bucket);
 }
 
-const StaticString
-  s_STREAM_FILTER_READ("STREAM_FILTER_READ"),
-  s_STREAM_FILTER_WRITE("STREAM_FILTER_WRITE"),
-  s_STREAM_FILTER_ALL("STREAM_FILTER_ALL");
-
 void StandardExtension::initStreamUserFilters() {
-#define SFCNS(v) Native::registerConstant<KindOfInt64> \
-                         (s_STREAM_FILTER_##v.get(), k_STREAM_FILTER_##v)
-  SFCNS(READ);
-  SFCNS(WRITE);
-  SFCNS(ALL);
-#undef SFCNS
+  HHVM_RC_INT(STREAM_FILTER_READ, k_STREAM_FILTER_READ);
+  HHVM_RC_INT(STREAM_FILTER_WRITE, k_STREAM_FILTER_WRITE);
+  HHVM_RC_INT(STREAM_FILTER_ALL, k_STREAM_FILTER_ALL);
 
   HHVM_FE(stream_get_filters);
   HHVM_FE(stream_filter_register);

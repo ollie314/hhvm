@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,7 @@ namespace HPHP { namespace jit {
 
 std::string NewStructData::show() const {
   std::ostringstream os;
+  os << offset.offset << ',';
   auto delim = "";
   for (uint32_t i = 0; i < numKeys; i++) {
     os << delim << "\"" <<
@@ -38,10 +39,10 @@ std::string NewStructData::show() const {
 
 namespace {
 
-FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_cseHash,   cseHash);
-FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_cseEquals, cseEquals);
-FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_clone,     clone);
-FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_show,      show);
+FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_hash,   hash);
+FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_equals, equals);
+FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_clone,  clone);
+FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_show,   show);
 
 /*
  * dispatchExtra translates from runtime values for the Opcode enum
@@ -95,27 +96,27 @@ RetType dispatchExtra(Opcode opc, IRExtraData* data, Args&&... args) {
 
 template<class T>
 typename std::enable_if<
-  has_cseHash<T,size_t () const>::value,
+  has_hash<T,size_t () const>::value,
   size_t
->::type cseHashExtraImpl(T* t) { return t->cseHash(); }
-size_t cseHashExtraImpl(IRExtraData*) {
-  // This probably means an instruction was marked CanCSE but its
-  // extra data had no hash function.
+>::type hashExtraImpl(T* t) { return t->hash(); }
+size_t hashExtraImpl(IRExtraData*) {
+  // This probably means we tried to hash an IRInstruction with extra data that
+  // had no hash function.
   always_assert(!"attempted to hash extra data that didn't "
     "provide a hash function");
 }
 
 template<class T>
 typename std::enable_if<
-  has_cseEquals<T,bool (T const&) const>::value ||
-  has_cseEquals<T,bool (T)        const>::value,
+  has_equals<T,bool (T const&) const>::value ||
+  has_equals<T,bool (T)        const>::value,
   bool
->::type cseEqualsExtraImpl(T* t, IRExtraData* o) {
-  return t->cseEquals(*static_cast<T*>(o));
+>::type equalsExtraImpl(T* t, IRExtraData* o) {
+  return t->equals(*static_cast<T*>(o));
 }
-bool cseEqualsExtraImpl(IRExtraData*, IRExtraData*) {
-  // This probably means an instruction was marked CanCSE but its
-  // extra data had no equals function.
+bool equalsExtraImpl(IRExtraData*, IRExtraData*) {
+  // This probably means we tried to compare IRInstructions with extra data that
+  // had no equals function.
   always_assert(!"attempted to compare extra data that didn't "
                  "provide an equals function");
 }
@@ -139,14 +140,10 @@ typename std::enable_if<
 }
 
 template<class T>
-typename std::enable_if<
-  has_show<T,std::string () const>::value,
-  std::string
->::type showExtraImpl(T* t) { return t->show(); }
-std::string showExtraImpl(const IRExtraData*) { return "..."; }
+std::string showExtraImpl(const T* extra) { return extra->show(); }
 
-MAKE_DISPATCHER(HashDispatcher, size_t, cseHashExtraImpl);
-MAKE_DISPATCHER(EqualsDispatcher, bool, cseEqualsExtraImpl);
+MAKE_DISPATCHER(HashDispatcher, size_t, hashExtraImpl);
+MAKE_DISPATCHER(EqualsDispatcher, bool, equalsExtraImpl);
 MAKE_DISPATCHER(CloneDispatcher, IRExtraData*, cloneExtraImpl);
 MAKE_DISPATCHER(ShowDispatcher, std::string, showExtraImpl);
 
@@ -154,12 +151,18 @@ MAKE_DISPATCHER(ShowDispatcher, std::string, showExtraImpl);
 
 //////////////////////////////////////////////////////////////////////
 
-size_t cseHashExtra(Opcode opc, IRExtraData* data) {
-  return dispatchExtra<size_t,HashDispatcher>(opc, data);
+size_t hashExtra(Opcode opc, const IRExtraData* data) {
+  return dispatchExtra<size_t,HashDispatcher>(
+    opc, const_cast<IRExtraData*>(data));
 }
 
-bool cseEqualsExtra(Opcode opc, IRExtraData* data, IRExtraData* other) {
-  return dispatchExtra<bool,EqualsDispatcher>(opc, data, other);
+bool equalsExtra(
+  Opcode opc,
+  const IRExtraData* data,
+  const IRExtraData* other
+) {
+  return dispatchExtra<bool,EqualsDispatcher>(
+    opc, const_cast<IRExtraData*>(data), const_cast<IRExtraData*>(other));
 }
 
 IRExtraData* cloneExtra(Opcode opc, IRExtraData* data, Arena& a) {
@@ -167,8 +170,9 @@ IRExtraData* cloneExtra(Opcode opc, IRExtraData* data, Arena& a) {
 }
 
 std::string showExtra(Opcode opc, const IRExtraData* data) {
-  return dispatchExtra<std::string,ShowDispatcher>(opc,
-      const_cast<IRExtraData*>(data));
+  return dispatchExtra<std::string,ShowDispatcher>(
+    opc, const_cast<IRExtraData*>(data)
+  );
 }
 
 //////////////////////////////////////////////////////////////////////

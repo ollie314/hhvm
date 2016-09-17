@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,13 +16,18 @@
 */
 
 #include "hphp/runtime/ext/zlib/ext_zlib.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/file.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/mem-file.h"
 #include "hphp/runtime/ext/zlib/zip-file.h"
 #include "hphp/runtime/base/stream-wrapper.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/base/file-stream-wrapper.h"
+#include "hphp/runtime/base/surprise-flags.h"
+#include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/vm/native-data.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/compression.h"
 #include "hphp/util/logger.h"
 #include <folly/String.h>
@@ -44,10 +49,9 @@ namespace {
 ///////////////////////////////////////////////////////////////////////////////
 // compress.zlib:// stream wrapper
 
-static class ZlibStreamWrapper : public Stream::Wrapper {
- public:
-  virtual File* open(const String& filename, const String& mode,
-                     int options, const Variant& context) {
+static struct ZlibStreamWrapper final : Stream::Wrapper {
+  req::ptr<File> open(const String& filename, const String& mode, int options,
+                      const req::ptr<StreamContext>& context) override {
     String fname;
     static const char cz[] = "compress.zlib://";
 
@@ -56,13 +60,13 @@ static class ZlibStreamWrapper : public Stream::Wrapper {
     } else if (!strncmp(filename.data(), cz, sizeof(cz) - 1)) {
       fname = filename.substr(sizeof(cz) - 1);
     } else {
-      return NULL;
+      return nullptr;
     }
 
     String translated;
     if (fname.find("://") == -1) {
       translated = File::TranslatePath(fname);
-      if (MemFile* file = FileStreamWrapper::openFromCache(translated, mode)) {
+      if (auto file = FileStreamWrapper::openFromCache(translated, mode)) {
         file->unzip();
         return file;
       }
@@ -70,13 +74,13 @@ static class ZlibStreamWrapper : public Stream::Wrapper {
       translated = fname;
     }
 
-    std::unique_ptr<ZipFile> file(newres<ZipFile>());
+    auto file = req::make<ZipFile>();
     bool ret = file->open(translated, mode);
     if (!ret) {
       raise_warning("%s", file->getLastError().c_str());
-      return NULL;
+      return nullptr;
     }
-    return file.release();
+    return file;
   }
 } s_zlib_stream_wrapper;
 
@@ -98,6 +102,10 @@ const int64_t k_FORCE_DEFLATE         = k_ZLIB_ENCODING_DEFLATE;
 
 Variant HHVM_FUNCTION(readgzfile, const String& filename,
                                   int64_t use_include_path /* = 0 */) {
+  if (!FileUtil::checkPathAndWarn(filename, __FUNCTION__ + 2, 1)) {
+    return init_null();
+  }
+
   Variant stream = HHVM_FN(gzopen)(filename, "rb", use_include_path);
   if (stream.isBoolean() && !stream.toBoolean()) {
     return false;
@@ -107,6 +115,10 @@ Variant HHVM_FUNCTION(readgzfile, const String& filename,
 
 Variant HHVM_FUNCTION(gzfile, const String& filename,
                               int64_t use_include_path /* = 0 */) {
+  if (!FileUtil::checkPathAndWarn(filename, __FUNCTION__ + 2, 1)) {
+    return init_null();
+  }
+
   Variant stream = HHVM_FN(gzopen)(filename, "rb", use_include_path);
   if (stream.isBoolean() && !stream.toBoolean()) {
     return false;
@@ -127,11 +139,11 @@ inline size_t hhvm_zlib_buffer_size_guess(size_t inlen) {
 }
 
 static voidpf hhvm_zlib_alloc(voidpf opaque, uInt items, uInt size) {
-  return (voidpf)smart_malloc(items * size);
+  return (voidpf)req::malloc(items * size);
 }
 
 static void hhvm_zlib_free(voidpf opaque, voidpf address) {
-  smart_free((void*)address);
+  req::free((void*)address);
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -167,7 +179,7 @@ static Variant hhvm_zlib_encode(const String& data,
     String ret(outlen, ReserveString);
 
     Z.next_in = (Bytef *) data.c_str();
-    Z.next_out = (Bytef *) ret.bufferSlice().ptr;
+    Z.next_out = (Bytef *) ret.mutableData();
     Z.avail_in = data.size();
     Z.avail_out = ret.capacity(); // not counting null terminator
 
@@ -203,7 +215,7 @@ Variant HHVM_FUNCTION(gzencode, const String& data, int level,
 /* Expand a zlib stream into a String
  *
  * Starts with an optimistically sized output string of
- * input size or maxlen, whichever is less.
+ * input size or maxlen (must be >= 0), whichever is less.
  *
  * From there, grows by ~12.5% per iteration to account for expansion.
  *
@@ -212,24 +224,37 @@ Variant HHVM_FUNCTION(gzencode, const String& data, int level,
  */
 static String hhvm_zlib_inflate_rounds(z_stream *Z, int64_t maxlen,
                                        int &status) {
+  assert(maxlen >= 0);
   size_t retsize = (maxlen && maxlen < Z->avail_in) ? maxlen : Z->avail_in;
-  String ret(retsize + 1, ReserveString);
+  String ret;
   size_t retused = 0;
   int round = 0;
 
   do {
+    if (UNLIKELY(retsize >= kMaxSmallSize && MM().preAllocOOM(retsize + 1))) {
+      VMRegAnchor _;
+      assert(checkSurpriseFlags());
+      handle_request_surprise();
+    }
+
+    auto const ms = [&]() -> folly::MutableStringPiece {
+      if (!ret.get()) {
+        ret = String(retsize + 1, ReserveString);
+        return ret.bufferSlice();
+      }
+      return ret.reserve(retsize + 1);
+    }();
+
+    auto retbuf = ms.data();
+    Z->avail_out = ms.size() - retused;
+    Z->next_out = (Bytef *) (retbuf + retused);
+    status = inflate(Z, Z_NO_FLUSH);
+    retused = ms.size() - Z->avail_out;
+    ret.setSize(retused);
     if (maxlen && (maxlen < retused)) {
       status = Z_MEM_ERROR;
       break;
     }
-
-    char *retbuf = ret.reserve(retsize + 1).ptr;
-    Z->avail_out = ret.capacity() - retused;
-    Z->next_out = (Bytef *) (retbuf + retused);
-    status = inflate(Z, Z_NO_FLUSH);
-    retused = ret.capacity() - Z->avail_out;
-    ret.setSize(retused);
-
     retsize += (retsize >> 3) + 1;
   } while ((Z_BUF_ERROR == status || (Z_OK == status && Z->avail_in)) &&
            ++round < 100);
@@ -261,22 +286,21 @@ static Variant hhvm_zlib_decode(const String& data,
   Z.zfree = (free_func) hhvm_zlib_free;
 
 retry_raw_inflate:
+  SCOPE_EXIT { inflateEnd(&Z); };
+
   int status = inflateInit2(&Z, enc);
   if (Z_OK == status) {
     Z.next_in = (Bytef*)data.c_str();
     Z.avail_in = data.size() + 1;
     String ret = hhvm_zlib_inflate_rounds(&Z, maxlen, status);
     if (status == Z_STREAM_END) {
-      inflateEnd(&Z);
       return ret;
     }
     if ((status == Z_DATA_ERROR) &&
         (k_ZLIB_ENCODING_ANY == enc)) {
-       inflateEnd(&Z);
       enc = k_ZLIB_ENCODING_RAW;
       goto retry_raw_inflate;
     }
-    inflateEnd(&Z);
   }
 
   raise_warning("%s", zError(status));
@@ -309,13 +333,16 @@ String HHVM_FUNCTION(zlib_get_coding_type) {
 
 Variant HHVM_FUNCTION(gzopen, const String& filename, const String& mode,
                               int64_t use_include_path /* = 0 */) {
-  File *file = newres<ZipFile>();
-  Resource handle(file);
+  if (!FileUtil::checkPathAndWarn(filename, __FUNCTION__ + 2, 1)) {
+    return init_null();
+  }
+
+  auto file = req::make<ZipFile>();
   bool ret = file->open(File::TranslatePath(filename), mode);
   if (!ret) {
     return false;
   }
-  return handle;
+  return Variant(std::move(file));
 }
 
 bool HHVM_FUNCTION(gzclose, const Resource& zp) {
@@ -325,7 +352,7 @@ Variant HHVM_FUNCTION(gzread, const Resource& zp, int64_t length /* = 0 */) {
   return HHVM_FN(fread)(zp, length);
 }
 Variant HHVM_FUNCTION(gzseek, const Resource& zp, int64_t offset,
-                              int64_t whence /* = k_SEEK_SET */) {
+                              int64_t whence /* = SEEK_SET */) {
   return HHVM_FN(fseek)(zp, offset, whence);
 }
 Variant HHVM_FUNCTION(gztell, const Resource& zp) {
@@ -340,7 +367,7 @@ bool HHVM_FUNCTION(gzrewind, const Resource& zp) {
 Variant HHVM_FUNCTION(gzgetc, const Resource& zp) {
   return HHVM_FN(fgetc)(zp);
 }
-Variant HHVM_FUNCTION(gzgets, const Resource& zp, int64_t length /* = 1024 */) {
+Variant HHVM_FUNCTION(gzgets, const Resource& zp, int64_t length /* = 0 */) {
   return HHVM_FN(fgets)(zp, length);
 }
 Variant HHVM_FUNCTION(gzgetss, const Resource& zp, int64_t length /* = 0 */,
@@ -376,7 +403,7 @@ Variant HHVM_FUNCTION(snappy_uncompress, const String& data) {
 
   snappy::GetUncompressedLength(data.data(), data.size(), &dsize);
   String s = String(dsize, ReserveString);
-  char *uncompressed = s.bufferSlice().ptr;
+  char *uncompressed = s.mutableData();
 
   if (!snappy::RawUncompress(data.data(), data.size(), uncompressed)) {
     return false;
@@ -401,9 +428,9 @@ typedef struct nzlib_format_s {
 } nzlib_format_t;
 
 Variant HHVM_FUNCTION(nzcompress, const String& uncompressed) {
-  size_t len = compressBound(uncompressed.size());
+  uLong len = compressBound(uncompressed.size());
   String str(sizeof(nzlib_format_t) + len, ReserveString);
-  nzlib_format_t* format = (nzlib_format_t*)str.bufferSlice().ptr;
+  nzlib_format_t* format = (nzlib_format_t*)str.mutableData();
 
   format->magic = htonl(NZLIB_MAGIC);
   format->uncompressed_sz = htonl(uncompressed.size());
@@ -427,13 +454,13 @@ Variant HHVM_FUNCTION(nzuncompress, const String& compressed) {
     return false;
   }
 
-  size_t len = ntohl(format->uncompressed_sz);
+  uLong len = ntohl(format->uncompressed_sz);
   if (len == 0) {
     return empty_string_variant();
   }
 
   String str(len, ReserveString);
-  char* uncompressed = str.bufferSlice().ptr;
+  char* uncompressed = str.mutableData();
   int rc = uncompress((Bytef*)uncompressed, &len, format->buf,
                       compressed.size() - sizeof(*format));
   if (rc != Z_OK) {
@@ -498,7 +525,7 @@ Variant HHVM_FUNCTION(lz4_compress, const String& uncompressed,
   int headerSize = VarintSize(uncompressed.size());
   bufsize += headerSize;  // for the header
   String s = String(bufsize, ReserveString);
-  char *compressed = s.bufferSlice().ptr;
+  char *compressed = s.mutableData();
 
   VarintEncode(uncompressed.size(), &compressed);  // write the header
 
@@ -520,7 +547,7 @@ Variant HHVM_FUNCTION(lz4_hccompress, const String& uncompressed) {
   int headerSize = VarintSize(uncompressed.size());
   bufsize += headerSize;  // for the header
   String s = String(bufsize, ReserveString);
-  char *compressed = s.bufferSlice().ptr;
+  char *compressed = s.mutableData();
 
   VarintEncode(uncompressed.size(), &compressed);  // write the header
 
@@ -543,7 +570,7 @@ Variant HHVM_FUNCTION(lz4_uncompress, const String& compressed) {
 
   int inSize = compressed.size() - (compressed_ptr - compressed.data());
   String s = String(dsize, ReserveString);
-  char *uncompressed = s.bufferSlice().ptr;
+  char *uncompressed = s.mutableData();
 #ifdef LZ4_MAX_INPUT_SIZE
   int ret = LZ4_decompress_safe(compressed_ptr, uncompressed, inSize, dsize);
 
@@ -564,12 +591,12 @@ Variant HHVM_FUNCTION(lz4_uncompress, const String& compressed) {
 
 ///////////////////////////////////////////////////////////////////////////////
 // Chunk-based API
+namespace {
 
-const StaticString s___SystemLib_ChunkedInflator("__SystemLib_ChunkedInflator");
+const StaticString s_SystemLib_ChunkedInflator("__SystemLib\\ChunkedInflator");
 
-class __SystemLib_ChunkedInflator {
- public:
-  __SystemLib_ChunkedInflator(): m_eof(false) {
+struct ChunkedInflator {
+  ChunkedInflator(): m_eof(false) {
     m_zstream.zalloc = (alloc_func) Z_NULL;
     m_zstream.zfree = (free_func) Z_NULL;
     int status = inflateInit2(&m_zstream, -MAX_WBITS);
@@ -578,7 +605,7 @@ class __SystemLib_ChunkedInflator {
     }
   }
 
-  ~__SystemLib_ChunkedInflator() {
+  ~ChunkedInflator() {
     if (!eof()) {
       inflateEnd(&m_zstream);
     }
@@ -600,7 +627,7 @@ class __SystemLib_ChunkedInflator {
     do {
       int buffer_length = chunk.length() * (1 << factor);
       String buffer(buffer_length, ReserveString);
-      char* raw = buffer.bufferSlice().ptr;
+      char* raw = buffer.mutableData();
       m_zstream.next_out = (Bytef*) raw;
       m_zstream.avail_out = buffer_length;
 
@@ -627,15 +654,15 @@ class __SystemLib_ChunkedInflator {
 };
 
 #define FETCH_CHUNKED_INFLATOR(dest, src) \
-  auto dest = Native::data<__SystemLib_ChunkedInflator>(src);
+  auto dest = Native::data<ChunkedInflator>(src);
 
-bool HHVM_METHOD(__SystemLib_ChunkedInflator, eof) {
+bool HHVM_METHOD(ChunkedInflator, eof) {
   FETCH_CHUNKED_INFLATOR(data, this_);
   assert(data);
   return data->eof();
 }
 
-String HHVM_METHOD(__SystemLib_ChunkedInflator,
+String HHVM_METHOD(ChunkedInflator,
                    inflateChunk,
                    const String& chunk) {
   FETCH_CHUNKED_INFLATOR(data, this_);
@@ -643,24 +670,22 @@ String HHVM_METHOD(__SystemLib_ChunkedInflator,
   return data->inflateChunk(chunk);
 }
 
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
-class ZlibExtension : public Extension {
- public:
+struct ZlibExtension final : Extension {
   ZlibExtension() : Extension("zlib", "2.0") {}
-  virtual void moduleLoad(const IniSetting::Map& ini, Hdf hdf) {
+  void moduleLoad(const IniSetting::Map& ini, Hdf hdf) override {
     s_zlib_stream_wrapper.registerAs("compress.zlib");
   }
-  virtual void moduleInit() {
-#define X(cns) \
-    Native::registerConstant<KindOfInt64>(makeStaticString(#cns), k_##cns);
-    X(ZLIB_ENCODING_RAW);
-    X(ZLIB_ENCODING_GZIP);
-    X(ZLIB_ENCODING_DEFLATE);
-    X(ZLIB_ENCODING_ANY);
-    X(FORCE_GZIP);
-    X(FORCE_DEFLATE);
-#undef X
+  void moduleInit() override {
+    HHVM_RC_INT(ZLIB_ENCODING_RAW, k_ZLIB_ENCODING_RAW);
+    HHVM_RC_INT(ZLIB_ENCODING_GZIP, k_ZLIB_ENCODING_GZIP);
+    HHVM_RC_INT(ZLIB_ENCODING_DEFLATE, k_ZLIB_ENCODING_DEFLATE);
+    HHVM_RC_INT(ZLIB_ENCODING_ANY, k_ZLIB_ENCODING_ANY);
+    HHVM_RC_INT(FORCE_GZIP, k_FORCE_GZIP);
+    HHVM_RC_INT(FORCE_DEFLATE, k_FORCE_DEFLATE);
 
     HHVM_FE(zlib_encode);
     HHVM_FE(gzdeflate);
@@ -701,11 +726,13 @@ class ZlibExtension : public Extension {
     HHVM_FE(lz4_hccompress);
     HHVM_FE(lz4_uncompress);
 
-    HHVM_ME(__SystemLib_ChunkedInflator, eof);
-    HHVM_ME(__SystemLib_ChunkedInflator, inflateChunk);
+    HHVM_NAMED_ME(__SystemLib\\ChunkedInflator, eof,
+                  HHVM_MN(ChunkedInflator, eof));
+    HHVM_NAMED_ME(__SystemLib\\ChunkedInflator, inflateChunk,
+                  HHVM_MN(ChunkedInflator, inflateChunk));
 
-    Native::registerNativeDataInfo<__SystemLib_ChunkedInflator>(
-      s___SystemLib_ChunkedInflator.get());
+    Native::registerNativeDataInfo<ChunkedInflator>(
+      s_SystemLib_ChunkedInflator.get());
 
     loadSystemlib();
 #ifdef HAVE_QUICKLZ

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -43,45 +43,10 @@ SSATmp* canonical(SSATmp* value) {
 
 //////////////////////////////////////////////////////////////////////
 
-IRInstruction* findSpillFrame(SSATmp* sp) {
-  auto inst = sp->inst();
-  while (!inst->is(SpillFrame)) {
-    if (debug) {
-      [&] {
-        for (auto const& dst : inst->dsts()) {
-          if (dst.isA(Type::StkPtr)) return;
-        }
-        assert(false);
-      }();
-    }
-
-    assert(!inst->is(RetAdjustStack));
-    if (inst->is(DefSP)) return nullptr;
-    if (inst->is(InterpOne) && isFPush(inst->extra<InterpOne>()->opcode)) {
-      // A non-punted translation of this bytecode would contain a SpillFrame.
-      return nullptr;
-    }
-
-    // M-instr support opcodes have the previous sp in varying sources.
-    if (inst->modifiesStack()) inst = inst->previousStkPtr()->inst();
-    else                       inst = inst->src(0)->inst();
-  }
-
-  return inst;
-}
-
-//////////////////////////////////////////////////////////////////////
-
-Block* findDefiningBlock(const SSATmp* t) {
-  assert(!t->inst()->is(DefConst));
+Block* findDefiningBlock(const SSATmp* t, const IdomVector& idoms) {
+  assertx(!t->inst()->is(DefConst));
   auto const srcInst = t->inst();
 
-  /*
-   * Instructions that define temporaries that also have edges define the
-   * temporary only if they do not take the taken edge.  Since the temporary is
-   * defined on the fallthrough edge, this means we only have a block that we
-   * can return if this edge is not the only edge leading to its target.
-   */
   if (srcInst->hasEdges()) {
     auto const next = srcInst->next();
     UNUSED auto const taken = srcInst->taken();
@@ -90,10 +55,27 @@ Block* findDefiningBlock(const SSATmp* t) {
       "hasEdges instruction defining a dst had no edges:\n  {}\n",
       srcInst->toString()
     );
-    return next->numPreds() == 1 ? next : nullptr;
+    for (const auto& arc : next->preds()) {
+      auto pred = arc.from();
+      if (pred != srcInst->block() && !dominates(next, pred, idoms)) {
+        return nullptr;
+      }
+    }
+    return next;
   }
 
   return srcInst->block();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+bool is_tmp_usable(const IdomVector& idoms,
+                   const SSATmp* tmp,
+                   const Block* where) {
+  if (tmp->inst()->is(DefConst)) return true;
+  auto const definingBlock = findDefiningBlock(tmp, idoms);
+  if (!definingBlock) return false;
+  return dominates(definingBlock, where, idoms);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -105,7 +87,7 @@ SSATmp* least_common_ancestor(SSATmp* s1, SSATmp* s2) {
   IdSet<SSATmp> seen;
 
   auto const step = [] (SSATmp* v) {
-    assert(v != nullptr);
+    assertx(v != nullptr);
     return v->inst()->isPassthrough() ?
       v->inst()->getPassthroughValue() :
       nullptr;

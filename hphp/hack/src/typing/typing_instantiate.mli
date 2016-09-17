@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,20 +8,18 @@
  *
  *)
 
-open Utils
 open Typing_defs
 
 (*****************************************************************************)
 (* Types *)
 (*****************************************************************************)
 
-type env   = Typing_env.env
-type subst = ty SMap.t
+type subst
 
 (*****************************************************************************)
 (* Builds a substitution out of a list of type parameters and a list of types.
  *
- * Typical use-case: 
+ * Typical use-case:
  *   class Y<T> { ... }
  *   class X extends Y<int>
  *
@@ -31,8 +29,7 @@ type subst = ty SMap.t
  *)
 (*****************************************************************************)
 
-val make_subst: tparam list -> ty list -> subst
-val make_subst_with_this: this:ty -> tparam list -> ty list -> subst
+val make_subst: decl tparam list -> decl ty list -> subst
 
 (*****************************************************************************)
 (* Primitive instantiating a type.
@@ -40,10 +37,7 @@ val make_subst_with_this: this:ty -> tparam list -> ty list -> subst
  *)
 (*****************************************************************************)
 
-val instantiate     : subst -> env -> ty -> env * ty
-val instantiate_ce  : subst -> env -> class_elt -> env * class_elt
-
-val instantiate_ft  : env -> fun_type -> env * fun_type
-val instantiate_fun : env -> ty -> Nast.expr list -> env * ty
-
-val instantiate_this : env -> ty -> ty -> env * ty
+val instantiate     : subst -> decl ty -> decl ty
+val instantiate_ce  : subst -> class_elt -> class_elt
+val instantiate_typeconst :
+  subst -> typeconst_type -> typeconst_type

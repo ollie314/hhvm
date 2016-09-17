@@ -4,6 +4,7 @@
 .DS_Store
 hphp.log
 /build
+/deps
 
 /hphp/test/test
 /hphp/test/test_fast.inc
@@ -26,17 +27,13 @@ hphp.log
 /hphp/runtime/ext/*/CMakeLists.txt
 /hphp/runtime/ext/*/*.so
 
-/hphp/runtime/tmp/Test*
-/hphp/runtime/tmp/run
-/hphp/runtime/tmp/run.sh
-/hphp/runtime/tmp/libtest.so
+/hphp/runtime/tmp/string
 
 /hphp/hhvm/gen
 
-*.ext_hhvm.cpp
-*.ext_hhvm.h
-
 /hphp/tools/shmw/shmw
+/hphp/tools/version/version
+/hphp/tools/gdb/hhvm-gdb
 
 /hphp/ffi/java/classes
 /hphp/ffi/java/hphp_ffi_java.h
@@ -84,7 +81,6 @@ CPackSourceConfig.cmake
 
 # windows files
 *.exe
-*.rc
 
 # python scripts
 *.pyc

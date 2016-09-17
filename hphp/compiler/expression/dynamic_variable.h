@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,13 +24,12 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(DynamicVariable);
 
-class DynamicVariable : public Expression {
-public:
+struct DynamicVariable : Expression {
   DynamicVariable(EXPRESSION_CONSTRUCTOR_PARAMETERS, ExpressionPtr exp);
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  virtual int getLocalEffects() const { return NoEffect; }
-  virtual bool isRefable(bool checkError = false) const { return true;}
+  int getLocalEffects() const override { return NoEffect; }
+  bool isRefable(bool checkError = false) const override { return true;}
 
   ExpressionPtr getSubExpression() const { return m_exp; }
 private:

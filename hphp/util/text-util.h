@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,37 +21,12 @@
 
 #include <string>
 #include <vector>
+
+#include <folly/Range.h>
+
 #include "hphp/util/portability.h"
 
 namespace HPHP {
-
-class TextUtil {
- public:
-  // Returns true if the entirety of str2 is at the beginning of str1.
-  // The empty string is considered to be at the beginning of a string.
-  static bool BeginsWith(const std::string& str1, const std::string& str2);
-
-  // If the entirety of str2 is at the beginning of str1, then
-  // return just the unique part of str1.  Otherwise return str1 unchanged.
-  static std::string StripCommonStart(const std::string& str1,
-                                      const std::string& str2);
-
-  // Returns true if str's last character is ch.
-  static bool EndsWith(const std::string& str, char ch);
-
-  // Returns str with any instances of ch trimmed from the right end.
-  static std::string StripTrailing(const std::string& str, char ch);
-
-  // Split "/foo/bar/x" into "/foo", "/foo/bar".
-  // Also splits "foo/bar/x" into "foo", "foo/bar".
-  static std::vector<std::string> MakePathList(const std::string& path);
-};
-
-/**
- * Split a string into a list of tokens by character delimiter.
- */
-void split(char delimiter, const char *s, std::vector<std::string> &out,
-           bool ignoreEmpty = false);
 
 /**
  * Replace all occurrences of "from" substring to "to" string.
@@ -61,12 +36,12 @@ void replaceAll(std::string &s, const char *from, const char *to);
 /**
  * Change an ASCII string to lower case.
  */
-std::string toLower(const std::string &s);
+std::string toLower(folly::StringPiece s);
 
 /**
  * Change an ASCII string to upper case.
  */
-std::string toUpper(const std::string &s);
+std::string toUpper(folly::StringPiece s);
 
 /**
  * Convert a full pathname of a file to an identifier.
@@ -76,19 +51,19 @@ std::string getIdentifier(const std::string &fileName);
 /**
  * Duplicate a buffer of given size, null-terminate the result.
  */
-const void *buffer_duplicate(const void *src, int size);
+const void *buffer_duplicate(const void *src, size_t size);
 
 /**
  * Append buf2 to buf2, null-terminate the result.
  */
-const void *buffer_append(const void *buf1, int size1,
-                          const void *buf2, int size2);
+const void *buffer_append(const void *buf1, size_t size1,
+                          const void *buf2, size_t size2);
 
 /**
  * printf into a std::string.
  */
 void string_printf(std::string &msg,
-                   const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+  ATTRIBUTE_PRINTF_STRING const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
 
 /**
  * Escaping strings for code generation.

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,7 @@
 #ifndef incl_HPHP_TYPE_CONSTRAINT_H_
 #define incl_HPHP_TYPE_CONSTRAINT_H_
 
+#include "hphp/runtime/base/annot-type.h"
 #include "hphp/runtime/vm/named-entity.h"
 #include "hphp/runtime/vm/type-profile.h"
 
@@ -74,16 +75,26 @@ struct TypeConstraint {
      * E.g. "@int"
      */
     Soft = 0x10,
+
+    /*
+     * Indicates a type constraint is a type constant, which is similar to a
+     * type alias defined inside a class. For instance, the constraint on $x
+     * is a TypeConstant
+     * class Foo {
+     *   const type T = int;
+     *   public function bar(Foo::T $x) { ... }
+     */
+     TypeConstant = 0x20,
   };
 
   /*
-   * Special type constraints use a "MetaType", instead of just
+   * Special type constraints use a "Type", instead of just
    * underlyingDataType().
    *
    * See underlyingDataType().
    */
-  enum class MetaType : uint8_t { Precise, Self, Parent, Callable, Number,
-                                  ArrayKey };
+  using Type = AnnotType;
+  using MetaType = AnnotMetaType;
 
   static const int32_t ReturnId = -1;
 
@@ -133,17 +144,17 @@ struct TypeConstraint {
   /*
    * Access to the "meta type" for this TypeConstraint.
    */
-  MetaType metaType() const { return m_type.metatype; }
+  MetaType metaType() const { return getAnnotMetaType(m_type); }
 
   /*
    * Returns the underlying DataType for this TypeConstraint.
-   *
-   * This DataType is probably not relevant if the metaType is not
-   * MetaType::Precise, and also is a bit special when it is
-   * KindOfObject: it may either be a type alias or a class, depending
-   * on what typeName() means in a given request.
    */
-  MaybeDataType underlyingDataType() const { return m_type.dt; }
+  MaybeDataType underlyingDataType() const {
+    auto const dt = getAnnotDataType(m_type);
+    return (dt != KindOfUninit || isPrecise())
+      ? MaybeDataType(dt)
+      : folly::none;
+  }
 
   /*
    * Returns the underlying DataType for this TypeConstraint,
@@ -159,23 +170,24 @@ struct TypeConstraint {
   bool isHHType()   const { return m_flags & HHType; }
   bool isExtended() const { return m_flags & ExtendedHint; }
   bool isTypeVar()  const { return m_flags & TypeVar; }
-  bool isSelf()     const { return metaType() == MetaType::Self; }
-  bool isParent()   const { return metaType() == MetaType::Parent; }
-  bool isCallable() const { return metaType() == MetaType::Callable; }
-  bool isNumber()   const { return metaType() == MetaType::Number; }
+  bool isTypeConstant() const { return m_flags & TypeConstant; }
+
   bool isPrecise()  const { return metaType() == MetaType::Precise; }
-  bool isArrayKey() const { return metaType() == MetaType::ArrayKey; }
+  bool isMixed()    const { return m_type == Type::Mixed; }
+  bool isSelf()     const { return m_type == Type::Self; }
+  bool isParent()   const { return m_type == Type::Parent; }
+  bool isCallable() const { return m_type == Type::Callable; }
+  bool isNumber()   const { return m_type == Type::Number; }
+  bool isArrayKey() const { return m_type == Type::ArrayKey; }
 
-  bool isArray()    const { return m_type.dt == KindOfArray; }
+  bool isArray()    const { return m_type == Type::Array; }
+  bool isDict()     const { return m_type == Type::Dict; }
+  bool isVec()      const { return m_type == Type::Vec; }
+  bool isKeyset()   const { return m_type == Type::Keyset; }
 
-  bool isObjectOrTypeAlias() const {
-    assert(IMPLIES(isNumber(), m_type.dt != KindOfObject));
-    assert(IMPLIES(isArrayKey(), m_type.dt != KindOfObject));
-    assert(IMPLIES(isParent(), m_type.dt == KindOfObject));
-    assert(IMPLIES(isSelf(), m_type.dt == KindOfObject));
-    assert(IMPLIES(isCallable(), m_type.dt == KindOfObject));
-    return m_type.dt == KindOfObject;
-  }
+  bool isObject()   const { return m_type == Type::Object; }
+
+  AnnotType type()  const { return m_type; }
 
   /*
    * A string representation of this type constraint.
@@ -207,66 +219,50 @@ struct TypeConstraint {
   // General check for any constraint.
   bool check(TypedValue* tv, const Func* func) const;
 
-  // Check a constraint when !isObjectOrTypeAlias().
-  bool checkPrimitive(DataType dt) const;
-
-  // Checks a constraint that is a type alias when we know tv is or is
-  // not an object.
-  bool checkTypeAliasObj(const TypedValue* tv) const;
+  bool checkTypeAliasObj(const Class* cls) const;
   bool checkTypeAliasNonObj(const TypedValue* tv) const;
 
   // NB: will throw if the check fails.
-  void verifyParam(TypedValue* tv, const Func* func, int paramNum) const {
+  void verifyParam(TypedValue* tv, const Func* func, int paramNum,
+                   bool useStrictTypes = true) const {
     if (UNLIKELY(!check(tv, func))) {
-      verifyParamFail(func, tv, paramNum);
+      verifyParamFail(func, tv, paramNum, useStrictTypes);
     }
   }
-  void verifyReturn(TypedValue* tv, const Func* func) const {
+  void verifyReturn(TypedValue* tv, const Func* func,
+                    bool useStrictTypes = true) const {
     if (UNLIKELY(!check(tv, func))) {
-      verifyReturnFail(func, tv);
+      verifyReturnFail(func, tv, useStrictTypes);
     }
   }
 
   // Can not be private; used by the translator.
   void selfToClass(const Func* func, const Class **cls) const;
   void parentToClass(const Func* func, const Class **cls) const;
-  void verifyFail(const Func* func, TypedValue* tv, int id) const;
+  void verifyFail(const Func* func, TypedValue* tv, int id,
+                  bool useStrictTypes) const;
   void verifyParamFail(const Func* func, TypedValue* tv,
-                       int paramNum) const {
-    verifyFail(func, tv, paramNum);
+                       int paramNum, bool useStrictTypes = true) const;
+  void verifyReturnFail(const Func* func, TypedValue* tv,
+                        bool useStrictTypes = true) const {
+    verifyFail(func, tv, ReturnId, useStrictTypes);
   }
-  void verifyReturnFail(const Func* func, TypedValue* tv) const {
-    verifyFail(func, tv, ReturnId);
-  }
-
-  static MaybeDataType typeNameToMaybeDataType(const StringData* typeName);
-
-private:
-  struct Type {
-    MaybeDataType dt;
-    MetaType metatype;
-  };
-  typedef hphp_hash_map<const StringData*, Type,
-                        string_data_hash, string_data_isame> TypeMap;
-
-private:
-  static TypeMap s_typeNamesToTypes;
 
 private:
   void init();
   void selfToTypeName(const Func* func, const StringData **typeName) const;
   void parentToTypeName(const Func* func, const StringData **typeName) const;
-  static const Type* typeNameToType(const StringData* typeName);
 
 private:
-  // m_type represents the DataType to check on.  We don't know
-  // whether a bare name is a class/interface name or a type alias, so
-  // when this is set to KindOfObject we may have to look up a type
-  // alias name and test for a different DataType.
+  // m_type represents the type to check on.  We don't know whether a
+  // bare name is a class/interface name or a type alias or an enum,
+  // so when this is set to Type::Object we may have to resolve a type
+  // alias or enum and test for a different DataType (see annotCompat()
+  // for details).
   Type m_type;
   Flags m_flags;
   LowStringPtr m_typeName;
-  const NamedEntity* m_namedEntity;
+  LowPtr<const NamedEntity> m_namedEntity;
 };
 
 //////////////////////////////////////////////////////////////////////

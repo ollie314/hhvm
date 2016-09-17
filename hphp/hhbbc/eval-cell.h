@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,8 +22,9 @@
 #include <folly/ScopeGuard.h>
 #include <folly/Optional.h>
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/vm/repo.h"
 
 #include "hphp/hhbbc/hhbbc.h"
@@ -48,7 +49,7 @@ folly::Optional<Type> eval_cell(Pred p) {
     SCOPE_EXIT { g_context->setThrowAllErrors(false); };
 
     Cell c = p();
-    if (IS_REFCOUNTED_TYPE(c.m_type)) {
+    if (isRefcountedType(c.m_type)) {
       switch (c.m_type) {
       case KindOfString:
         {
@@ -58,17 +59,51 @@ folly::Optional<Type> eval_cell(Pred p) {
           }
           auto const sstr = makeStaticString(c.m_data.pstr);
           tvDecRef(&c);
-          c = make_tv<KindOfStaticString>(sstr);
+          c = make_tv<KindOfPersistentString>(sstr);
         }
         break;
       case KindOfArray:
         {
           auto const sarr = ArrayData::GetScalarArray(c.m_data.parr);
           tvDecRef(&c);
-          c = make_tv<KindOfArray>(sarr);
+          c = make_tv<KindOfPersistentArray>(sarr);
         }
         break;
-      default:
+      case KindOfVec:
+        {
+          auto const sarr = ArrayData::GetScalarArray(c.m_data.parr);
+          tvDecRef(&c);
+          c = make_tv<KindOfPersistentVec>(sarr);
+        }
+        break;
+      case KindOfDict:
+        {
+          auto const sarr = ArrayData::GetScalarArray(c.m_data.parr);
+          tvDecRef(&c);
+          c = make_tv<KindOfPersistentDict>(sarr);
+        }
+        break;
+      case KindOfKeyset:
+        {
+          auto const sarr = ArrayData::GetScalarArray(c.m_data.parr);
+          tvDecRef(&c);
+          c = make_tv<KindOfPersistentKeyset>(sarr);
+        }
+        break;
+      case KindOfUninit:
+      case KindOfNull:
+      case KindOfInt64:
+      case KindOfBoolean:
+      case KindOfDouble:
+      case KindOfPersistentString:
+      case KindOfPersistentArray:
+      case KindOfPersistentVec:
+      case KindOfPersistentDict:
+      case KindOfPersistentKeyset:
+      case KindOfObject:
+      case KindOfResource:
+      case KindOfRef:
+      case KindOfClass:
         always_assert(0 && "Impossible constant evaluation occurred");
       }
     }
@@ -86,6 +121,8 @@ folly::Optional<Type> eval_cell(Pred p) {
      */
     auto const t = from_cell(c);
     return options.ConstantProp ? t : loosen_statics(t);
+  } catch (const Object&) {
+    return folly::none;
   } catch (const std::exception&) {
     return folly::none;
   } catch (...) {

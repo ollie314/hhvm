@@ -16,6 +16,8 @@
 #ifndef incl_HPHP_APC_LOCAL_ARRAY_DEFS_H_
 #define incl_HPHP_APC_LOCAL_ARRAY_DEFS_H_
 
+#include "hphp/runtime/base/apc-local-array.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/memory-manager.h"
 
 namespace HPHP {
@@ -23,30 +25,31 @@ namespace HPHP {
 //////////////////////////////////////////////////////////////////////
 
 inline APCLocalArray::APCLocalArray(const APCArray* source)
-  : ArrayData(kSharedKind)
+  : ArrayData(kApcKind)
   , m_arr(source)
   , m_localCache(nullptr)
 {
   m_size = m_arr->size();
-  source->getHandle()->reference();
+  source->reference();
   MM().addApcArray(this);
+  assert(hasExactlyOneRef());
 }
 
 template<class... Args>
 APCLocalArray* APCLocalArray::Make(Args&&... args) {
-  return new (MM().smartMallocSize(sizeof(APCLocalArray)))
+  return new (MM().mallocSmallSize(sizeof(APCLocalArray)))
     APCLocalArray(std::forward<Args>(args)...);
 }
 
 ALWAYS_INLINE
-APCLocalArray* APCLocalArray::asSharedArray(ArrayData* ad) {
-  assert(ad->kind() == kSharedKind);
+APCLocalArray* APCLocalArray::asApcArray(ArrayData* ad) {
+  assert(ad->kind() == kApcKind);
   return static_cast<APCLocalArray*>(ad);
 }
 
 ALWAYS_INLINE
-const APCLocalArray* APCLocalArray::asSharedArray(const ArrayData* ad) {
-  assert(ad->kind() == kSharedKind);
+const APCLocalArray* APCLocalArray::asApcArray(const ArrayData* ad) {
+  assert(ad->kind() == kApcKind);
   assert(checkInvariants(ad));
   return static_cast<const APCLocalArray*>(ad);
 }

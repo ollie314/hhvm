@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,8 @@
 #error "unit-emitter-inl.h should only be included by unit-emitter.h"
 #endif
 
+#include "hphp/runtime/vm/hhbc-codec.h"
+
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // Basic info.
@@ -32,6 +34,10 @@ inline const unsigned char* UnitEmitter::bc() const {
 
 inline Offset UnitEmitter::bcPos() const {
   return m_bclen;
+}
+
+inline Offset UnitEmitter::offsetOf(const unsigned char* pc) const {
+  return pc - m_bc;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -81,8 +87,8 @@ inline const LineTable& UnitEmitter::lineTable() const {
 ///////////////////////////////////////////////////////////////////////////////
 // Bytecode emit.
 
-inline void UnitEmitter::emitOp(Op op, int64_t pos) {
-  emitByte((unsigned char)op, pos);
+inline void UnitEmitter::emitOp(Op op) {
+  encode_op(op, [&](uint8_t byte) { emitByte(byte); });
 }
 
 inline void UnitEmitter::emitByte(unsigned char n, int64_t pos) {
@@ -99,6 +105,11 @@ inline void UnitEmitter::emitInt64(int64_t n, int64_t pos) {
 
 inline void UnitEmitter::emitDouble(double n, int64_t pos) {
   emitImpl(n, pos);
+}
+
+template<>
+inline void UnitEmitter::emitIVA(bool n) {
+  emitByte(n << 1);
 }
 
 template<typename T>
@@ -124,7 +135,7 @@ void UnitEmitter::emitImpl(T n, int64_t pos) {
     m_bclen += sizeof(T);
   } else {
     assert(pos + sizeof(T) <= m_bclen);
-    for (uint i = 0; i < sizeof(T); ++i) {
+    for (uint32_t i = 0; i < sizeof(T); ++i) {
       m_bc[pos + i] = c[i];
     }
   }

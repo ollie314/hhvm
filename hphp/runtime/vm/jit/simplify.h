@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,8 @@
 
 #ifndef incl_HPHP_HHVM_HHIR_SIMPLIFIER_H_
 #define incl_HPHP_HHVM_HHIR_SIMPLIFIER_H_
+
+#include <folly/Optional.h>
 
 #include "hphp/runtime/vm/jit/bc-marker.h"
 #include "hphp/runtime/vm/jit/containers.h"
@@ -31,30 +33,27 @@ struct SSATmp;
 
 /*
  * Module that handles state-independent optimizations, or queries IR for
- * state-independent properties.
- *
- * The optimizations in this module should be those that we can do based only
- * on chasing the use-def chain.  Functions like getStackValue are in here
- * because they are similarly restricted.
+ * state-independent properties.  The optimizations in this module should be
+ * those that we can do based only on chasing the use-def chain.
  *
  * The line of separation between this and other modules is essentially about
  * who needs to know about position-specific state in the IR.  If an
  * optimization is completely stateless (e.g. strength reduction, constant
- * folding, etc) it goes in here, otherwise it goes in IRBuilder or some other
+ * folding, etc) it goes in here; otherwise it goes in IRBuilder or some other
  * pass.
  */
 
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Simplify performs a number of state-independent optimizations, primarily
+ * simplify() performs a number of state-independent optimizations, primarily
  * forms of copy propagation, constant folding, or removing opcodes that have
  * no effects.
  *
- * The Simplifier recursively invokes itself, so that all instructions returned
+ * simplify() recursively invokes itself, so that all instructions returned
  * from simplify() have been fully simplified themselves.
  *
- * In general, the simplifier transforms one instruction into zero or more
+ * In general, simplify() transforms one instruction into zero or more
  * instructions.  The pair represents the zero or more instructions to replace
  * the input with, plus the SSATmp* to use instead of the input instruction's
  * dst (if any).
@@ -63,66 +62,99 @@ struct SimplifyResult {
   jit::vector<IRInstruction*> instrs;
   SSATmp* dst;
 };
-SimplifyResult simplify(IRUnit&, const IRInstruction*, bool typesMightRelax);
+SimplifyResult simplify(IRUnit&, IRInstruction*, bool typesMightRelax);
+
+/*
+ * Instruction stream modifying simplification routine.
+ *
+ * This version of simplify() expects an instruction in the IRUnit's CFG as
+ * input, and replaces it with the simplified instruction stream, preserving
+ * the integrity of the containing Block's forward iterators.
+ *
+ * This may cause other blocks in the unit to become unreachable, and also note
+ * that it is not legal to run simplify() on instructions in blocks that were
+ * made unreachable by other calls to simplify().  This generally means you
+ * need to track which blocks are still reachable if you are making simplify()
+ * calls.
+ */
+void simplify(IRUnit&, IRInstruction*);
+
+/*
+ * Perform a simplification pass in the entire unit.
+ *
+ * After running this pass, the caller must run a manditoryDCE to restore IR
+ * invariants.
+ */
+void simplifyPass(IRUnit&);
 
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Track down a value or type using the StkPtr chain.
+ * Return true if the given AssertType-like instruction can be nop'd.
  *
- * The spansCall parameter tracks whether the returned value's
- * lifetime on the stack spans a call.  This search bottoms out on
- * hitting either the initial DefSP instruction (failure), or some
- * instruction that produced a view of the stack with the requested
- * value.
- */
-
-struct StackValueInfo {
-  explicit StackValueInfo(SSATmp*);
-  explicit StackValueInfo(IRInstruction*, Type, Type = Type::Bottom);
-
-  SSATmp* value;       // may be nullptr
-  Type knownType;      // the type of the value, for when value is nullptr
-  Type predictedInner; // prediction for the inner type, if type is a ref
-  bool spansCall;      // whether the tmp's definition was above a call
-  IRInstruction* typeSrc; // the instruction that gave us knownType; or null
-};
-
-std::string show(const StackValueInfo&);
-
-StackValueInfo getStackValue(SSATmp* stack, uint32_t index);
-
-/*
- * Look up a predicted type for a stack offset that is known to be boxed.  (We
- * generally know this from bytecode invariants.)
- */
-Type getStackInnerTypePrediction(SSATmp* stack, uint32_t index);
-
-//////////////////////////////////////////////////////////////////////
-
-/*
- * Return this list of all values that are known to be on the stack
- * given the particular depth.
+ * This is exposed so that the preOptimizeAssertX() methods can share this
+ * logic.
  *
- * This function is used for computing available value for
- * DecRef->DecRefNZ conversions in IRBuilder.
+ * WARNING: Under certain (very uncommon) conditions, we may find that external
+ * information (e.g., from static analysis) conflicts with the instruction
+ * stream we have built.  This function will detect this scenario and will punt
+ * the entire trace in this case.
  */
-jit::vector<SSATmp*> collectStackValues(SSATmp* sp, uint32_t stackDepth);
+bool canSimplifyAssertType(const IRInstruction* inst,
+                           Type srcType,
+                           bool srcMightRelax);
 
 /*
- * Propagate very simple copies on the given instruction.
- * Specifically, Movs.
+ * Propagate very simple copies through Mov instructions.
  *
  * More complicated copy-propagation is performed in the Simplifier.
  */
 void copyProp(IRInstruction*);
 
 /*
- * Checks whether a packed array bounds check is unnecessary.  We share this
- * logic with gen time so that cases that are visible immediately don't require
- * generating IR with control flow that we have to clean up later.
+ * Replace inputs with known values with constants
  */
-bool packedArrayBoundsCheckUnnecessary(Type arrayType, int64_t key);
+void constProp(IRUnit&, IRInstruction*, bool typesMightRelax);
+
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * Statically check whether a packed array access is within bounds, based on
+ * the type of the array.
+ */
+enum class PackedBounds { In, Out, Unknown };
+PackedBounds packedArrayBoundsStaticCheck(Type, int64_t key);
+
+/*
+ * Get the type of `arr[idx]` for a packed array, considering constness,
+ * staticness, and RAT types.
+ *
+ * Note that this function does not require the existence of `arr[idx]`.  If we
+ * can statically determine that the access is out of bounds, InitNull is
+ * returned.  Otherwise we return a type `t`, such that when the access is
+ * within bounds, `arr[idx].isA(t)` holds.  (Thus, if this function is used in
+ * contexts where the bounds are not statically known, TInitNull must be
+ * unioned in for correctness.)
+ */
+Type packedArrayElemType(SSATmp* arr, SSATmp* idx, const Class* ctx);
+
+/*
+ * Get the type of `arr[idx]` for different Hack array types, considering
+ * constness, staticness, and RAT types.
+ *
+ * Note that these functions do not require the existence of `arr[idx]`. If we
+ * can statically determine that the access is out of bounds, TBottom is
+ * returned. Otherwise we return a type `t`, such that when the access is within
+ * bounds, `arr[idx].isA(t)` holds. (This, if this function is used in contexts
+ * where the bounds are not statically known, one must account for the opcode
+ * specific behavior of the failure case).
+ *
+ * `idx` is optional. If not provided, a more conservative type is returned
+ * which holds for all elements in the array.
+ */
+Type vecElemType(SSATmp* arr, SSATmp* idx);
+Type dictElemType(SSATmp* arr, SSATmp* idx);
+Type keysetElemType(SSATmp* arr, SSATmp* idx);
 
 //////////////////////////////////////////////////////////////////////
 

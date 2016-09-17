@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,26 +24,24 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(StatementList);
 
-class StatementList : public Statement {
-public:
+struct StatementList : Statement {
   explicit StatementList(STATEMENT_CONSTRUCTOR_PARAMETERS);
   StatementListPtr shallowClone();
 
   DECLARE_STATEMENT_VIRTUAL_FUNCTIONS;
-  StatementPtr preOptimize(AnalysisResultConstPtr ar);
-  virtual bool hasDecl() const;
-  virtual bool hasImpl() const;
+  StatementPtr preOptimize(AnalysisResultConstPtr ar) override;
+  bool hasDecl() const override;
+  bool hasImpl() const override;
   ExpressionPtr getEffectiveImpl(AnalysisResultConstPtr ar) const;
-  virtual bool hasBody() const;
-  virtual bool hasRetExp() const;
+  bool hasBody() const override;
+  bool hasRetExp() const override;
 
-  virtual void addElement(StatementPtr stmt);
-  virtual void insertElement(StatementPtr stmt, int index = 0);
-  virtual int getRecursiveCount() const {
+  void addElement(StatementPtr stmt) override;
+  void insertElement(StatementPtr stmt, int index = 0) override;
+  int getRecursiveCount() const override {
     int ct = 0;
-    for (StatementPtrVec::const_iterator it = m_stmts.begin();
-         it != m_stmts.end(); ++it) {
-      ct += (*it)->getRecursiveCount();
+    for (const auto stmt : m_stmts) {
+      ct += stmt->getRecursiveCount();
     }
     return ct;
   }
@@ -58,9 +56,7 @@ public:
   void shift(int from, int to);
 
 private:
-  bool mergeConcatAssign();
-
-  StatementPtrVec m_stmts;
+  std::vector<StatementPtr> m_stmts;
   bool m_included; // whether includes have been inlined
 };
 

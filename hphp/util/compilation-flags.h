@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,7 +31,7 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-const bool debug =
+constexpr bool debug =
 #ifdef DEBUG
   true
 #else
@@ -39,16 +39,16 @@ const bool debug =
 #endif
   ;
 
-const bool packed_tv =
-#ifdef PACKED_TV
+constexpr bool hhvm_reuse_tc =
+#ifdef HHVM_REUSE_TC
   true
 #else
   false
 #endif
   ;
 
-const bool memory_profiling =
-#ifdef MEMORY_PROFILING
+constexpr bool use_tsan =
+#ifdef FOLLY_SANITIZE_THREAD
   true
 #else
   false

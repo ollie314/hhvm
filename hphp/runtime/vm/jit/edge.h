@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,6 @@
 #define incl_HPHP_VM_EDGE_H_
 
 #include <boost/intrusive/list.hpp>
-#include <boost/noncopyable.hpp>
 
 #include "hphp/runtime/vm/jit/containers.h"
 
@@ -32,9 +31,9 @@ struct IRInstruction;
  * successor block that maintains a list of predecessors of each block.
  * The predecessor list is updated by calling setTo().
  */
-struct Edge : private boost::noncopyable {
+struct Edge {
   Edge() {}
-  explicit Edge(const Edge& other) { setTo(other.m_to); }
+  Edge(const Edge&) = delete;
   explicit Edge(IRInstruction* inst, Block* to) : m_inst(inst) { setTo(to); }
 
   // The instruction that owns this edge

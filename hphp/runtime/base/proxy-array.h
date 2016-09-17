@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,12 +16,16 @@
 #ifndef incl_HPHP_PROXY_ARRAY_H
 #define incl_HPHP_PROXY_ARRAY_H
 
-#include "hphp/runtime/vm/name-value-table.h"
 #include "hphp/runtime/base/array-data.h"
+#include "hphp/runtime/base/req-ptr.h"
+#include "hphp/runtime/base/type-variant.h"
+#include "hphp/runtime/vm/native.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
+
+struct RefData;
 
 /*
  * A proxy for an underlying ArrayData. The Zend compatibility layer needs
@@ -35,7 +39,7 @@ namespace HPHP {
  *
  * TODO: rename to ZendArray
  */
-struct ProxyArray : public ArrayData {
+struct ProxyArray final : ArrayData, type_scan::MarkCountable<ProxyArray> {
   static ProxyArray* Make(ArrayData*);
 
 public:
@@ -112,14 +116,14 @@ private:
    * Zend compat caller. This will retrieve the underlying data pointer from
    * the ZendCustomElement resource, if applicable.
    */
-  void * elementToData(Variant* v) const;
+  void* elementToData(Variant* v) const;
 
   /**
    * Make a ZendCustomElement resource wrapping the given data block. If pDest
    * is non-null, it will be set to the newly-allocated location for the block.
    */
-  ResourceData * makeElementResource(void *pData, uint nDataSize,
-                                     void **pDest) const;
+  req::ptr<ResourceData> makeElementResource(void *pData, uint32_t nDataSize,
+                                             void **pDest) const;
 
   DtorFunc m_destructor;
 
@@ -138,12 +142,18 @@ public:
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
 
   static const TypedValue* NvGetInt(const ArrayData*, int64_t k);
+  static const TypedValue* NvTryGetInt(const ArrayData*, int64_t k);
   static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
+  static const TypedValue* NvTryGetStr(const ArrayData*, const StringData* k);
 
   static ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& ret, bool copy);
+  static ArrayData* LvalIntRef(ArrayData*, int64_t k, Variant*& ret, bool copy);
   static ArrayData* LvalStr(ArrayData*, StringData* k, Variant*& ret,
                             bool copy);
+  static ArrayData* LvalStrRef(ArrayData*, StringData* k, Variant*& ret,
+                               bool copy);
   static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
+  static ArrayData* LvalNewRef(ArrayData*, Variant*& ret, bool copy);
 
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
@@ -156,7 +166,7 @@ public:
 
   static ArrayData* Copy(const ArrayData* ad);
 
-  static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Append(ArrayData*, Cell v, bool copy);
   static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
   static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
 
@@ -164,7 +174,13 @@ public:
   static ArrayData* Merge(ArrayData*, const ArrayData* elems);
   static ArrayData* Pop(ArrayData*, Variant &value);
   static ArrayData* Dequeue(ArrayData*, Variant &value);
-  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Prepend(ArrayData*, Cell v, bool copy);
+  static ArrayData* ToPHPArray(ArrayData* ad, bool) {
+    return ad;
+  }
+  static ArrayData* ToDict(ArrayData*, bool);
+  static ArrayData* ToVec(ArrayData*, bool);
+  static ArrayData* ToKeyset(ArrayData*, bool);
   static void Renumber(ArrayData*);
   static void OnSetEvalScalar(ArrayData*);
   static ArrayData* Escalate(const ArrayData* ad);
@@ -179,7 +195,7 @@ public:
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter&);
   static bool IsVectorData(const ArrayData*);
 
-  static ArrayData* EscalateForSort(ArrayData*);
+  static ArrayData* EscalateForSort(ArrayData*, SortFunction);
   static void Ksort(ArrayData*, int sort_flags, bool ascending);
   static void Sort(ArrayData*, int sort_flags, bool ascending);
   static void Asort(ArrayData*, int sort_flags, bool ascending);
@@ -192,7 +208,7 @@ public:
   static ArrayData* ZAppend(ArrayData* ad, RefData* v, int64_t* key_ptr);
 
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
-  static ArrayData* NonSmartCopy(const ArrayData*);
+  static ArrayData* CopyStatic(const ArrayData*);
 
 private:
   static ProxyArray* asProxyArray(ArrayData* ad);
@@ -200,7 +216,12 @@ private:
   static void reseatable(const ArrayData* oldArr, ArrayData* newArr);
 
   static ArrayData* innerArr(const ArrayData* ad);
-  friend class c_AwaitAllWaitHandle;
+  friend Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromArray,
+                                   const Array& dependencies);
+public:
+  template<class F> void scan(F& mark) const {
+    mark(m_ref);
+  }
 
 private:
   // The inner array. This is mutable since zend_hash_find() etc. has a
@@ -223,8 +244,8 @@ void ProxyArray::proxySet(K k,
       *dest = (void*)(&r->nvGet(k)->m_data.pref);
     }
   } else {
-    ResourceData * elt = makeElementResource(data, data_size, dest);
-    r = innerArr(this)->set(k, elt, false);
+    auto elt = makeElementResource(data, data_size, dest);
+    r = innerArr(this)->set(k, Variant(std::move(elt)), false);
   }
   reseatable(this, r);
 }

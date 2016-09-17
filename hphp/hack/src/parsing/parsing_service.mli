@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -11,7 +11,9 @@ val empty_file_info: FileInfo.t
 
 val go:
   Worker.t list option ->
+  File_content.t Relative_path.Map.t ->
   get_next:(unit -> Relative_path.t list) ->
+  TypecheckerOptions.t ->
   FileInfo.t Relative_path.Map.t * Errors.t * Relative_path.Set.t
 
 (* used by hack build *)

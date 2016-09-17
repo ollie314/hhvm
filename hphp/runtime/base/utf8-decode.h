@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -33,9 +33,11 @@ struct json_utf8_decode {
   int the_length;
 };
 
-class UTF8To16Decoder {
-public:
-  UTF8To16Decoder(const char *utf8, int length, bool loose);
+struct UTF8To16Decoder {
+  UTF8To16Decoder(const char *utf8, int length, bool loose)
+    : m_str(utf8), m_strlen(length), m_cursor(0), m_loose(loose),
+      m_low_surrogate(0) {}
+
   int decodeTail();
   int decodeAsUTF8();
 

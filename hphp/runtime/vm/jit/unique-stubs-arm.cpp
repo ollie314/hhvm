@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,279 +14,213 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/util/data-block.h"
-#include "hphp/runtime/vm/event-hook.h"
+#include "hphp/runtime/vm/jit/unique-stubs-arm.h"
+
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/stats.h"
+#include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/jit/abi-arm.h"
-#include "hphp/runtime/vm/jit/code-gen-helpers-arm.h"
+#include "hphp/runtime/vm/jit/align-arm.h"
+#include "hphp/runtime/vm/jit/code-gen-cf.h"
+#include "hphp/runtime/vm/jit/code-gen-helpers.h"
+#include "hphp/runtime/vm/jit/code-gen-tls.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/unique-stubs.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/service-requests-inline.h"
+#include "hphp/runtime/vm/jit/unwind-itanium.h"
+
 #include "hphp/vixl/a64/macro-assembler-a64.h"
+#include "hphp/vixl/a64/simulator-a64.h"
 
-namespace HPHP { namespace jit { namespace arm {
+#include <folly/ScopeGuard.h>
 
-namespace {
+#include <iostream>
 
-using namespace vixl;
+namespace HPHP { namespace jit {
 
-void emitCallToExit(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.main() };
+TRACE_SET_MOD(ustubs);
 
-  a.   Nop   ();
-  us.callToExit = a.frontier();
-  emitServiceReq(
-    mcg->code.main(),
-    SRFlags::Align | SRFlags::JmpInsteadOfRet,
-    REQ_EXIT
-  );
+///////////////////////////////////////////////////////////////////////////////
 
-  us.add("callToExit", us.callToExit);
+namespace arm {
+
+///////////////////////////////////////////////////////////////////////////////
+
+static void alignJmpTarget(CodeBlock& cb) {
+  align(cb, nullptr, Alignment::JmpTarget, AlignContext::Dead);
 }
 
-void emitReturnHelpers(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.main() };
+///////////////////////////////////////////////////////////////////////////////
 
-  us.retHelper = a.frontier();
-  a.   Brk   (0);
+/*
+ * Helper for the freeLocalsHelpers which does the actual work of decrementing
+ * a value's refcount or releasing it.
+ *
+ * This helper is reached via call from the various freeLocalHelpers.  It
+ * expects `tv' to be the address of a TypedValue with refcounted type `type'
+ * (though it may be static, and we will do nothing in that case).
+ *
+ * The `live' registers must be preserved across any native calls (and
+ * generally left untouched).
+ */
+static TCA emitDecRefHelper(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
+                            PhysReg tv, PhysReg type, RegSet live) {
+  return vwrap(cb, data, fixups, [&] (Vout& v) {
+    // Set up frame linkage to avoid an indirect fixup.
+    v << pushp{rfp(), rlr()};
+    v << copy{rsp(), rfp()};
 
-  us.retInlHelper = a.frontier();
-  a.   Brk   (0);
+    // We use the first argument register for the TV data because we might pass
+    // it to the native release call.  It's not live when we enter the helper.
+    auto const data = rarg(0);
+    v << load{tv[TVOFF(m_data)], data};
 
-  us.genRetHelper = a.frontier();
-  a.   Brk   (0);
+    auto const sf = v.makeReg();
+    v << cmplim{1, data[FAST_REFCOUNT_OFFSET], sf};
 
-  us.add("retHelper", us.retHelper);
-  us.add("genRetHelper", us.genRetHelper);
-  us.add("retInlHelper", us.retInlHelper);
+    ifThen(v, CC_NL, sf, [&] (Vout& v) {
+      // The refcount is positive, so the value is refcounted.  We need to
+      // either decref or release.
+      ifThen(v, CC_NE, sf, [&] (Vout& v) {
+        // The refcount is greater than 1; decref it.
+        v << declm{data[FAST_REFCOUNT_OFFSET], v.makeReg()};
+        // Pop FP/LR and return
+        v << popp{rfp(), rlr()};
+        v << ret{live};
+      });
+
+      // Note that the stack is aligned since we called to this helper from an
+      // stack-unaligned stub.
+      PhysRegSaver prs{v, live};
+
+      // The refcount is exactly 1; release the value.
+      // Avoid 'this' pointer overwriting by reserving it as an argument.
+      v << callm{lookupDestructor(v, type), arg_regs(1)};
+    });
+
+    // Either we did a decref, or the value was static.
+    // Pop FP/LR and return
+    v << popp{rfp(), rlr()};
+    v << ret{live};
+  });
 }
 
-void emitResumeHelpers(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.main() };
+TCA emitFreeLocalsHelpers(CodeBlock& cb, DataBlock& data, UniqueStubs& us) {
+  // The address of the first local is passed in the second argument register.
+  // We use the third and fourth as scratch registers.
+  auto const local = rarg(1);
+  auto const last = rarg(2);
+  auto const type = rarg(3);
+  CGMeta fixups;
+  TCA freeLocalsHelpers[kNumFreeLocalsHelpers];
+  TCA freeManyLocalsHelper;
 
-  us.resumeHelperRet = a.frontier();
-  a.   Str   (vixl::x30, rStashedAR[AROFF(m_savedRip)]);
-  us.resumeHelper = a.frontier();
-  a.   Ldr   (rVmFp, rVmTl[RDS::kVmfpOff]);
-  a.   Ldr   (rVmSp, rVmTl[RDS::kVmspOff]);
+  // This stub is very hot; keep it cache-aligned.
+  align(cb, &fixups, Alignment::CacheLine, AlignContext::Dead);
+  auto const release =
+    emitDecRefHelper(cb, data, fixups, local, type, local | last);
 
-  emitServiceReq(mcg->code.main(), REQ_RESUME);
+  auto const decref_local = [&] (Vout& v) {
+    auto const sf = v.makeReg();
 
-  us.add("resumeHelper", us.resumeHelper);
-  us.add("resumeHelperRet", us.resumeHelperRet);
-}
+    // We can't use emitLoadTVType() here because it does a byte load, and we
+    // need to sign-extend since we use `type' as a 32-bit array index to the
+    // destructor table.
+    v << loadzbl{local[TVOFF(m_type)], type};
+    emitCmpTVType(v, sf, KindOfRefCountThreshold, type);
 
-void emitStackOverflowHelper(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.cold() };
-
-  us.stackOverflowHelper = a.frontier();
-  a.  Ldr  (rAsm, rVmFp[AROFF(m_func)]);
-  a.  Ldr  (rAsm2.W(), rStashedAR[AROFF(m_soff)]);
-  a.  Ldr  (rAsm, rAsm[Func::sharedOff()]);
-  a.  Ldr  (rAsm.W(), rAsm[Func::sharedBaseOff()]);
-  // The VM-reg-save helper will read the current BC offset out of argReg(0).
-  a.  Add  (argReg(0).W(), rAsm.W(), rAsm2.W());
-
-  emitEagerVMRegSave(a, RegSaveFlags::SaveFP | RegSaveFlags::SavePC);
-  emitServiceReq(mcg->code.cold(), REQ_STACK_OVERFLOW);
-
-  us.add("stackOverflowHelper", us.stackOverflowHelper);
-}
-
-void emitFreeLocalsHelpers(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.main() };
-
-  us.freeManyLocalsHelper = a.frontier();
-  a.   Brk   (0);
-
-  us.add("freeManyLocalsHelper", us.freeManyLocalsHelper);
-}
-
-void emitFuncPrologueRedispatch(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.main() };
-  vixl::Label actualDispatch;
-  vixl::Label numParamsCheck;
-
-  us.funcPrologueRedispatch = a.frontier();
-
-  // Using x0, x1 and x2 as scratch registers here. This is happening between
-  // compilation units -- trying to get into a func prologue, to be precise --
-  // so there are no live registers.
-
-  a.  Ldr  (x0, rStashedAR[AROFF(m_func)]);
-  a.  Ldr  (w1, rStashedAR[AROFF(m_numArgsAndFlags)]);
-  a.  And  (w1, w1, 0x1fffffff);
-  a.  Ldr  (w2, x0[Func::paramCountsOff()]);
-  // See Func::finishedEmittingParams and Func::numParams for rationale
-  a.  Lsr  (w2, w2, 0x1);
-
-  // If we passed more args than declared, jump to the numParamsCheck.
-  a.  Cmp  (w2, w1);
-  a.  B    (&numParamsCheck, lt);
-
-  a.  bind (&actualDispatch);
-  // Need to load x0[w1 * 8 + Func::prologueTableOff()]. On x64 there's an
-  // addressing mode for this. Here, there's only base+imm and base+reg. So we
-  // add the immediate to the base first, then use base+reg with scaling.
-  a.  Add  (x0, x0, Func::prologueTableOff());
-  // What this is saying: base is x0, index is w1 (with Unsigned eXTension to 64
-  // bits), scaled by 2^3.
-  a.  Ldr  (x0, MemOperand(x0, w1, UXTW, 3));
-  a.  Br   (x0);
-  a.  Brk  (0);
-
-  a.  bind (&numParamsCheck);
-  a.  Cmp  (w1, kNumFixedPrologues);
-  a.  B    (&actualDispatch, lt);
-
-  // Too many parameters.
-  a.  Add  (x0, x0, Func::prologueTableOff() + sizeof(TCA));
-  a.  Ldr  (x0, MemOperand(x0, w2, UXTW, 3));
-  a.  Br   (x0);
-  a.  Brk  (0);
-
-  us.add("funcPrologueRedispatch", us.funcPrologueRedispatch);
-}
-
-void emitFCallArrayHelper(UniqueStubs& us) {
-  MacroAssembler a { mcg->code.main() };
-
-  us.fcallArrayHelper = a.frontier();
-  a.   Brk   (0);
-
-  us.add("fcallArrayHelper", us.fcallArrayHelper);
-}
-
-void emitFCallHelperThunk(UniqueStubs& us) {
-  TCA (*helper)(ActRec*, void*) = &fcallHelper;
-  MacroAssembler a { mcg->code.main() };
-
-  us.fcallHelperThunk = a.frontier();
-  vixl::Label popAndXchg, jmpRet;
-
-  a.   Mov   (argReg(0), rStashedAR);
-  a.   Mov   (argReg(1), rVmSp);
-  a.   Cmp   (rVmFp, rStashedAR);
-  a.   B     (&popAndXchg, vixl::ne);
-  emitCall(a, CppCall::direct(helper));
-  a.   Br    (rReturnReg);
-
-  a.   bind  (&popAndXchg);
-  emitXorSwap(a, rStashedAR, rVmFp);
-  // Put return address into ActRec.
-  a.   Str   (rLinkReg, rVmFp[AROFF(m_savedRip)]);
-  emitCall(a, CppCall::direct(helper));
-  // Put return address back in the link register.
-  a.   Ldr   (rLinkReg, rVmFp[AROFF(m_savedRip)]);
-  emitXorSwap(a, rStashedAR, rVmFp);
-  a.   Cmp   (rReturnReg, 0);
-  a.   B     (&jmpRet, vixl::gt);
-  a.   Neg   (rReturnReg, rReturnReg);
-  a.   Ldr   (rVmFp, rVmTl[RDS::kVmfpOff]);
-  a.   Ldr   (rVmSp, rVmTl[RDS::kVmspOff]);
-
-  a.   bind  (&jmpRet);
-
-  a.   Br    (rReturnReg);
-
-  us.add("fcallHelperThunk", us.fcallHelperThunk);
-}
-
-void emitFuncBodyHelperThunk(UniqueStubs& us) {
-  TCA (*helper)(ActRec*, void*) = &funcBodyHelper;
-  MacroAssembler a { mcg->code.main() };
-
-  us.funcBodyHelperThunk = a.frontier();
-  a.   Mov   (argReg(0), rVmFp);
-  a.   Mov   (argReg(1), rVmSp);
-  a.   Mov   (rHostCallReg, reinterpret_cast<intptr_t>(helper));
-  a.   Push  (rLinkReg, rVmFp);
-  a.   HostCall(2);
-  a.   Pop   (rVmFp, rLinkReg);
-  a.   Br    (rReturnReg);
-
-  us.add("funcBodyHelperThunk", us.funcBodyHelperThunk);
-}
-
-void emitFunctionEnterHelper(UniqueStubs& us) {
-  bool (*helper)(const ActRec*, int) = &EventHook::onFunctionCall;
-  MacroAssembler a { mcg->code.main() };
-
-  us.functionEnterHelper = a.frontier();
-
-  vixl::Label skip;
-
-  auto ar = argReg(0);
-
-  a.   Push    (rLinkReg, rVmFp);
-  a.   Mov     (rVmFp, vixl::sp);
-  // rAsm2 gets the savedRbp, rAsm gets the savedRip.
-  a.   Ldp     (rAsm2, rAsm, ar[AROFF(m_sfp)]);
-  static_assert(AROFF(m_sfp) + 8 == AROFF(m_savedRip),
-                "m_sfp must precede m_savedRip");
-  a.   Push    (rAsm, rAsm2);
-  a.   Mov     (argReg(1), EventHook::NormalFunc);
-  a.   Mov     (rHostCallReg, reinterpret_cast<intptr_t>(helper));
-  a.   HostCall(2);
-  a.   Cbz     (rReturnReg, &skip);
-  a.   Mov     (vixl::sp, rVmFp);
-  a.   Pop     (rVmFp, rLinkReg);
-  a.   Ret     (rLinkReg);
-
-  a.   bind    (&skip);
-
-  // Tricky. The last two things we pushed were the saved fp and return TCA from
-  // the function we were supposed to enter. Since we're now "returning" from
-  // that function, restore that fp and jump to that return TCA. Below that on
-  // the stack are that function's *caller's* saved fp and return TCA. We can
-  // ignore the saved fp, but we have to restore the return TCA into x30.
-  auto rIgnored = rAsm2;
-  a.   Pop     (rVmFp, rAsm);
-  a.   Pop     (rIgnored, rLinkReg);
-  a.   Ldr     (rVmSp, rVmTl[RDS::kVmspOff]);
-  a.   Br      (rAsm);
-
-  us.add("functionEnterHelper", us.functionEnterHelper);
-}
-
-void emitBindCallStubs(UniqueStubs& uniqueStubs) {
-  for (int i = 0; i < 2; i++) {
-    auto& cb = mcg->code.cold();
-    if (!i) {
-      uniqueStubs.bindCallStub = cb.frontier();
-    } else {
-      uniqueStubs.immutableBindCallStub = cb.frontier();
-    }
-    Vauto vasm(cb);
-    auto& vf = vasm.main();
-    // Pop the return address into the actrec in rStashedAR.
-    vf << store{PhysReg{rLinkReg}, PhysReg{rStashedAR}[AROFF(m_savedRip)]};
-    ServiceReqArgVec argv;
-    packServiceReqArgs(argv, (int64_t)i);
-    emitServiceReq(vf, nullptr, jit::REQ_BIND_CALL, argv);
-  }
-  uniqueStubs.add("bindCallStub", uniqueStubs.bindCallStub);
-  uniqueStubs.add("immutableBindCallStub", uniqueStubs.immutableBindCallStub);
-}
-
-} // anonymous namespace
-
-UniqueStubs emitUniqueStubs() {
-  UniqueStubs us;
-  auto functions = {
-    emitCallToExit,
-    emitReturnHelpers,
-    emitResumeHelpers,
-    emitStackOverflowHelper,
-    emitFreeLocalsHelpers,
-    emitFuncPrologueRedispatch,
-    emitFCallArrayHelper,
-    emitFCallHelperThunk,
-    emitFuncBodyHelperThunk,
-    emitFunctionEnterHelper,
-    emitBindCallStubs,
+    ifThen(v, CC_G, sf, [&] (Vout& v) {
+      v << call{release, arg_regs(3)};
+    });
   };
-  for (auto& f : functions) f(us);
-  return us;
+
+  auto const next_local = [&] (Vout& v) {
+    v << addqi{static_cast<int>(sizeof(TypedValue)),
+               local, local, v.makeReg()};
+  };
+
+  alignJmpTarget(cb);
+
+  freeManyLocalsHelper = vwrap(cb, data, [&] (Vout& v) {
+    // We always unroll the final `kNumFreeLocalsHelpers' decrefs, so only loop
+    // until we hit that point.
+    v << lea{rvmfp()[localOffset(kNumFreeLocalsHelpers - 1)], last};
+
+    // Set up frame linkage to avoid an indirect fixup.
+    v << copy{rsp(), rfp()};
+
+    doWhile(v, CC_NZ, {},
+      [&] (const VregList& in, const VregList& out) {
+        auto const sf = v.makeReg();
+
+        decref_local(v);
+        next_local(v);
+        v << cmpq{local, last, sf};
+        return sf;
+      }
+    );
+  });
+
+  for (auto i = kNumFreeLocalsHelpers - 1; i >= 0; --i) {
+    freeLocalsHelpers[i] = vwrap(cb, data, [&] (Vout& v) {
+      decref_local(v);
+      if (i != 0) next_local(v);
+    });
+  }
+
+  // All the stub entrypoints share the same ret.
+  vwrap(cb, data, fixups, [] (Vout& v) {
+    v << popp{rfp(), rlr()};
+    v << ret{};
+  });
+
+  // Create a table of branches
+  us.freeManyLocalsHelper = vwrap(cb, data, [&] (Vout& v) {
+    v << pushp{rfp(), rlr()};
+
+    // rvmfp() is needed by the freeManyLocalsHelper stub above, so frame
+    // linkage setup is deferred until after its use in freeManyLocalsHelper.
+    v << jmpi{freeManyLocalsHelper};
+  });
+  for (auto i = kNumFreeLocalsHelpers - 1; i >= 0; --i) {
+    us.freeLocalsHelpers[i] = vwrap(cb, data, [&] (Vout& v) {
+      // We set up frame linkage to avoid an indirect fixup.
+      v << pushp{rfp(), rlr()};
+      v << copy{rsp(), rfp()};
+      v << jmpi{freeLocalsHelpers[i]};
+    });
+  }
+
+  // FIXME: This stub is hot, so make sure to keep it small.
+#if 0
+  always_assert(Stats::enabled() ||
+                (cb.frontier() - release <= 4 * x64::cache_line_size()));
+#endif
+
+  fixups.process(nullptr);
+  return release;
 }
+
+///////////////////////////////////////////////////////////////////////////////
+
+TCA emitCallToExit(CodeBlock& cb, DataBlock& data, const UniqueStubs& us) {
+  vixl::MacroAssembler a { cb };
+  vixl::Label target_data;
+  auto const start = cb.frontier();
+
+  // Emulating the return to enterTCExit. Pop off the FP, LR pair
+  a.Add(vixl::sp, vixl::sp, 16);
+
+  // Jump to enterTCExit
+  a.Ldr(rAsm, &target_data);
+  a.Br(rAsm);
+  a.bind(&target_data);
+  a.dc64(us.enterTCExit);
+
+  __builtin___clear_cache(reinterpret_cast<char*>(start),
+                          reinterpret_cast<char*>(cb.frontier()));
+  return start;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 }}}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,24 +15,27 @@
 */
 #include "hphp/runtime/base/file-util.h"
 
+#include <algorithm>
 #include <vector>
 #include <fstream>
 
 #include <boost/filesystem.hpp>
 
 #include <sys/types.h>
-#include <dirent.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <libgen.h>
 
 #include <folly/String.h>
+#include <folly/portability/Dirent.h>
+#include <folly/portability/Libgen.h>
 
+#include "hphp/runtime/base/runtime-error.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/exception.h"
 #include "hphp/util/network.h"
 #include "hphp/util/compatibility.h"
+#include "hphp/util/process.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -229,7 +232,7 @@ int FileUtil::copy(const char *srcfile, const char *dstfile) {
 }
 
 static int force_sync(int fd) {
-#if defined(__FreeBSD__) || defined(__APPLE__)
+#if defined(__FreeBSD__) || defined(__APPLE__) || defined(_MSC_VER)
   return fsync(fd);
 #else
   return fdatasync(fd);
@@ -320,7 +323,9 @@ int FileUtil::ssystem(const char* command) {
   return ret;
 }
 
-size_t FileUtil::dirname_helper(char *path, int len) {
+namespace {
+
+size_t dirname_impl(char *path, int len) {
   if (len == 0) {
     /* Illegal use of this function */
     return 0;
@@ -328,18 +333,18 @@ size_t FileUtil::dirname_helper(char *path, int len) {
 
   /* Strip trailing slashes */
   register char *end = path + len - 1;
-  while (end >= path && *end == '/') {
+  while (end >= path && FileUtil::isDirSeparator(*end)) {
     end--;
   }
   if (end < path) {
     /* The path only contained slashes */
-    path[0] = '/';
+    path[0] = FileUtil::getDirSeparator();
     path[1] = '\0';
     return 1;
   }
 
   /* Strip filename */
-  while (end >= path && *end != '/') {
+  while (end >= path && !FileUtil::isDirSeparator(*end)) {
     end--;
   }
   if (end < path) {
@@ -350,11 +355,11 @@ size_t FileUtil::dirname_helper(char *path, int len) {
   }
 
   /* Strip slashes which came before the file name */
-  while (end >= path && *end == '/') {
+  while (end >= path && FileUtil::isDirSeparator(*end)) {
     end--;
   }
   if (end < path) {
-    path[0] = '/';
+    path[0] = FileUtil::getDirSeparator();
     path[1] = '\0';
     return 1;
   }
@@ -363,24 +368,13 @@ size_t FileUtil::dirname_helper(char *path, int len) {
   return end + 1 - path;
 }
 
-std::string FileUtil::safe_dirname(const char *path, int len) {
-  char* tmp_path = (char*)malloc(len+1);
-  memcpy(tmp_path, path, len);
-  tmp_path[len] = '\0';
-  size_t newLen = dirname_helper(tmp_path, len);
-  std::string ret;
-  ret.assign(tmp_path, newLen);
-  free((void *) tmp_path);
-  return ret;
 }
 
-std::string FileUtil::safe_dirname(const char *path) {
-  int len = strlen(path);
-  return safe_dirname(path, len);
-}
-
-std::string FileUtil::safe_dirname(const std::string& path) {
-  return safe_dirname(path.c_str(), path.size());
+String FileUtil::dirname(const String& path) {
+  String str{path, CopyString};
+  auto new_length = dirname_impl(str.mutableData(), str.length());
+  str.setSize(new_length);
+  return str;
 }
 
 String FileUtil::relativePath(const std::string& fromDir,
@@ -389,8 +383,8 @@ String FileUtil::relativePath(const std::string& fromDir,
   size_t maxlen = (fromDir.size() + toFile.size()) * 3;
 
   // Sanity checks
-  if (fromDir[0] != '/' || toFile[0] != '/' ||
-      fromDir[fromDir.size() - 1] != '/') {
+  if (!isAbsolutePath(fromDir) || !isAbsolutePath(toFile.slice()) ||
+      !isDirSeparator(fromDir[fromDir.size() - 1])) {
     return empty_string();
   }
 
@@ -401,7 +395,7 @@ String FileUtil::relativePath(const std::string& fromDir,
   }
 
   String ret(maxlen, ReserveString);
-  char* path = ret.bufferSlice().ptr;
+  char* path = ret.mutableData();
 
   const char* from_dir = fromDir.c_str();
   const char* to_file = toFile.c_str();
@@ -412,7 +406,7 @@ String FileUtil::relativePath(const std::string& fromDir,
   while (true) {
     int seg_len = 0;
     char cur = from_start[0];
-    while (cur && cur != '/') {
+    while (cur && !isDirSeparator(cur)) {
       ++seg_len;
       cur = from_start[seg_len];
     }
@@ -428,8 +422,9 @@ String FileUtil::relativePath(const std::string& fromDir,
   char cur = *from_start;
   char* path_end = path;
   while (cur) {
-    if (cur == '/') {
-      strcpy(path_end, "../");
+    if (isDirSeparator(cur)) {
+      strcpy(path_end, "..");
+      path_end[2] = getDirSeparator();
       maxlen -= 3;
       path_end += 3;
     }
@@ -437,8 +432,9 @@ String FileUtil::relativePath(const std::string& fromDir,
     cur = *from_start;
   }
 
-  if (from_start[-1] != '/') {
-    strcpy(path_end, "../");
+  if (!isDirSeparator(from_start[-1])) {
+    strcpy(path_end, "..");
+    path_end[2] = getDirSeparator();
     maxlen -= 3;
     path_end += 3;
   }
@@ -483,6 +479,7 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
   size_t maxlen = addlen + 4;
   size_t pathlen = 0; // is the length of the result path
   size_t seglen;  // is the end of the current segment
+  auto pathend = addpath + addlen;
 
   /* Treat null as an empty path.
    */
@@ -490,8 +487,9 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
     addpath = "";
 
   String ret(maxlen-1, ReserveString);
-  char *path = ret.bufferSlice().ptr;
+  char *path = ret.mutableData();
 
+#ifndef _MSC_VER
   if (addpath[0] == '/' && collapse_slashes) {
     /* Ignore the given root path, strip off leading
      * '/'s to a single leading '/' from the addpath,
@@ -502,12 +500,13 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
     path[0] = '/';
     pathlen = 1;
   }
+#endif
 
   while (*addpath) {
     /* Parse each segment, find the closing '/'
      */
     const char *next = addpath;
-    while (*next && (*next != '/')) {
+    while (*next && !isDirSeparator(*next)) {
       ++next;
     }
     seglen = next - addpath;
@@ -515,28 +514,35 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
     if (seglen == 0) {
       /* / */
       if (!collapse_slashes) {
-        path[pathlen++] = '/';
+        path[pathlen++] = getDirSeparator();
       }
-    } else if (seglen == 1 && addpath[0] == '.') {
-      /* ./ */
+    } else if (seglen == 1 && addpath[0] == '.'
+               && (pathlen > 0 || (*next && *(next+1)))) {
+      /* ./ (safe to drop iff there is something before or after it) */
     } else if (seglen == 2 && addpath[0] == '.' && addpath[1] == '.') {
       /* backpath (../) */
-      if (pathlen == 1 && path[0] == '/') {
+      if (pathlen == 1 && isDirSeparator(path[0])) {
       } else if (pathlen == 0
                  || (pathlen == 3
-                     && !memcmp(path + pathlen - 3, "../", 3))
+                     && !memcmp(path + pathlen - 3, "..", 2)
+                     && isDirSeparator(path[pathlen - 1]))
                  || (pathlen  > 3
-                     && !memcmp(path + pathlen - 4, "/../", 4))) {
+                     && isDirSeparator(path[pathlen - 4])
+                     && !memcmp(path + pathlen - 3, "..", 2)
+                     && isDirSeparator(path[pathlen - 1]))) {
         /* Append another backpath, including
          * trailing slash if present.
          */
-        memcpy(path + pathlen, "../", *next ? 3 : 2);
+        memcpy(path + pathlen, "..", 2);
+        if (*next) {
+          path[pathlen + 2] = getDirSeparator();
+        }
         pathlen += *next ? 3 : 2;
       } else {
         /* otherwise crop the prior segment */
         do {
           --pathlen;
-        } while (pathlen && path[pathlen - 1] != '/');
+        } while (pathlen && !isDirSeparator(path[pathlen - 1]));
       }
     } else {
       /* An actual segment, append it to the destination path */
@@ -554,8 +560,40 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
 
     addpath = next;
   }
+
+  // If there are null bytes in the path, treat it as the empty string
+  if (addpath != pathend) pathlen = 0;
+
+#ifdef _MSC_VER
+  // Need to normalize to Windows directory separators, as the underlying
+  // system calls don't like unix path separators.
+  for (int i = 0; i < pathlen; i++) {
+    if (path[i] == '/') {
+      path[i] = '\\';
+    }
+  }
+#endif
   ret.setSize(pathlen);
   return ret;
+}
+
+std::string FileUtil::expandUser(const std::string& path,
+                                 const std::string& sysUser) {
+  if (path.front() != '~') {
+    return path;
+  }
+
+  auto pos = std::min(path.find('/'), path.size());
+  auto user = (pos > 1) ? path.substr(1, pos - 1) : sysUser;
+
+  auto defaultUser = user.empty() || user == Process::GetCurrentUser();
+  auto home = defaultUser ? Process::GetHomeDirectory() : "/home/" + user + "/";
+
+  if (pos + 1 < path.size()) {
+    return home + path.substr(pos + 1);
+  } else {
+    return home;
+  }
 }
 
 std::string FileUtil::normalizeDir(const std::string &dirname) {
@@ -566,8 +604,8 @@ std::string FileUtil::normalizeDir(const std::string &dirname) {
    */
   MemoryManager::TlsWrapper::getCheck();
   string ret = FileUtil::canonicalize(dirname).toCppString();
-  if (!ret.empty() && ret[ret.length() - 1] != '/') {
-    ret += '/';
+  if (!ret.empty() && !isDirSeparator(ret[ret.length() - 1])) {
+    ret += getDirSeparator();
   }
   return ret;
 }
@@ -577,11 +615,11 @@ void FileUtil::find(std::vector<std::string> &out,
                     const std::set<std::string> *excludeDirs /* = NULL */,
                     const std::set<std::string> *excludeFiles /* = NULL */) {
   if (!path) path = "";
-  if (*path == '/') path++;
+  if (isDirSeparator(*path)) path++;
 
   string spath = path;
-  if (spath.length() && spath[spath.length() - 1] != '/') {
-    spath += '/';
+  if (spath.length() && !isDirSeparator(spath[spath.length() - 1])) {
+    spath += getDirSeparator();
   }
   if (excludeDirs && excludeDirs->find(spath) != excludeDirs->end()) {
     return;
@@ -597,8 +635,8 @@ void FileUtil::find(std::vector<std::string> &out,
                   fullPath.c_str());
     return;
   }
-  if (fullPath[fullPath.length() - 1] != '/') {
-    fullPath += '/';
+  if (!isDirSeparator(fullPath[fullPath.length() - 1])) {
+    fullPath += getDirSeparator();
   }
 
   dirent *e;
@@ -660,6 +698,36 @@ void FileUtil::find(std::vector<std::string> &out,
   }
 
   closedir(dir);
+}
+
+bool FileUtil::isValidPath(const String& path) {
+  return path.size() == strlen(path.data());
+}
+
+bool FileUtil::checkPathAndWarn(const String& path,
+                                const char* func_name,
+                                int param_pos) {
+  if (!FileUtil::isValidPath(path)) {
+    raise_warning(
+      "%s() expects parameter %d to be a valid path, string given",
+      func_name,
+      param_pos
+    );
+    return false;
+  }
+  return true;
+}
+
+void FileUtil::checkPathAndError(const String& path,
+                                 const char* func_name,
+                                 int param_pos) {
+  if (!FileUtil::isValidPath(path)) {
+    raise_error(
+      "%s() expects parameter %d to be a valid path, string given",
+      func_name,
+      param_pos
+    );
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

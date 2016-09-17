@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,11 +20,14 @@
 #include <cinttypes>
 
 #include "hphp/util/either.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/apc-string.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
+
+//////////////////////////////////////////////////////////////////////
+
+struct ObjectData;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -37,38 +40,42 @@ namespace HPHP {
  * MakeObject and Delete take care of isolating callers from that detail.
  */
 struct APCObject {
+  using ClassOrName = Either<const Class*,const StringData*>;
+
   /*
    * Create an APCObject from an ObjectData*; returns its APCHandle.
    */
-  static APCHandle* Construct(ObjectData* data, size_t& size);
+  static APCHandle::Pair Construct(ObjectData* data);
 
   // Return an APCObject instance from a serialized version of the
   // object.  May return null.
-  static APCHandle* MakeAPCObject(
-      APCHandle* obj, size_t& size, const Variant& value);
+  static APCHandle::Pair MakeAPCObject(APCHandle* obj, const Variant& value);
 
   // Return an instance of a PHP object from the given object handle
-  static Variant MakeObject(const APCHandle* handle);
+  static Variant MakeLocalObject(const APCHandle* handle);
 
-  // Delete the APC object holding the object data
   static void Delete(APCHandle* handle);
 
   static APCObject* fromHandle(APCHandle* handle) {
-    assert(offsetof(APCObject, m_handle) == 0);
+    assert(handle->checkInvariants() &&
+           handle->kind() == APCKind::SharedObject);
+    static_assert(offsetof(APCObject, m_handle) == 0, "");
     return reinterpret_cast<APCObject*>(handle);
   }
 
   static const APCObject* fromHandle(const APCHandle* handle) {
-    assert(offsetof(APCObject, m_handle) == 0);
+    assert(handle->checkInvariants() &&
+           handle->kind() == APCKind::SharedObject);
+    static_assert(offsetof(APCObject, m_handle) == 0, "");
     return reinterpret_cast<const APCObject*>(handle);
   }
 
   APCHandle* getHandle() { return &m_handle; }
+  const APCHandle* getHandle() const { return &m_handle; }
+
+  bool isPersistent() const { return m_persistent; }
 
 private:
-  friend struct APCHandle;
-  friend size_t getMemSize(const APCObject*);
-
   struct Prop {
     StringData* name;
     APCHandle* val;
@@ -76,30 +83,37 @@ private:
   };
 
 private:
-  explicit APCObject(ObjectData*, uint32_t propCount);
+  explicit APCObject(ClassOrName cls, uint32_t propCount);
   ~APCObject();
   APCObject(const APCObject&) = delete;
   APCObject& operator=(const APCObject&) = delete;
 
 private:
-  static APCHandle* MakeShared(String data, size_t& size) {
-    auto const handle = APCString::MakeShared(KindOfObject, data.get(), size);
-    handle->setSerializedObj();
-    return handle;
-  }
+  static APCHandle::Pair ConstructSlow(ObjectData* data, ClassOrName name);
 
-private:
+  friend size_t getMemSize(const APCObject*);
   Object createObject() const;
+  Object createObjectSlow() const;
 
   Prop* props() { return reinterpret_cast<Prop*>(this + 1); }
   const Prop* props() const {
     return const_cast<APCObject*>(this)->props();
   }
 
+  APCHandle** persistentProps() {
+    return reinterpret_cast<APCHandle**>(this + 1);
+  }
+  const APCHandle* const * persistentProps() const {
+    return const_cast<APCObject*>(this)->persistentProps();
+  }
+
 private:
   APCHandle m_handle;
-  Either<const Class*,const StringData*> m_cls;
+  ClassOrName m_cls;
   uint32_t m_propCount;
+  uint8_t m_persistent:1;
+  uint8_t m_no_wakeup:1;
+  uint8_t m_fast_init:1;
 };
 
 //////////////////////////////////////////////////////////////////////

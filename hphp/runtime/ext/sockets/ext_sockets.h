@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,14 +18,12 @@
 #ifndef incl_HPHP_EXT_SOCKET_H_
 #define incl_HPHP_EXT_SOCKET_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/util/network.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-
-extern const int64_t k_STREAM_SERVER_BIND;
-extern const int64_t k_STREAM_SERVER_LISTEN;
 
 Variant HHVM_FUNCTION(socket_create,
                       int domain,
@@ -124,9 +122,9 @@ void HHVM_FUNCTION(socket_close,
 String HHVM_FUNCTION(socket_strerror,
                      int errnum);
 int64_t HHVM_FUNCTION(socket_last_error,
-                      const Resource& socket = null_resource);
+                      const Variant& socket = null_variant);
 void HHVM_FUNCTION(socket_clear_error,
-                   const Resource& socket = null_resource);
+                   const Variant& socket = null_variant);
 Variant HHVM_FUNCTION(getaddrinfo,
                       const String& host,
                       const String& port,
@@ -158,9 +156,11 @@ Variant socket_server_impl(const HostURL &hosturl,
                            int flags = k_STREAM_SERVER_BIND |
                              k_STREAM_SERVER_LISTEN,
                            VRefParam errnum = uninit_null(),
-                           VRefParam errstr = uninit_null());
+                           VRefParam errstr = uninit_null(),
+                           const Variant& context = null_variant);
 Variant sockopen_impl(const HostURL &hosturl, VRefParam errnum,
-                      VRefParam errstr, double timeout, bool persistent);
+                      VRefParam errstr, double timeout, bool persistent,
+                      const Variant& context);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

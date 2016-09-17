@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,7 +32,7 @@ void ReplayTransport::recordInput(Transport* transport, const char *filename) {
   Hdf hdf;
 
   char buf[32];
-  snprintf(buf, sizeof(buf), "%u", Process::GetProcessId());
+  snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)getpid());
   hdf["pid"] = std::string(buf);
   snprintf(buf, sizeof(buf), "%" PRIx64, (int64_t)Process::GetThreadId());
   hdf["tid"] = std::string(buf);
@@ -55,10 +55,10 @@ void ReplayTransport::recordInput(Transport* transport, const char *filename) {
     }
   }
 
-  int size;
+  size_t size;
   const void *data = transport->getPostData(size);
   if (size) {
-    String encoded = string_uuencode((const char *)data, size);
+    String encoded = string_uuencode((const char *)data, safe_cast<int>(size));
     hdf["post"] = encoded.get()->data();
   } else {
     hdf["post"] = "";
@@ -79,35 +79,38 @@ void ReplayTransport::replayInput(Hdf hdf) {
 }
 
 void ReplayTransport::replayInputImpl() {
-  String postData = StringUtil::UUDecode(Config::Get(m_ini, m_hdf["post"], ""));
+  String postData = StringUtil::UUDecode(Config::GetString(m_ini, m_hdf, "post",
+                                                           "", false));
   m_postData = std::string(postData.data(), postData.size());
   m_requestHeaders.clear();
-  for (Hdf hdf = m_hdf["headers"].firstChild(); hdf.exists();
-       hdf = hdf.next()) {
-    m_requestHeaders[Config::Get(m_ini, hdf["name"], "")].push_back(
-      Config::Get(m_ini, hdf["value"], "")
+  auto headers_callback = [&] (const IniSetting::Map &ini_h,
+                               const Hdf &hdf_h, const std::string &ini_h_key) {
+    m_requestHeaders[Config::GetString(ini_h, hdf_h, "name",
+                                       "", false)].push_back(
+      Config::GetString(ini_h, hdf_h, "value", "", false)
     );
-  }
+  };
+  Config::Iterate(headers_callback, m_ini, m_hdf, "headers", false);
 }
 
 const char *ReplayTransport::getUrl() {
-  return Config::Get(m_ini, m_hdf["url"], "");
+  return Config::Get(m_ini, m_hdf, "url", "", false);
 }
 
 const char *ReplayTransport::getRemoteHost() {
-  return Config::Get(m_ini, m_hdf["remote_host"], "");
+  return Config::Get(m_ini, m_hdf, "remote_host", "", false);
 }
 uint16_t ReplayTransport::getRemotePort() {
-  return Config::GetUInt16(m_ini, m_hdf["remote_port"], 0);
+  return Config::GetUInt16(m_ini, m_hdf, "remote_port", 0, false);
 }
 
-const void *ReplayTransport::getPostData(int &size) {
+const void *ReplayTransport::getPostData(size_t &size) {
   size = m_postData.size();
   return m_postData.data();
 }
 
 Transport::Method ReplayTransport::getMethod() {
-  return (Transport::Method)Config::GetInt32(m_ini, m_hdf["cmd"]);
+  return (Transport::Method)Config::GetInt32(m_ini, m_hdf, "cmd", false);
 }
 
 std::string ReplayTransport::getHeader(const char *name) {
@@ -134,7 +137,7 @@ void ReplayTransport::removeHeaderImpl(const char *name) {
 }
 
 void ReplayTransport::sendImpl(const void *data, int size, int code,
-                               bool chunked) {
+                               bool chunked, bool eom) {
   m_code = code;
 
   m_response = "HTTP/1.1 ";
@@ -156,6 +159,9 @@ void ReplayTransport::sendImpl(const void *data, int size, int code,
   m_response += "\r\n";
   m_response.append((const char *)data, size);
   m_response += "\r\n";
+  if (eom) {
+    onSendEndImpl();
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

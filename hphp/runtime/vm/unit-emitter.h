@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,11 +25,11 @@
 
 #include "hphp/parser/location.h"
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/vm/preclass.h"
 #include "hphp/runtime/vm/repo-helpers.h"
+#include "hphp/runtime/vm/repo-status.h"
 #include "hphp/runtime/vm/type-alias.h"
 #include "hphp/runtime/vm/unit.h"
 
@@ -51,7 +51,7 @@ struct StringData;
  * runtime Units.
  */
 struct UnitEmitter {
-  friend class UnitRepoProxy;
+  friend struct UnitRepoProxy;
 
   /////////////////////////////////////////////////////////////////////////////
   // Initialization and execution.
@@ -67,7 +67,7 @@ struct UnitEmitter {
   /*
    * Insert this unit in a repo as part of transaction `txn'.
    */
-  bool insert(UnitOrigin unitOrigin, RepoTxn& txn);
+  RepoStatus insert(UnitOrigin unitOrigin, RepoTxn& txn);
 
   /*
    * Instatiate a runtime Unit*.
@@ -90,6 +90,7 @@ struct UnitEmitter {
    */
   const unsigned char* bc() const;
   Offset bcPos() const;
+  Offset offsetOf(const unsigned char* pc) const;
 
   /*
    * Set the bytecode pointer by allocating a copy of `bc' with size `bclen'.
@@ -122,12 +123,9 @@ struct UnitEmitter {
 
   /*
    * Merge a scalar array into the Unit.
-   *
-   * When `key' is provided, it should be the serialization of `a'; when not
-   * provided, the array is serialized in the call.
    */
   Id mergeArray(const ArrayData* a);
-  Id mergeArray(const ArrayData* a, const std::string& key);
+  Id mergeArray(const ArrayData* a, const ArrayData::ScalarArrayKey& key);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -191,11 +189,8 @@ struct UnitEmitter {
    * This should only be called from fe->create(), and just constructs a new
    * Func* and records it as emitted from `fe'.
    */
-  Func* newFunc(const FuncEmitter* fe, Unit& unit, PreClass* preClass,
-                int line1, int line2, Offset base, Offset past,
-                const StringData* name, Attr attrs, bool top,
-                const StringData* docComment, int numParams,
-                bool needsNextClonedClosure);
+  Func* newFunc(const FuncEmitter* fe, Unit& unit, const StringData* name,
+                Attr attrs, int numParams);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -213,13 +208,26 @@ struct UnitEmitter {
   PreClassEmitter* pce(Id preClassId);
 
   /*
-   * Create a new PreClassEmitter and add it to the PCE vector.
+   * Add a PreClassEmitter to the hoistability tracking data structures.
+   *
+   * @see: PreClass::Hoistable
+   */
+  void addPreClassEmitter(PreClassEmitter* pce);
+
+  /*
+   * Create a new PreClassEmitter and add it to all the PCE data structures.
    *
    * @see: PreClass::Hoistable
    */
   PreClassEmitter* newPreClassEmitter(const StringData* name,
                                       PreClass::Hoistable hoistable);
-
+  /*
+   * Create a new PreClassEmitter without adding it to the hoistability
+   * tracking data structures.
+   * It should be added latter with addPreClassEmitter.
+   */
+  PreClassEmitter* newBarePreClassEmitter(const StringData* name,
+                                          PreClass::Hoistable hoistable);
 
   /////////////////////////////////////////////////////////////////////////////
   // Type aliases.
@@ -264,7 +272,7 @@ struct UnitEmitter {
    * Adjacent regions associated with the same source line will be collapsed as
    * this is created.
    */
-  void recordSourceLocation(const Location* sLoc, Offset start);
+  void recordSourceLocation(const Location::Range& sLoc, Offset start);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -301,14 +309,19 @@ struct UnitEmitter {
   void insertMergeableDef(int ix, Unit::MergeKind kind, Id id,
                           const TypedValue& tv);
 
+  /*
+   * Add a TypeAlias to the UnitEmitter's list of mergeables.
+   */
+  void pushMergeableTypeAlias(Unit::MergeKind kind, const Id id);
+  void insertMergeableTypeAlias(int ix, Unit::MergeKind kind, const Id id);
 
   /////////////////////////////////////////////////////////////////////////////
   // Bytecode emit.
   //
-  // These methods emit values to bc() at bcPos() and then updates bcPos(),
-  // realloc-ing the bytecode region if necessary.
+  // These methods emit values to bc() at bcPos() (or pos, if given) and then
+  // update bcPos(), realloc-ing the bytecode region if necessary.
 
-  void emitOp(Op op, int64_t pos = -1);
+  void emitOp(Op op);
   void emitByte(unsigned char n, int64_t pos = -1);
 
   void emitInt32(int n, int64_t pos = -1);
@@ -349,6 +362,7 @@ public:
 
   bool m_mergeOnly{false};
   bool m_isHHFile{false};
+  bool m_useStrictTypes{false};
   bool m_returnSeen{false};
   int m_preloadPriority{0};
   TypedValue m_mainReturn;
@@ -372,12 +386,9 @@ private:
   /*
    * Scalar array tables.
    */
-  struct ArrayVecElm {
-    std::string serialized;
-    const ArrayData* array;
-  };
-  hphp_hash_map<std::string, Id, string_hash> m_array2id;
-  std::vector<ArrayVecElm> m_arrays;
+  hphp_hash_map<ArrayData::ScalarArrayKey, Id,
+                ArrayData::ScalarHash> m_array2id;
+  std::vector<ArrayData*> m_arrays;
 
   /*
    * Type alias table.
@@ -434,19 +445,20 @@ private:
  * Proxy for converting in-repo unit representations into UnitEmitters.
  */
 struct UnitRepoProxy : public RepoProxy {
-  friend class Unit;
-  friend class UnitEmitter;
+  friend struct Unit;
+  friend struct UnitEmitter;
 
   explicit UnitRepoProxy(Repo& repo);
   ~UnitRepoProxy();
-  void createSchema(int repoId, RepoTxn& txn);
+  void createSchema(int repoId, RepoTxn& txn); // throws(RepoExc)
   std::unique_ptr<Unit> load(const std::string& name, const MD5& md5);
   std::unique_ptr<UnitEmitter> loadEmitter(const std::string& name,
                                            const MD5& md5);
 
   void insertUnitLineTable(int repoId, RepoTxn& txn, int64_t unitSn,
-                           LineTable& lineTable);
+                           LineTable& lineTable); // throws(RepoExc)
   void getUnitLineTable(int repoId, int64_t unitSn, LineTable& lineTable);
+  // throws(RepoExc)
 
   struct InsertUnitStmt : public RepoProxy::Stmt {
     InsertUnitStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
@@ -455,48 +467,48 @@ struct UnitRepoProxy : public RepoProxy {
                 int64_t& unitSn,
                 const MD5& md5,
                 const unsigned char* bc,
-                size_t bclen);
+                size_t bclen); // throws(RepoExc)
   };
   struct GetUnitStmt : public RepoProxy::Stmt {
     GetUnitStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    bool get(UnitEmitter& ue, const MD5& md5);
+    RepoStatus get(UnitEmitter& ue, const MD5& md5);
   };
   struct InsertUnitLitstrStmt : public RepoProxy::Stmt {
     InsertUnitLitstrStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(RepoTxn& txn, int64_t unitSn, Id litstrId,
-                const StringData* litstr);
+                const StringData* litstr); // throws(RepoExc)
   };
   struct GetUnitLitstrsStmt : public RepoProxy::Stmt {
     GetUnitLitstrsStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void get(UnitEmitter& ue);
+    void get(UnitEmitter& ue); // throws(RepoExc)
   };
   struct InsertUnitArrayStmt : public RepoProxy::Stmt {
     InsertUnitArrayStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(RepoTxn& txn, int64_t unitSn, Id arrayId,
-                const std::string& array);
+                const std::string& array); // throws(RepoExc)
   };
   struct GetUnitArraysStmt : public RepoProxy::Stmt {
     GetUnitArraysStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void get(UnitEmitter& ue);
+    void get(UnitEmitter& ue); // throws(RepoExc)
   };
   struct InsertUnitMergeableStmt : public RepoProxy::Stmt {
     InsertUnitMergeableStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(RepoTxn& txn, int64_t unitSn,
                 int ix, Unit::MergeKind kind,
-                Id id, TypedValue* value);
+                Id id, TypedValue* value); // throws(RepoExc)
   };
   struct GetUnitMergeablesStmt : public RepoProxy::Stmt {
     GetUnitMergeablesStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void get(UnitEmitter& ue);
+    void get(UnitEmitter& ue); // throws(RepoExc)
   };
   struct InsertUnitSourceLocStmt : public RepoProxy::Stmt {
     InsertUnitSourceLocStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(RepoTxn& txn, int64_t unitSn, Offset pastOffset, int line0,
-                int char0, int line1, int char1);
+                int char0, int line1, int char1); // throws(RepoExc)
   };
   struct GetSourceLocTabStmt : public RepoProxy::Stmt {
     GetSourceLocTabStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    bool get(int64_t unitSn, SourceLocTable& sourceLocTab);
+    RepoStatus get(int64_t unitSn, SourceLocTable& sourceLocTab);
   };
 
 #define URP_IOP(o) URP_OP(Insert##o, insert##o)
@@ -519,7 +531,7 @@ struct UnitRepoProxy : public RepoProxy {
 #undef URP_OP
 
 private:
-  bool loadHelper(UnitEmitter& ue, const std::string&, const MD5&);
+  RepoStatus loadHelper(UnitEmitter& ue, const std::string&, const MD5&);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,10 +24,11 @@
 
 #include <boost/container/flat_set.hpp>
 
-#include "hphp/util/exception.h"
-#include "hphp/util/hash-map-typedefs.h"
-#include "hphp/util/functional.h"
 #include "hphp/neo/neo_hdf.h"
+
+#include "hphp/util/exception.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -46,9 +47,8 @@ namespace HPHP {
  *     IP.2 = 192.168.100.101
  *   }
  */
-class HdfRaw; // reference counting HDF* raw pointer, implmented in .cpp file
-class Hdf {
-public:
+struct HdfRaw; // reference counting HDF* raw pointer, implmented in .cpp file
+struct Hdf {
   /**
    * Constructors.
    */
@@ -59,6 +59,11 @@ public:
            Hdf(const Hdf &hdf);                   // make a copy by reference
   explicit Hdf(HDF *hdf);                         // attaching a raw pointer
   ~Hdf();
+
+  /**
+   * Is this an empty Hdf?
+   */
+  bool isEmpty() const;
 
   /**
    * Close current and make a copy of the specified.
@@ -140,6 +145,7 @@ public:
   void configGet(std::set<std::string, stdltistr> &values) const;
   void configGet(boost::container::flat_set<std::string> &values) const;
   void configGet(std::map<std::string, std::string> &values) const;
+  void configGet(std::map<std::string, std::string, stdltistr> &values) const;
   void configGet(hphp_string_imap<std::string> &values) const;
 
   /**
@@ -372,17 +378,16 @@ private:
 /**
  * Base class of all exceptions Hdf class might throw.
  */
-class HdfException : public Exception {
-public:
-  HdfException(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+struct HdfException : Exception {
+  HdfException(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
   EXCEPTION_COMMON_IMPL(HdfException);
 };
 
 /**
  * Trying to get a node's value, but it's not in the specified type.
  */
-class HdfDataTypeException : public HdfException {
-public:
+struct HdfDataTypeException : HdfException {
   HdfDataTypeException(const Hdf *hdf, const char *type, const char *value)
     : HdfException("HDF node [%s]'s value \"%s\" is not %s",
                    hdf->getFullPath().c_str(), value, type) {
@@ -393,8 +398,7 @@ public:
 /**
  * A node's value is not expected.
  */
-class HdfDataValueException : public HdfException {
-public:
+struct HdfDataValueException : HdfException {
   explicit HdfDataValueException(const Hdf *hdf, const char *expected = "")
     : HdfException("HDF node [%s]'s value \"%s\" is not expected %s",
                    hdf->getFullPath().c_str(), hdf->configGet(""), expected) {
@@ -405,8 +409,7 @@ public:
 /**
  * Calling a function in wrong context.
  */
-class HdfInvalidOperation : public HdfException {
-public:
+struct HdfInvalidOperation : HdfException {
   explicit HdfInvalidOperation(const char *operation)
     : HdfException("Invalid operation: %s", operation) {
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ICU_TIMEZONE_H
 #define incl_HPHP_ICU_TIMEZONE_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/timezone.h>
@@ -26,8 +26,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlTimeZone;
 
-class IntlTimeZone : public IntlError {
- public:
+struct IntlTimeZone : IntlError {
   IntlTimeZone() {}
   IntlTimeZone(const IntlTimeZone&) = delete;
   IntlTimeZone& operator=(const IntlTimeZone& src) {
@@ -43,7 +42,7 @@ class IntlTimeZone : public IntlError {
       c_IntlTimeZone = Unit::lookupClass(s_IntlTimeZone.get());
       assert(c_IntlTimeZone);
     }
-    auto obj = ObjectData::newInstance(c_IntlTimeZone);
+    Object obj{c_IntlTimeZone};
     if (tz) {
       Native::data<IntlTimeZone>(obj)->setTimeZone(tz, owned);
     }

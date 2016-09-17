@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,6 +31,8 @@
 #include "hphp/hhbbc/type-system.h"
 #include "hphp/hhbbc/index.h"
 #include "hphp/hhbbc/func-util.h"
+
+#include "hphp/util/text-util.h"
 
 namespace HPHP { namespace HHBBC {
 
@@ -64,14 +66,7 @@ std::string escaped_string(SString str) {
     return ret;
   }
   auto const sl = str->slice();
-  folly::toAppend(
-    "\"",
-    folly::cEscape<std::string>(
-      folly::StringPiece(sl.ptr, sl.len)
-    ),
-    "\"",
-    &ret
-  );
+  folly::toAppend("\"", folly::cEscape<std::string>(sl), "\"", &ret);
   return ret;
 };
 
@@ -173,7 +168,7 @@ std::string show(const Func& func) {
 #undef X
 
   ret += folly::format("digraph {} {{\n  node [shape=box];\n{}}}\n",
-    func.name->data(), indent(2, dot_cfg(func))).str();
+    func.name, indent(2, dot_cfg(func))).str();
 
   for (auto& blk : func.blocks) {
     ret += folly::format(
@@ -280,33 +275,6 @@ std::string show(SrcLoc loc) {
 std::string show(const Bytecode& bc) {
   std::string ret;
 
-  auto append_mvec = [&] (const MVector& mvec) {
-    folly::toAppend(
-      "<",
-      locationCodeString(mvec.lcode),
-      &ret
-    );
-    if (mvec.locBase) {
-      ret += ":" + local_string(mvec.locBase);
-    }
-    for (auto& m : mvec.mcodes) {
-      folly::toAppend(" ", memberCodeString(m.mcode), &ret);
-      switch (memberCodeImmType(m.mcode)) {
-      case MCodeImm::None: break;
-      case MCodeImm::String:
-        ret += ":" + escaped_string(m.immStr);
-        break;
-      case MCodeImm::Int:
-        folly::toAppend(":", m.immInt, &ret);
-        break;
-      case MCodeImm::Local:
-        folly::toAppend(":$", local_string(m.immLoc), &ret);
-        break;
-      }
-    }
-    ret += ">";
-  };
-
   auto append_vsa = [&] (const std::vector<SString>& keys) {
     ret += "<";
     auto delim = "";
@@ -341,7 +309,30 @@ std::string show(const Bytecode& bc) {
     ret += ">";
   };
 
-#define IMM_MA(n)      ret += " "; append_mvec(data.mvec);
+  auto append_mkey = [&](MKey mkey) {
+    ret += memberCodeString(mkey.mcode);
+
+    switch (mkey.mcode) {
+      case MEL: case MPL:
+        folly::toAppend(':', local_string(mkey.local), &ret);
+        break;
+      case MEC: case MPC:
+        folly::toAppend(':', mkey.idx, &ret);
+        break;
+      case MEI:
+        folly::toAppend(':', mkey.int64, &ret);
+        break;
+      case MET: case MPT: case MQT:
+        folly::toAppend(
+          ":\"", escapeStringForCPP(mkey.litstr->data(), mkey.litstr->size()),
+          '"', &ret
+        );
+        break;
+      case MW:
+        break;
+    }
+  };
+
 #define IMM_BLA(n)     ret += " "; append_switch(data.targets);
 #define IMM_SLA(n)     ret += " "; append_sswitch(data.targets);
 #define IMM_ILA(n)     ret += " "; append_itertab(data.iterTab);
@@ -354,10 +345,10 @@ std::string show(const Bytecode& bc) {
 #define IMM_RATA(n)    folly::toAppend(" ", show(data.rat), &ret);
 #define IMM_AA(n)      ret += " " + array_string(data.arr##n);
 #define IMM_BA(n)      folly::toAppend(" <blk:", data.target->id, ">", &ret);
-#define IMM_OA_IMPL(n) /* empty */
-#define IMM_OA(type)   folly::toAppend(" ", subopToName(data.subop), &ret); \
-                       IMM_OA_IMPL
+#define IMM_OA_IMPL(n) folly::toAppend(" ", subopToName(data.subop##n), &ret);
+#define IMM_OA(type)   IMM_OA_IMPL
 #define IMM_VSA(n)     ret += " "; append_vsa(data.keys);
+#define IMM_KA(n)      ret += " "; append_mkey(data.mkey);
 
 #define IMM_NA
 #define IMM_ONE(x)           IMM_##x(1)
@@ -379,7 +370,6 @@ std::string show(const Bytecode& bc) {
 
 #undef O
 
-#undef IMM_MA
 #undef IMM_BLA
 #undef IMM_SLA
 #undef IMM_ILA
@@ -394,6 +384,7 @@ std::string show(const Bytecode& bc) {
 #undef IMM_BA
 #undef IMM_OA_IMPL
 #undef IMM_OA
+#undef IMM_KA
 
 #undef IMM_NA
 #undef IMM_ONE
@@ -443,11 +434,39 @@ std::string show(Type t) {
   case BCls:         ret = "Cls";      break;
   case BRef:         ret = "Ref";      break;
 
+  case BSVec:        ret = "SVec";     break;
+  case BCVec:        ret = "CVec";     break;
+  case BSVecE:       ret = "SVecE";    break;
+  case BCVecE:       ret = "CVecE";    break;
+  case BSVecN:       ret = "SVecN";    break;
+  case BCVecN:       ret = "CVecN";    break;
+  case BVecE:        ret = "VecE";     break;
+  case BVecN:        ret = "VecN";     break;
+  case BSDict:       ret = "SDict";    break;
+  case BCDict:       ret = "CDict";    break;
+  case BSDictE:      ret = "SDictE";   break;
+  case BCDictE:      ret = "CDictE";   break;
+  case BSDictN:      ret = "SDictN";   break;
+  case BCDictN:      ret = "CDictN";   break;
+  case BDictE:       ret = "DictE";    break;
+  case BDictN:       ret = "DictN";    break;
+  case BSKeyset:     ret = "SKeyset";  break;
+  case BCKeyset:     ret = "CKeyset";  break;
+  case BSKeysetE:    ret = "SKeysetE"; break;
+  case BCKeysetE:    ret = "CKeysetE"; break;
+  case BSKeysetN:    ret = "SKeysetN"; break;
+  case BCKeysetN:    ret = "CKeysetN"; break;
+  case BKeysetE:     ret = "KeysetE";  break;
+  case BKeysetN:     ret = "KeysetN";  break;
+
   case BNull:        ret = "Null";     break;
   case BNum:         ret = "Num";      break;
   case BBool:        ret = "Bool";     break;
   case BStr:         ret = "Str";      break;
   case BArr:         ret = "Arr";      break;
+  case BVec:         ret = "Vec";      break;
+  case BDict:        ret = "Dict";     break;
+  case BKeyset:      ret = "Keyset";   break;
 
   case BOptTrue:     ret = "?True";    break;
   case BOptFalse:    ret = "?False";   break;
@@ -470,6 +489,34 @@ std::string show(Type t) {
   case BOptObj:      ret = "?Obj";     break;
   case BOptRes:      ret = "?Res";     break;
 
+  case BOptSVecE:    ret = "?SVecE";   break;
+  case BOptCVecE:    ret = "?CVecE";   break;
+  case BOptSVecN:    ret = "?SVecN";   break;
+  case BOptCVecN:    ret = "?CVecN";   break;
+  case BOptSVec:     ret = "?SVec";    break;
+  case BOptCVec:     ret = "?CVec";    break;
+  case BOptVecE:     ret = "?VecE";    break;
+  case BOptVecN:     ret = "?VecN";    break;
+  case BOptVec:      ret = "?Vec";     break;
+  case BOptSDictE:   ret = "?SDictE";  break;
+  case BOptCDictE:   ret = "?CDictE";  break;
+  case BOptSDictN:   ret = "?SDictN";  break;
+  case BOptCDictN:   ret = "?CDictN";  break;
+  case BOptSDict:    ret = "?SDict";   break;
+  case BOptCDict:    ret = "?CDict";   break;
+  case BOptDictE:    ret = "?DictE";   break;
+  case BOptDictN:    ret = "?DictN";   break;
+  case BOptDict:     ret = "?Dict";    break;
+  case BOptSKeysetE: ret = "?SKeysetE";break;
+  case BOptCKeysetE: ret = "?CKeysetE";break;
+  case BOptSKeysetN: ret = "?SKeysetN";break;
+  case BOptCKeysetN: ret = "?CKeysetN";break;
+  case BOptSKeyset:  ret = "?SKeyset"; break;
+  case BOptCKeyset:  ret = "?CKeyset"; break;
+  case BOptKeysetE:  ret = "?KeysetE"; break;
+  case BOptKeysetN:  ret = "?KeysetN"; break;
+  case BOptKeyset:   ret = "?Keyset";  break;
+
   case BInitPrim:    ret = "InitPrim"; break;
   case BPrim:        ret = "Prim";     break;
   case BInitUnc:     ret = "InitUnc";  break;
@@ -491,8 +538,14 @@ std::string show(Type t) {
   case DataTag::ArrPackedN:
   case DataTag::ArrStruct:
   case DataTag::ArrMapN:
+  case DataTag::Dict:
+  case DataTag::Vec:
+  case DataTag::Keyset:
     break;
+  case DataTag::VecVal:
+  case DataTag::DictVal:
   case DataTag::ArrVal:
+  case DataTag::KeysetVal:
     folly::toAppend("~", &ret);
     break;
   case DataTag::Str:
@@ -506,6 +559,9 @@ std::string show(Type t) {
   case DataTag::Int: folly::toAppend(t.m_data.ival, &ret); break;
   case DataTag::Dbl: folly::toAppend(t.m_data.dval, &ret); break;
   case DataTag::Str: ret += escaped_string(t.m_data.sval); break;
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal:
     ret += array_string(t.m_data.aval);
     break;
@@ -567,6 +623,30 @@ std::string show(Type t) {
       "([{}:{}])",
       show(t.m_data.amapn->key),
       show(t.m_data.amapn->val)
+    ).str();
+    break;
+  case DataTag::Dict:
+    ret += folly::format(
+      "([{}:{}])",
+      show(t.m_data.dict->key),
+      show(t.m_data.dict->val)
+    ).str();
+    break;
+  case DataTag::Vec:
+    if (t.m_data.vec->len) {
+      ret += folly::sformat(
+        "([{}]:{})",
+        show(t.m_data.vec->val),
+        *t.m_data.vec->len
+      );
+    } else {
+      ret += folly::sformat("([{}])", show(t.m_data.vec->val));
+    }
+    break;
+  case DataTag::Keyset:
+    ret += folly::format(
+      "([{}])",
+      show(t.m_data.keyset->keyval)
     ).str();
     break;
   }

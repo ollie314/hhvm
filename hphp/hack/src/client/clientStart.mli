@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -9,10 +9,11 @@
  *)
 
 type env = {
-  root: Path.path;
-  wait: bool;
-  server_options_cmd : string option;
+  root: Path.t;
+  no_load: bool;
+  silent: bool;
+  ai_mode: string option;
 }
 
-val main : env -> unit
+val main : env -> Exit_status.t
 val start_server : env -> unit

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,8 +25,7 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(ExpressionList);
 
-class ExpressionList : public Expression {
-public:
+struct ExpressionList : Expression {
   enum ListKind {
     ListKindParam,
     ListKindComma,
@@ -37,29 +36,26 @@ public:
   explicit ExpressionList(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                           ListKind kind = ListKindParam);
 
-  // change case to lower so to make it case insensitive
-  void toLower();
-
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
+  ExpressionPtr preOptimize(AnalysisResultConstPtr ar) override;
 
-  virtual void setContext(Context context);
+  void setContext(Context context) override;
   void setListKind(ListKind kind) { m_kind = kind; }
   ListKind getListKind() const { return m_kind; }
-  virtual void addElement(ExpressionPtr exp);
-  virtual void insertElement(ExpressionPtr exp, int index = 0);
-  virtual bool isScalar() const;
-  virtual int getLocalEffects() const { return NoEffect; }
+  void addElement(ExpressionPtr exp) override;
+  void insertElement(ExpressionPtr exp, int index = 0) override;
+  bool isScalar() const override;
+  int getLocalEffects() const override { return NoEffect; }
   bool isNoObjectInvolved() const;
-  virtual bool containsDynamicConstant(AnalysisResultPtr ar) const;
+  bool containsDynamicConstant(AnalysisResultPtr ar) const override;
   void removeElement(int index);
   void clearElements();
-  virtual bool getScalarValue(Variant &value);
-  virtual bool isRefable(bool checkError = false) const;
-  virtual bool kidUnused(int i) const;
+  bool getScalarValue(Variant &value) override;
+  bool isRefable(bool checkError = false) const override;
+  bool kidUnused(int i) const override;
   ExpressionPtr listValue() const;
-  virtual bool isLiteralString() const;
-  virtual std::string getLiteralString() const;
+  bool isLiteralString() const override;
+  std::string getLiteralString() const override;
 
   bool isScalarArrayPairs() const;
 
@@ -67,17 +63,14 @@ public:
   ExpressionPtr &operator[](int index);
 
   void getStrings(std::vector<std::string> &strings);
-  void getOriginalStrings(std::vector<std::string> &strings);
   void stripConcat();
 
-  void markParam(int p, bool noRefWrapper);
-  void markParams(bool noRefWrapper);
+  void markParam(int p);
+  void markParams();
 
-  void setCollectionType(Collection::Type cType);
+  void setCollectionElems();
   void setContainsUnpack() { m_argUnpack = true; };
   bool containsUnpack() const { return m_argUnpack; }
-
-  virtual bool canonCompare(ExpressionPtr e) const;
 
   /**
    * Checks whether the expression list contains only literal strings and
@@ -89,10 +82,11 @@ public:
 private:
   void optimize(AnalysisResultConstPtr ar);
   unsigned int checkLitstrKeys() const;
+  enum class ElemsKind: uint8_t { None, ArrayPairs, Collection };
 
-  ExpressionPtrVec m_exps;
-  bool m_arrayElements;
-  int m_collectionType;
+private:
+  std::vector<ExpressionPtr> m_exps;
+  ElemsKind m_elems_kind;
   bool m_argUnpack;
   ListKind m_kind;
 };

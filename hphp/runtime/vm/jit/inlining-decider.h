@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,6 @@
 #ifndef incl_HPHP_JIT_INLINING_H_
 #define incl_HPHP_JIT_INLINING_H_
 
-#include "hphp/runtime/vm/srckey.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 
 #include <vector>
@@ -31,8 +30,8 @@ struct SrcKey;
 namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
-struct HhbcTranslator;
 struct RegionDesc;
+namespace irgen { struct IRGS; }
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -91,6 +90,7 @@ struct InliningDecider {
    */
   bool disabled() const { return m_disabled; }
   int  depth()    const { return m_callDepth; }
+  bool inlining() const { return depth() != 0; }
 
   /////////////////////////////////////////////////////////////////////////////
   // Core API.
@@ -111,8 +111,7 @@ struct InliningDecider {
    * NOTE: Inlining will fail during translation if the FPush was interpreted.
    * It is up to the client to ensure that this is not the case.
    */
-  bool canInlineAt(SrcKey callSK, const Func* callee,
-                   const RegionDesc& region) const;
+  bool canInlineAt(SrcKey callSK, const Func* callee) const;
 
   /*
    * Check that `region' of `callee' can be inlined (possibly via other inlined
@@ -126,7 +125,20 @@ struct InliningDecider {
    * If inlining is not performed when true is returned, registerEndInlining()
    * must be called immediately to correctly reset the internal inlining costs.
    */
-  bool shouldInline(const Func* callee, const RegionDesc& region);
+  bool shouldInline(SrcKey callerSk, const Func* callee,
+                    const RegionDesc& region, uint32_t maxTotalCost);
+
+  /*
+   * Update our context to account for the beginning of an inlined call.
+   */
+  void accountForInlining(SrcKey callerSk,
+                          const Func* callee,
+                          const RegionDesc& region);
+
+  /*
+   * Update context to begin inlining of callee with cost zero.
+   */
+  void initWithCallee(const Func* callee);
 
   /*
    * Update internal state for when an inlining event ends.
@@ -164,10 +176,11 @@ private:
  */
 RegionDescPtr selectCalleeRegion(const SrcKey& sk,
                                  const Func* callee,
-                                 const HhbcTranslator& ht,
-                                 bool profiling);
+                                 const irgen::IRGS& irgs,
+                                 InliningDecider& inl,
+                                 int32_t maxBCInstrs);
 
 ///////////////////////////////////////////////////////////////////////////////
 }}
 
-#endif // incl_HPHP_JIT_INLINING_H_
+#endif

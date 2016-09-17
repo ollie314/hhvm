@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,6 +13,7 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/server/server-stats.h"
 
 #include <set>
@@ -22,11 +23,12 @@
 #include <list>
 #include <iostream>
 
-#include <folly/json.h>
 #include <folly/Conv.h>
 #include <folly/FBVector.h>
 #include <folly/Range.h>
 #include <folly/String.h>
+#include <folly/json.h>
+#include <folly/portability/Unistd.h>
 
 #include "hphp/runtime/server/http-server.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -36,12 +38,14 @@
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/datetime.h"
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/util/build-info.h"
 #include "hphp/util/compatibility.h"
+#include "hphp/util/hardware-counter.h"
 #include "hphp/util/process.h"
 #include "hphp/util/timer.h"
 #include "hphp/util/text-util.h"
-#include "hphp/runtime/base/hardware-counter.h"
 #include "hphp/runtime/server/writer.h"
+
 namespace HPHP {
 //////////////////////////////////////////////////////////////////////
 
@@ -564,10 +568,10 @@ void ServerStats::ReportStatus(std::string &output, Writer::Format format) {
   w->beginObject("status");
 
   w->beginObject("process");
-  w->writeEntry("id", (int64_t)Process::GetProcessId());
+  w->writeEntry("id", (int64_t)getpid());
   w->writeEntry("build", RuntimeOption::BuildId);
 
-  w->writeEntry("compiler", kCompilerId);
+  w->writeEntry("compiler", compilerId().begin());
 
 #ifdef DEBUG
   w->writeEntry("debug", "yes");
@@ -580,10 +584,10 @@ void ServerStats::ReportStatus(std::string &output, Writer::Format format) {
   timeval up;
   up.tv_sec = now - HttpServer::StartTime;
   up.tv_usec = 0;
-  w->writeEntry("now", DateTime(now).
-                toString(DateTime::DateFormatCookie).data());
-  w->writeEntry("start", DateTime(HttpServer::StartTime).
-                toString(DateTime::DateFormatCookie).data());
+  w->writeEntry("now", req::make<DateTime>(now)->
+                       toString(DateTime::DateFormatCookie).data());
+  w->writeEntry("start", req::make<DateTime>(HttpServer::StartTime)->
+                         toString(DateTime::DateFormatCookie).data());
   w->writeEntry("up", format_duration(up));
   w->endObject("process");
 
@@ -617,16 +621,16 @@ void ServerStats::ReportStatus(std::string &output, Writer::Format format) {
     w->writeEntry("tid", (int64_t)ts.m_threadPid);
     w->writeEntry("req", ts.m_requestCount);
     w->writeEntry("bytes", ts.m_writeBytes);
-    w->writeEntry("start", DateTime(ts.m_start.tv_sec).
-                  toString(DateTime::DateFormatCookie).data());
+    w->writeEntry("start", req::make<DateTime>(ts.m_start.tv_sec)->
+                           toString(DateTime::DateFormatCookie).data());
     w->writeEntry("duration", format_duration(duration));
     if (ts.m_requestCount > 0) {
       auto const stats = ts.m_mm->getStatsCopy();
       w->beginObject("memory");
-      w->writeEntry("current usage", stats.usage);
-      w->writeEntry("current alloc", stats.alloc);
+      w->writeEntry("current usage", stats.usage());
+      w->writeEntry("current alloc", stats.capacity);
       w->writeEntry("peak usage", stats.peakUsage);
-      w->writeEntry("peak alloc", stats.peakAlloc);
+      w->writeEntry("peak alloc", stats.peakCap);
       w->endObject("memory");
     }
     w->writeEntry("io", ts.m_ioInProcess);
@@ -833,7 +837,7 @@ void ServerStats::startRequest(const char *url, const char *clientIP,
                                const char *vhost) {
   ++m_threadStatus.m_requestCount;
 
-  m_threadStatus.m_mm = ThreadInfo::s_threadInfo->m_mm;
+  m_threadStatus.m_mm = &MM();
   gettimeofday(&m_threadStatus.m_start, 0);
   memset(&m_threadStatus.m_done, 0, sizeof(m_threadStatus.m_done));
   m_threadStatus.m_mode = ThreadMode::Processing;
@@ -972,9 +976,10 @@ ServerStatsHelper::~ServerStatsHelper() {
 #endif
 
     if (m_track & TRACK_MEMORY) {
-      auto const& stats = MM().getStats();
+      auto const stats = MM().getStats();
       ServerStats::Log(string("mem.") + m_section, stats.peakUsage);
-      ServerStats::Log(string("mem.allocated.") + m_section, stats.peakAlloc);
+      ServerStats::Log(string("mem.allocated.") + m_section,
+                       stats.peakCap);
     }
 
     if (m_track & TRACK_HWINST) {

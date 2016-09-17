@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,16 +17,14 @@
 #ifndef incl_HPHP_TEST_SERVER_H_
 #define incl_HPHP_TEST_SERVER_H_
 
-#include "hphp/test/ext/test_code_run.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/test/ext/test_base.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
  * Testing HTTP server.
  */
-class TestServer : public TestCodeRun {
-public:
+struct TestServer : TestBase {
   TestServer() = delete;
   explicit TestServer(const std::string serverType);
 
@@ -95,11 +93,6 @@ protected:
   void CleanupPreBoundSocket();
 
   const std::string m_serverType;
-};
-
-class TestLibEventServer : public TestServer {
-  public:
-  TestLibEventServer() : TestServer("libevent") {}
 };
 
 ///////////////////////////////////////////////////////////////////////////////

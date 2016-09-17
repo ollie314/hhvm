@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,24 +22,11 @@ namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Transport* FastCGIJob::getTransport() {
-  return m_transport.get();
-}
-
 void FastCGIJob::getRequestStart(struct timespec *outReqStart) {
   *outReqStart = reqStart;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-FastCGITransportTraits::FastCGITransportTraits(
-    std::shared_ptr<FastCGIJob> job,
-    void* context,
-    int id)
-  : m_server((FastCGIServer*) context),
-    m_transport(job->m_transport) {}
-
-FastCGITransportTraits::~FastCGITransportTraits() {}
 
 Server* FastCGITransportTraits::getServer() const {
   return m_server;

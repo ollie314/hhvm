@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -39,7 +39,7 @@ bool HHVM_FUNCTION(ob_start, const Variant& output_callback = uninit_null(),
                              int chunk_size = 0,
                              int flags = k_PHP_OUTPUT_HANDLER_STDFLAGS);
 void HHVM_FUNCTION(ob_clean);
-void HHVM_FUNCTION(ob_flush);
+bool HHVM_FUNCTION(ob_flush);
 bool HHVM_FUNCTION(ob_end_clean);
 bool HHVM_FUNCTION(ob_end_flush);
 void HHVM_FUNCTION(flush);
@@ -66,7 +66,7 @@ Variant HHVM_FUNCTION(hphp_get_timers, bool get_as_float = true);
 Variant HHVM_FUNCTION(hphp_output_global_state, bool serialize = true);
 int64_t HHVM_FUNCTION(hphp_instruction_counter, void);
 Variant HHVM_FUNCTION(hphp_get_hardware_counters, void);
-bool HHVM_FUNCTION(hphp_set_hardware_events, const String& events);
+bool HHVM_FUNCTION(hphp_set_hardware_events, const Variant& events);
 void HHVM_FUNCTION(hphp_clear_hardware_events, void);
 
 ///////////////////////////////////////////////////////////////////////////////

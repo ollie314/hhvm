@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,12 +16,13 @@
 */
 
 #include "hphp/runtime/ext/std/ext_std_classobj.h"
-#include "hphp/runtime/base/class-info.h"
-#include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/unit.h"
+
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/ext/array/ext_array.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/unit.h"
 
 namespace HPHP {
 
@@ -38,7 +39,7 @@ static const Class* get_cls(const Variant& class_or_object) {
   if (class_or_object.is(KindOfObject)) {
     ObjectData* obj = class_or_object.toCObjRef().get();
     cls = obj->getVMClass();
-  } else if (class_or_object.is(KindOfArray)) {
+  } else if (class_or_object.isArray()) {
     // do nothing but avoid the toString conversion notice
   } else {
     cls = Unit::loadClass(class_or_object.toString().get());
@@ -49,15 +50,15 @@ static const Class* get_cls(const Variant& class_or_object) {
 ///////////////////////////////////////////////////////////////////////////////
 
 Array HHVM_FUNCTION(get_declared_classes) {
-  return ClassInfo::GetClasses();
+  return Unit::getClassesInfo();
 }
 
 Array HHVM_FUNCTION(get_declared_interfaces) {
-  return ClassInfo::GetInterfaces();
+  return Unit::getInterfacesInfo();
 }
 
 Array HHVM_FUNCTION(get_declared_traits) {
-  return ClassInfo::GetTraits();
+  return Unit::getTraitsInfo();
 }
 
 bool HHVM_FUNCTION(class_alias, const String& original, const String& alias,
@@ -105,19 +106,19 @@ Variant HHVM_FUNCTION(get_class_methods, const Variant& class_or_object) {
   if (!cls) return init_null();
   VMRegAnchor _;
 
-  auto retVal = Array::attach(MixedArray::MakeReserve(cls->numMethods()));
+  auto retVal = Array::attach(PackedArray::MakeReserve(cls->numMethods()));
   Class::getMethodNames(
     cls,
     arGetContextClassFromBuiltin(vmfp()),
     retVal
   );
-  return HHVM_FN(array_values)(retVal).toArray();
+  return Variant::attach(HHVM_FN(array_values)(retVal)).toArray();
 }
 
 Array HHVM_FUNCTION(get_class_constants, const String& className) {
   auto const cls = Unit::loadClass(className.get());
   if (cls == NULL) {
-    return Array::attach(MixedArray::MakeReserve(0));
+    return Array::attach(PackedArray::MakeReserve(0));
   }
 
   auto const numConstants = cls->numConstants();
@@ -127,12 +128,13 @@ Array HHVM_FUNCTION(get_class_constants, const String& className) {
   for (size_t i = 0; i < numConstants; i++) {
     // Note: hphpc doesn't include inherited constants in
     // get_class_constants(), so mimic that behavior
-    if (consts[i].m_class == cls) {
-      auto const name  = const_cast<StringData*>(consts[i].m_name.get());
-      Cell value = consts[i].m_val;
+    if (consts[i].cls == cls && !consts[i].isAbstract() &&
+        !consts[i].isType()) {
+      auto const name  = const_cast<StringData*>(consts[i].name.get());
+      Cell value = consts[i].val;
       // Handle dynamically set constants
       if (value.m_type == KindOfUninit) {
-        value = cls->clsCnsGet(consts[i].m_name);
+        value = cls->clsCnsGet(consts[i].name);
       }
       assert(value.m_type != KindOfUninit);
       arrayInit.set(name, cellAsCVarRef(value));
@@ -149,42 +151,45 @@ Variant HHVM_FUNCTION(get_class_vars, const String& className) {
   }
   cls->initialize();
 
-  const Class::SProp* sPropInfo = cls->staticProperties();
-  const size_t numSProps = cls->numStaticProperties();
-  const Class::Prop* propInfo = cls->declProperties();
-  const size_t numDeclProps = cls->numDeclProperties();
+
+  auto const propInfo = cls->declProperties();
+
+  auto const numDeclProps = cls->numDeclProperties();
+  auto const numSProps    = cls->numStaticProperties();
 
   // The class' instance property initialization template is in different
   // places, depending on whether it has any request-dependent initializers
   // (i.e. constants)
-  const Class::PropInitVec& declPropInitVec = cls->declPropInit();
-  const Class::PropInitVec* propVals = !cls->pinitVec().empty()
-    ? cls->getPropData() : &declPropInitVec;
-  assert(propVals != NULL);
+  auto const& declPropInitVec = cls->declPropInit();
+  auto const propVals = !cls->pinitVec().empty()
+    ? cls->getPropData()
+    : &declPropInitVec;
+
+  assert(propVals != nullptr);
   assert(propVals->size() == numDeclProps);
 
   // For visibility checks
-  CallerFrame cf;
-  Class* ctx = arGetContextClass(cf());
+  auto ctx = arGetContextClass(GetCallerFrame());
 
   ArrayInit arr(numDeclProps + numSProps, ArrayInit::Map{});
 
   for (size_t i = 0; i < numDeclProps; ++i) {
-    StringData* name = const_cast<StringData*>(propInfo[i].m_name.get());
-    // Empty names are used for invisible/private parent properties; skip them
+    auto const name = const_cast<StringData*>(propInfo[i].name.get());
+    // Empty names are used for invisible/private parent properties; skip them.
     assert(name->size() != 0);
     if (Class::IsPropAccessible(propInfo[i], ctx)) {
-      const TypedValue* value = &((*propVals)[i]);
+      auto const value = &((*propVals)[i]);
       arr.set(name, tvAsCVarRef(value));
     }
   }
 
-  for (size_t i = 0; i < numSProps; ++i) {
-    bool vis, access;
-    TypedValue* value = cls->getSProp(ctx, sPropInfo[i].m_name, vis, access);
-    if (access) {
-      arr.set(const_cast<StringData*>(sPropInfo[i].m_name.get()),
-        tvAsCVarRef(value));
+  for (auto const& sprop : cls->staticProperties()) {
+    auto const lookup = cls->getSProp(ctx, sprop.name);
+    if (lookup.accessible) {
+      arr.set(
+        const_cast<StringData*>(sprop.name.get()),
+        tvAsCVarRef(lookup.prop)
+      );
     }
   }
 
@@ -196,68 +201,53 @@ Variant HHVM_FUNCTION(get_class_vars, const String& className) {
 Variant HHVM_FUNCTION(get_class, const Variant& object /* = null_variant */) {
   if (object.isNull()) {
     // No arg passed.
-    String ret;
-    CallerFrame cf;
-    Class* cls = arGetContextClassImpl<true>(cf());
+    auto cls = arGetContextClassImpl<true>(GetCallerFrame());
     if (cls) {
-      ret = String(cls->nameStr());
+      return Variant{cls->name(), Variant::PersistentStrInit{}};
     }
 
-    if (ret.empty()) {
-      raise_warning("get_class() called without object from outside a class");
-      return false;
-    }
-    return ret;
+    raise_warning("get_class() called without object from outside a class");
+    return false;
   }
   if (!object.isObject()) return false;
-  return VarNR(object.toObject()->o_getClassName());
+  return Variant{object.toCObjRef()->getVMClass()->name(),
+                 Variant::PersistentStrInit{}};
 }
 
 Variant HHVM_FUNCTION(get_called_class) {
   EagerCallerFrame cf;
   ActRec* ar = cf();
-  if (ar) {
-    if (ar->hasThis()) {
-      return Variant(ar->getThis()->o_getClassName());
-    }
-    if (ar->hasClass()) {
-      return Variant(ar->getClass()->preClass()->name(),
-        Variant::StaticStrInit{});
-    }
+  if (ar && ar->func()->cls()) {
+    auto const cls = ar->hasThis() ?
+      ar->getThis()->getVMClass() : ar->getClass();
+
+    return Variant{cls->name(), Variant::PersistentStrInit{}};
   }
 
   raise_warning("get_called_class() called from outside a class");
-  return Variant(false);
+  return false;
 }
 
 Variant HHVM_FUNCTION(get_parent_class,
                       const Variant& object /* = null_variant */) {
+  const Class* cls;
   if (object.isNull()) {
-    CallerFrame cf;
-    Class* cls = arGetContextClass(cf());
-    if (cls && cls->parent()) {
-      return String(cls->parentStr());
-    }
-    return false;
-  }
-
-  Variant class_name;
-  if (object.isObject()) {
-    class_name = HHVM_FN(get_class)(object);
-  } else if (object.isString()) {
-    class_name = object;
+    cls = arGetContextClass(GetCallerFrame());
+    if (!cls) return false;
   } else {
-    return false;
-  }
-
-  const Class* cls = Unit::loadClass(class_name.toString().get());
-  if (cls) {
-    auto parentClass = cls->parentStr();
-    if (!parentClass.empty()) {
-      return VarNR(parentClass);
+    if (object.isObject()) {
+      cls = object.toCObjRef()->getVMClass();
+    } else if (object.isString()) {
+      cls = Unit::loadClass(object.toCStrRef().get());
+      if (!cls) return false;
+    } else {
+      return false;
     }
   }
-  return false;
+
+  if (!cls->parent()) return false;
+
+  return Variant{cls->parentStr().get(), Variant::PersistentStrInit{}};
 }
 
 static bool is_a_impl(const Variant& class_or_object, const String& class_name,
@@ -324,22 +314,20 @@ Variant HHVM_FUNCTION(property_exists, const Variant& class_or_object,
     return Variant(Variant::NullInit());
   }
 
-  bool accessible;
-  auto propInd = cls->getDeclPropIndex(cls, property.get(), accessible);
-  if (propInd != kInvalidSlot) {
-    return true;
-  }
+  auto const lookup = cls->getDeclPropIndex(cls, property.get());
+  if (lookup.prop != kInvalidSlot) return true;
+
   if (obj &&
       UNLIKELY(obj->getAttribute(ObjectData::HasDynPropArr)) &&
       obj->dynPropArray()->nvGet(property.get())) {
     return true;
   }
-  propInd = cls->lookupSProp(property.get());
-  return (propInd != kInvalidSlot);
+  auto const propInd = cls->lookupSProp(property.get());
+  return propInd != kInvalidSlot;
 }
 
 Array HHVM_FUNCTION(get_object_vars, const Object& object) {
-  return object->o_toIterArray(ctxClassName());
+  return object->o_toIterArray(ctxClassName(), ObjectData::PreserveRefs);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

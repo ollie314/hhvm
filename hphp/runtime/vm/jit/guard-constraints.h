@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 #define incl_HPHP_VM_GUARD_CONSTRAINTS_H_
 
 #include "hphp/runtime/vm/jit/containers.h"
+#include "hphp/runtime/vm/jit/type-constraint.h"
 #include "hphp/runtime/vm/jit/type-source.h"
 #include "hphp/runtime/vm/jit/type.h"
 
@@ -31,9 +32,9 @@ struct IRInstruction;
  */
 struct GuardConstraints {
   /*
-   * Maps guard instructions (GuardLoc, CheckLoc, GuardStk, etc...)  to
-   * TypeConstraints. The TypeConstraints for a guard start out fully generic
-   * and are tightened appropriately when a value's type is used.
+   * Maps guard instructions (CheckLoc, CheckStk, etc.) to TypeConstraints. The
+   * TypeConstraints for a guard start out fully generic and are tightened
+   * appropriately when a value's type is used.
    */
   jit::hash_map<const IRInstruction*, TypeConstraint> guards;
 

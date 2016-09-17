@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,7 @@
 #ifndef PHP_SOAP_H
 #define PHP_SOAP_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include <map>
 #include <memory>
 #include <vector>
@@ -66,6 +66,11 @@
 #define SOAP_AUTHENTICATION_BASIC   0
 #define SOAP_AUTHENTICATION_DIGEST  1
 
+#define SOAP_SSL_METHOD_TLS     0
+#define SOAP_SSL_METHOD_SSLv2   1
+#define SOAP_SSL_METHOD_SSLv3   2
+#define SOAP_SSL_METHOD_SSLv23  3
+
 #define SOAP_SINGLE_ELEMENT_ARRAYS  (1<<0)
 #define SOAP_WAIT_ONE_WAY_CALLS     (1<<1)
 #define SOAP_USE_XSI_ARRAY_TYPE     (1<<2)
@@ -78,36 +83,43 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class SoapData final : public RequestEventHandler {
+struct SoapData final : RequestEventHandler {
+private:
   // SDL cache
   struct sdlCacheBucket {
     sdlPtr sdl;
     time_t time;
   };
-  typedef hphp_string_hash_map<std::shared_ptr<sdlCacheBucket>,sdlCacheBucket>
-          sdlCache;
-
-public:
-  int64_t m_cache;
-
-private:
-  int64_t m_cache_ttl;
-  sdlCache m_mem_cache; // URL => sdl
-
-public:
-  sdl *get_sdl(const char *uri, long cache_wsdl, HttpClient *http = NULL);
-  encodeMap *register_typemap(encodeMapPtr typemap);
-  void register_encoding(xmlCharEncodingHandlerPtr encoding);
+  using sdlCache =
+        hphp_string_hash_map<std::shared_ptr<sdlCacheBucket>,sdlCacheBucket>;
 
 public:
   SoapData();
 
+  sdl *get_sdl(const char *uri, long cache_wsdl, HttpClient *http = nullptr);
+  encodeMap *register_typemap(encodeMapPtr typemap);
+  void register_encoding(xmlCharEncodingHandlerPtr encoding);
+
+  void requestInit() override { reset(); }
+  void requestShutdown() override { reset(); }
+  void vscan(IMarker& mark) const override {
+    mark(m_classmap);
+    mark(m_error_object);
+    mark(m_ref_map);
+    // TODO t7925358 m_defEnc, m_typemap, m_sdls, and m_typemaps hold
+    // Variants in std:: containers.
+  }
+
+private:
+  sdlPtr get_sdl_impl(const char *uri, long cache_wsdl, HttpClient *http);
+  void reset();
+
+public:
   // globals that live across requests
   encodeMap m_defEnc;   // name => encode
   std::map<int, encodePtr> m_defEncIndex; // type => encode
   std::map<std::string, std::string> m_defEncNs; // namespaces => prefixes
 
-public:
   // request scope globals to avoid passing them between functions
   int m_soap_version;
   sdl *m_sdl;
@@ -126,17 +138,15 @@ public:
   int m_cur_uniq_ref;
   Array m_ref_map; // reference handling
 
-public:
-  virtual void requestInit() { reset();}
-  virtual void requestShutdown() { reset();}
+  int64_t m_cache;
 
 private:
+  int64_t m_cache_ttl;
+  sdlCache m_mem_cache; // URL => sdl
+
   hphp_hash_set<sdlPtr> m_sdls;
   hphp_hash_set<encodeMapPtr> m_typemaps;
   hphp_hash_set<xmlCharEncodingHandlerPtr> m_encodings;
-
-  sdlPtr get_sdl_impl(const char *uri, long cache_wsdl, HttpClient *http);
-  void reset();
 };
 
 #define USE_SOAP_GLOBAL  SoapData *__sg__ = s_soap_data.get();
@@ -158,13 +168,13 @@ struct soapClass {
   int persistance;
 };
 
-class soapHeader : public ResourceData {
-public:
+struct soapHeader : ResourceData {
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(soapHeader);
 
   CLASSNAME_IS("soapHeader")
-  // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override {
+    return classnameof();
+  }
 
   sdlFunction                      *function;
   String                            function_name;
@@ -176,9 +186,9 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class SoapException : public ExtendedException {
-public:
-  SoapException(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+struct SoapException : ExtendedException {
+  SoapException(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

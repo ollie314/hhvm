@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "hphp/runtime/debugger/break_point.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_client_settings.h"
 #include "hphp/runtime/base/debuggable.h"
@@ -32,11 +33,11 @@
 #include "hphp/util/mutex.h"
 
 namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
 
-class StringBuffer;
+struct StringBuffer;
 
 namespace Eval {
-
 ///////////////////////////////////////////////////////////////////////////////
 
 struct DebuggerCommand;
@@ -44,8 +45,7 @@ struct CmdInterrupt;
 
 using DebuggerCommandPtr = std::shared_ptr<DebuggerCommand>;
 
-class DebuggerClient {
-public:
+struct DebuggerClient {
   static int LineWidth;
   static int CodeBlockSize;
   static int ScrollBlockSize;
@@ -73,16 +73,19 @@ public:
 public:
   static void LoadColors(const IniSetting::Map& ini, Hdf hdf);
   static const char *LoadColor(const IniSetting::Map& ini, Hdf hdf,
+                               const std::string& setting,
                                const char *defaultName);
   static const char *LoadBgColor(const IniSetting::Map& ini, Hdf hdf,
+                                 const std::string& setting,
                                  const char *defaultName);
   static void LoadCodeColor(CodeColor index, const IniSetting::Map& ini,
-                            Hdf hdf, const char *defaultName);
+                            Hdf hdf, const std::string& setting,
+                            const char *defaultName);
 
   /**
    * Starts/stops a debugger client.
    */
-  static SmartPtr<Socket> Start(const DebuggerClientOptions &options);
+  static req::ptr<Socket> Start(const DebuggerClientOptions &options);
   static void Stop();
 
   /**
@@ -105,12 +108,29 @@ public:
   };
   static const char **GetCommands();
 
-  typedef std::vector<std::string> LiveList;
-  typedef boost::shared_array<LiveList> LiveListsPtr;
-  static LiveListsPtr CreateNewLiveLists() {
-    return LiveListsPtr(new LiveList[DebuggerClient::AutoCompleteCount]);
-  }
-  std::vector<std::string> getAllCompletions(std::string const &text);
+  using LiveList = std::vector<std::string>;
+
+  /*
+   * Exists just so that we can do:
+   *
+   *   std::shared_ptr<LiveLists> m_acLiveLists;
+   *   auto& list = m_acLiveLists->get(i);
+   *
+   * instead of:
+   *
+   *   std::shared_ptr<std::array<LiveList, AutoCompleteCount>> m_acLiveLists;
+   *   auto& list = (*m_acLiveLists)[i];
+   */
+  struct LiveLists {
+    LiveList& get(size_t i) {
+      assert(i < DebuggerClient::AutoCompleteCount);
+      return lists[i];
+    }
+
+    LiveList lists[DebuggerClient::AutoCompleteCount];
+  };
+
+  std::vector<std::string> getAllCompletions(const std::string& text);
 
   /**
    * Helpers
@@ -118,8 +138,10 @@ public:
   static void AdjustScreenMetrics();
   static bool Match(const char *input, const char *cmd);
   static bool IsValidNumber(const std::string &arg);
-  static String FormatVariable(const Variant& v, int maxlen = 80,
-                               char format = 'd');
+
+  static String FormatVariable(const Variant& v, char format = 'd');
+  static String FormatVariableWithLimit(const Variant& v, int maxlen);
+
   static String FormatInfoVec(const IDebuggable::InfoVec &info,
                               int *nameLen = nullptr);
   static String FormatTitle(const char *title);
@@ -141,17 +163,16 @@ public:
   /**
    * Output functions
    */
-  void print  (const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
-  void help   (const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
-  void info   (const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
-  void output (const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
-  void error  (const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
-
-  void print  (const std::string &s);
-  void help   (const std::string &s);
-  void info   (const std::string &s);
-  void output (const std::string &s);
-  void error  (const std::string &s);
+  void print  (ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
+  void help   (ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
+  void info   (ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
+  void output (ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
+  void error  (ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
 
   void print  (const String& s);
   void help   (const String& s);
@@ -159,11 +180,23 @@ public:
   void output (const String& s);
   void error  (const String& s);
 
+  void print  (const std::string& s);
+  void help   (const std::string& s);
+  void info   (const std::string& s);
+  void output (const std::string& s);
+  void error  (const std::string& s);
+
+  void print  (folly::StringPiece);
+  void help   (folly::StringPiece);
+  void info   (folly::StringPiece);
+  void output (folly::StringPiece);
+  void error  (folly::StringPiece);
+
   bool code(const String& source, int lineFocus = 0, int line1 = 0,
             int line2 = 0,
             int charFocus0 = 0, int lineFocus1 = 0, int charFocus1 = 0);
   void shortCode(BreakPointInfoPtr bp);
-  char ask(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+  char ask(ATTRIBUTE_PRINTF_STRING const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
 
   std::string wrap(const std::string &s);
   void helpTitle(const char *title);
@@ -175,21 +208,31 @@ public:
   void tutorial(const char *text);
   void setTutorial(int mode);
 
-  // Returns the source code string that the debugger is currently
-  // evaluating.
-  const std::string &getCode() const { return m_code;}
+  // Returns the source code string that the debugger is currently evaluating.
+  const std::string& getCode() const {
+    return m_code;
+  }
+
   void swapHelp();
 
-  /**
+  const std::string& getCommand() const {
+    return m_command;
+  }
+
+  /*
    * Test if argument matches specified. "index" is 1-based.
    */
-  const std::string &getCommand() const { return m_command;}
-  bool arg(int index, const char *s);
-  int argCount() { return m_args.size();}
+  bool arg(int index, const char *s) const;
+  size_t argCount() {
+    return m_args.size();
+  }
+
   std::string argValue(int index);
   // The entire line after that argument, un-escaped.
   std::string lineRest(int index);
-  std::vector<std::string> *args() { return &m_args;}
+  std::vector<std::string>* args() {
+    return &m_args;
+  }
 
   /**
    * Send the commmand to server's DebuggerProxy and expect same type of command
@@ -261,9 +304,9 @@ public:
   /**
    * Watch expressions.
    */
-  typedef std::pair<const char *, std::string> Watch;
-  typedef std::shared_ptr<Watch> WatchPtr;
-  typedef std::vector<WatchPtr> WatchPtrVec;
+  using Watch = std::pair<const char*, std::string>;
+  using WatchPtr = std::shared_ptr<Watch>;
+  using WatchPtrVec = std::vector<WatchPtr>;
   WatchPtrVec &getWatches() { return m_watches;}
   void addWatch(const char *fmt, const std::string &php);
 
@@ -287,7 +330,9 @@ public:
   void addCompletion(const char **list);
   void addCompletion(const char *name);
   void addCompletion(const std::vector<std::string> &items);
-  void setLiveLists(LiveListsPtr liveLists) { m_acLiveLists = liveLists; }
+  void setLiveLists(const std::shared_ptr<LiveLists>& liveLists) {
+    m_acLiveLists = liveLists;
+  }
 
   void init(const DebuggerClientOptions &options);
   void clearCachedLocal() {
@@ -319,8 +364,6 @@ public:
   void usageLogCommand(const std::string &cmd, const std::string &data);
   void usageLogEvent(const std::string &eventName,
                      const std::string &data = "");
-
-  std::string getZendExecutable() const { return m_zendExe; }
 
   // Internal testing helpers. Only used by internal tests!!!
   bool internalTestingIsClientStopped() const { return m_stopped; }
@@ -357,12 +400,30 @@ private:
   int m_acLen;
   int m_acIndex;
   int m_acPos;
-  std::vector<const char **> m_acLists;
-  std::vector<const char *> m_acStrings;
+
+  /*
+   * XXX: This type sits on a throne of lies.
+   *
+   * This is actually:
+   *
+   * union Terrible {
+   *   const char** list;
+   *   AutoComplete ac;
+   * };
+   *
+   * std::vector<Terrible> m_acLists;
+   *
+   * There is no tag to differentiate the two cases of Terrible, the const
+   * char** elements are cast to ints and compared to AutoComplete values
+   * directly.
+   */
+  std::vector<const char**> m_acLists;
+
+  std::vector<const char*> m_acStrings;
   std::vector<std::string> m_acItems;
   bool m_acLiveListsDirty;
-  LiveListsPtr m_acLiveLists;
   bool m_acProtoTypePrompted;
+  std::shared_ptr<LiveLists> m_acLiveLists;
 
   std::string m_line;
   // The current command to process.
@@ -378,8 +439,9 @@ private:
   std::shared_ptr<Macro> m_macroRecording;
   std::shared_ptr<Macro> m_macroPlaying;
 
-  std::vector<std::shared_ptr<DMachineInfo>>
-    m_machines; // All connected machines. 0th is local.
+  // All connected machines. 0th is local.
+  std::vector<std::shared_ptr<DMachineInfo>> m_machines;
+
   std::shared_ptr<DMachineInfo> m_machine; // Current machine
   std::string m_rpcHost; // Current RPC host
 
@@ -423,7 +485,9 @@ private:
   int  checkEvalEnd();
   void processTakeCode();
   bool processEval();
-  DebuggerCommand *createCommand();
+  DebuggerCommandPtr createCommand();
+  template<class T> DebuggerCommandPtr new_cmd(const char* name);
+  template<class T> DebuggerCommandPtr match_cmd(const char* name);
 
   void updateLiveLists();
   void promptFunctionPrototype();
@@ -441,7 +505,7 @@ private:
   // connections
   void closeAllConnections();
   void switchMachine(std::shared_ptr<DMachineInfo> machine);
-  SmartPtr<Socket> connectLocal();
+  req::ptr<Socket> connectLocal();
   bool connectRemote(const std::string &host, int port);
   bool tryConnect(const std::string &host, int port, bool clearmachines);
 
@@ -454,9 +518,6 @@ private:
   DebuggerCommandPtr xend(DebuggerCommand *cmd, EventLoopKind loopKind);
   DebuggerCommandPtr eventLoop(EventLoopKind loopKind, int expectedCmd,
                                const char *caller);
-
-  // Zend executable for CmdZend, overridable via config.
-  std::string m_zendExe = "php";
 
   bool m_unknownCmd;
 };

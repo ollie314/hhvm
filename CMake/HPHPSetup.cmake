@@ -1,12 +1,26 @@
 include(Options)
 
+set_property(GLOBAL PROPERTY DEBUG_CONFIGURATIONS Debug RelWithDebInfo)
+
 # Do this until cmake has a define for ARMv8
 INCLUDE(CheckCXXSourceCompiles)
+CHECK_CXX_SOURCE_COMPILES("
+#ifndef __x86_64__
+#error Not x64
+#endif
+int main() { return 0; }" IS_X64)
+
 CHECK_CXX_SOURCE_COMPILES("
 #ifndef __AARCH64EL__
 #error Not ARMv8
 #endif
 int main() { return 0; }" IS_AARCH64)
+
+CHECK_CXX_SOURCE_COMPILES("
+#ifndef __powerpc64__
+#error Not PPC64
+#endif
+int main() { return 0; }" IS_PPC64)
 
 set(HHVM_WHOLE_ARCHIVE_LIBRARIES
     hphp_runtime_static
@@ -14,28 +28,7 @@ set(HHVM_WHOLE_ARCHIVE_LIBRARIES
    )
 
 if (ENABLE_ZEND_COMPAT)
-  add_definitions("-DENABLE_ZEND_COMPAT=1")
   list(APPEND HHVM_WHOLE_ARCHIVE_LIBRARIES hphp_ext_zend_compat)
-endif()
-
-if (APPLE)
-  set(ENABLE_FASTCGI 1)
-  set(HHVM_ANCHOR_SYMS
-    -Wl,-u,_register_fastcgi_server
-    -Wl,-segaddr,__text,0
-    -Wl,-all_load ${HHVM_WHOLE_ARCHIVE_LIBRARIES})
-elseif (IS_AARCH64)
-  set(HHVM_ANCHOR_SYMS
-    -Wl,--whole-archive ${HHVM_WHOLE_ARCHIVE_LIBRARIES} -Wl,--no-whole-archive)
-elseif(CYGWIN)
-  set(ENABLE_FASTCGI 0)
-  set(HHVM_ANCHOR_SYMS
-  -Wl,--whole-archive ${HHVM_WHOLE_ARCHIVE_LIBRARIES} -Wl,--no-whole-archive)
-else()
-  set(ENABLE_FASTCGI 1)
-  set(HHVM_ANCHOR_SYMS
-    -Wl,-uregister_libevent_server,-uregister_fastcgi_server
-    -Wl,--whole-archive ${HHVM_WHOLE_ARCHIVE_LIBRARIES} -Wl,--no-whole-archive)
 endif()
 
 if (LINUX)
@@ -45,23 +38,31 @@ else ()
 endif ()
 
 set(HHVM_LINK_LIBRARIES
-  ${HHVM_ANCHOR_SYMS}
   ${HHVM_WRAP_SYMS}
   hphp_analysis
-  ext_hhvm_static
   hphp_system
   hphp_parser
   hphp_zend
   hphp_util
   hphp_hhbbc
+  jit_sort
+  ppc64-asm
   vixl neo)
 
 if(ENABLE_FASTCGI)
   LIST(APPEND HHVM_LINK_LIBRARIES hphp_thrift)
   LIST(APPEND HHVM_LINK_LIBRARIES hphp_proxygen)
+  include(CheckCXXSourceCompiles)
+  CHECK_CXX_SOURCE_COMPILES("#include <pthread.h>
+  int main() {
+    return pthread_mutex_timedlock();
+  }" PTHREAD_TIMEDLOCK)
+  if (NOT PTHREAD_TIMEDLOCK)
+    add_definitions(-DTHRIFT_MUTEX_EMULATE_PTHREAD_TIMEDLOCK)
+  endif()
 endif()
 
-if(NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE "Release")
   message(STATUS "Build type not specified: cmake build type Release.")
 endif()
@@ -96,6 +97,21 @@ include(HPHPCompiler)
 include(HPHPFunctions)
 include(HPHPFindLibs)
 
+# Ubuntu 15.10 and 14.04 have been failing to include a dependency on jemalloc
+# as a these linked flags force the dependency to be recorded
+if (JEMALLOC_ENABLED AND LINUX)
+  LIST(APPEND HHVM_LINK_LIBRARIES -Wl,--no-as-needed ${JEMALLOC_LIB} -Wl,--as-needed)
+endif()
+
+if (HHVM_VERSION_OVERRIDE)
+  parse_version("HHVM_VERSION_" ${HHVM_VERSION_OVERRIDE})
+  add_definitions("-DHHVM_VERSION_OVERRIDE")
+  add_definitions("-DHHVM_VERSION_MAJOR=${HHVM_VERSION_MAJOR}")
+  add_definitions("-DHHVM_VERSION_MINOR=${HHVM_VERSION_MINOR}")
+  add_definitions("-DHHVM_VERSION_PATCH=${HHVM_VERSION_PATCH}")
+  add_definitions("-DHHVM_VERSION_SUFFIX=\"${HHVM_VERSION_SUFFIX}\"")
+endif()
+
 # Weak linking on Linux, Windows, and OS X all work somewhat differently. The following test
 # works well on Linux and Windows, but fails for annoying reasons on OS X, and even works
 # differently on different releases of OS X, cf. http://glandium.org/blog/?p=2764. Getting
@@ -121,6 +137,27 @@ else()
   add_definitions(-DFOLLY_HAVE_WEAK_SYMBOLS=0)
 endif()
 
+include(CheckFunctionExists)
+CHECK_FUNCTION_EXISTS(memrchr FOLLY_HAVE_MEMRCHR)
+CHECK_FUNCTION_EXISTS(preadv FOLLY_HAVE_PREADV)
+CHECK_FUNCTION_EXISTS(pwritev FOLLY_HAVE_PWRITEV)
+if (FOLLY_HAVE_MEMRCHR)
+  add_definitions("-DFOLLY_HAVE_MEMRCHR=1")
+else()
+  add_definitions("-DFOLLY_HAVE_MEMRCHR=0")
+endif()
+if (FOLLY_HAVE_PREADV)
+  add_definitions("-DFOLLY_HAVE_PREADV=1")
+else()
+  add_definitions("-DFOLLY_HAVE_PREADV=0")
+endif()
+if (FOLLY_HAVE_PWRITEV)
+  add_definitions("-DFOLLY_HAVE_PWRITEV=1")
+else()
+  add_definitions("-DFOLLY_HAVE_PWRITEV=0")
+endif()
+add_definitions(-DFOLLY_HAVE_LIBGFLAGS=0)
+
 add_definitions(-D_REENTRANT=1 -D_PTHREADS=1 -D__STDC_FORMAT_MACROS)
 
 if (LINUX)
@@ -133,37 +170,37 @@ if(CYGWIN)
 endif()
 
 if(MSVC OR CYGWIN OR MINGW)
-  add_definitions(-DNOUSER=1 -DGLOG_NO_ABBREVIATED_SEVERITIES)
+  add_definitions(-DGLOG_NO_ABBREVIATED_SEVERITIES)
   add_definitions(-DWIN32_LEAN_AND_MEAN)
 endif()
 
-if(${CMAKE_BUILD_TYPE} MATCHES "Release")
+if(CMAKE_CONFIGURATION_TYPES)
+  if(NOT MSVC)
+    message(FATAL_ERROR "Adding the appropriate defines for multi-config targets using anything other than MSVC is not yet supported!")
+  endif()
+  if (MSVC_NO_ASSERT_IN_DEBUG)
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /D RELEASE=1 /D NDEBUG")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /D RELEASE=1 /D NDEBUG")
+  else()
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /D DEBUG")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /D DEBUG")
+  endif()
+  foreach(flag_var
+      CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_MINSIZEREL CMAKE_C_FLAGS_RELWITHDEBINFO
+      CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+    set(${flag_var} "${${flag_var}} /D RELEASE=1 /D NDEBUG")
+  endforeach()
+elseif(${CMAKE_BUILD_TYPE} MATCHES "Debug")
+  add_definitions(-DDEBUG)
+  message("Generating DEBUG build")
+else()
   add_definitions(-DRELEASE=1)
   add_definitions(-DNDEBUG)
   message("Generating Release build")
-else()
-  add_definitions(-DDEBUG)
-  message("Generating DEBUG build")
-endif()
-
-if(DEBUG_MEMORY_LEAK)
-  add_definitions(-DDEBUG_MEMORY_LEAK=1)
-endif()
-
-if(DEBUG_APC_LEAK)
-  add_definitions(-DDEBUG_APC_LEAK=1)
 endif()
 
 if(ALWAYS_ASSERT)
   add_definitions(-DALWAYS_ASSERT=1)
-endif()
-
-if(EXECUTION_PROFILER)
-  add_definitions(-DEXECUTION_PROFILER=1)
-endif()
-
-if(ENABLE_FULL_SETLINE)
-  add_definitions(-DENABLE_FULL_SETLINE=1)
 endif()
 
 if(APPLE OR FREEBSD OR CYGWIN OR MSVC OR MINGW)
@@ -192,18 +229,9 @@ if(ENABLE_FASTCGI)
   add_definitions(-DENABLE_FASTCGI=1)
 endif ()
 
-if(DISABLE_HARDWARE_COUNTERS)
+if(DISABLE_HARDWARE_COUNTERS OR NOT LINUX)
   add_definitions(-DNO_HARDWARE_COUNTERS=1)
 endif ()
-
-if(ENABLE_AVX2)
-  add_definitions(-DENABLE_AVX2=1)
-endif()
-
-if(PACKED_TV)
-  # Allows a packed tv build
-  add_definitions(-DPACKED_TV=1)
-endif()
 
 # enable the OSS options if we have any
 add_definitions(-DHPHP_OSS=1)
@@ -211,36 +239,14 @@ add_definitions(-DHPHP_OSS=1)
 # later versions of binutils don't play well without automake
 add_definitions(-DPACKAGE=hhvm -DPACKAGE_VERSION=Release)
 
-if (NOT LIBSQLITE3_INCLUDE_DIR)
-  include_directories("${TP_DIR}/libsqlite3")
-endif()
+add_definitions(-DDEFAULT_CONFIG_DIR="${DEFAULT_CONFIG_DIR}")
 
-if (NOT DOUBLE_CONVERSION_LIBRARY)
-  include_directories("${TP_DIR}/double-conversion/src")
-endif()
-
-if (NOT LZ4_LIBRARY)
-  include_directories("${TP_DIR}/lz4")
-endif()
-
-if (NOT LIBZIP_INCLUDE_DIR_ZIP)
-  include_directories("${TP_DIR}/libzip")
-endif()
-
-if (NOT PCRE_LIBRARY)
-  include_directories("${TP_DIR}/pcre")
-endif()
-
-include_directories("${TP_DIR}/fastlz")
-include_directories("${TP_DIR}/timelib")
-include_directories("${TP_DIR}/libafdt/src")
-include_directories("${TP_DIR}/libmbfl")
-include_directories("${TP_DIR}/libmbfl/mbfl")
-include_directories("${TP_DIR}/libmbfl/filter")
+add_definitions(-DHAVE_INTTYPES_H)
 add_definitions(-DNO_LIB_GFLAGS)
-include_directories("${TP_DIR}/folly")
-include_directories("${TP_DIR}/thrift")
 include_directories(${TP_DIR})
-
-include_directories(${HPHP_HOME}/hphp)
-include_directories(${HPHP_HOME})
+if (THIRD_PARTY_INCLUDE_PATHS)
+  include_directories(${THIRD_PARTY_INCLUDE_PATHS})
+  add_definitions(${THIRD_PARTY_DEFINITIONS})
+  include_directories(${HPHP_HOME}/hphp)
+  include_directories(${HPHP_HOME})
+endif()

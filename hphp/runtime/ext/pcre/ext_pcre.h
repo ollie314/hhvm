@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,32 +18,33 @@
 #ifndef incl_HPHP_EXT_PREG_H_
 #define incl_HPHP_EXT_PREG_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // pcre
 
-Variant HHVM_FUNCTION(preg_filter, const Variant& pattern, const Variant& replacement,
-                                   const Variant& subject, int limit = -1,
+Variant HHVM_FUNCTION(preg_filter, const Variant& pattern,
+                                   const Variant& replacement,
+                                   const Variant& subject,
+                                   int limit = -1,
                                    VRefParam count = uninit_null());
 Variant HHVM_FUNCTION(preg_grep, const String& pattern, const Array& input,
                                  int flags = 0);
-Variant HHVM_FUNCTION(preg_match, const String& pattern, const String& subject,
-                      VRefParam matches = uninit_null(), int flags = 0,
-                      int offset = 0);
-Variant HHVM_FUNCTION(preg_match_all, const String& pattern,
-                        const String& subject,
-                        VRefParam matches = uninit_null(),
-                        int flags = 0, int offset = 0);
 Variant HHVM_FUNCTION(preg_replace, const Variant& pattern, const Variant& replacement,
                                     const Variant& subject, int limit = -1,
                                     VRefParam count = uninit_null());
-Variant HHVM_FUNCTION(preg_replace_callback, const Variant& pattern, const Variant& callback,
-                                const Variant& subject, int limit = -1,
-                                VRefParam count = uninit_null());
+Variant HHVM_FUNCTION(preg_replace_callback, const Variant& pattern,
+                                             const Variant& callback,
+                                             const Variant& subject,
+                                             int limit = -1,
+                                             VRefParam count = uninit_null());
+Variant HHVM_FUNCTION(
+    preg_replace_callback_array, const Variant& patterns_and_callbacks,
+                                 const Variant& subject, int limit = -1,
+                                 VRefParam count = uninit_null());
 Variant HHVM_FUNCTION(preg_split, const String& pattern, const String& subject,
-                                  int limit = -1, int flags = 0);
+                                  const Variant& limit, int flags = 0);
 String HHVM_FUNCTION(preg_quote, const String& str,
                                  const Variant& = null_string);
 int64_t HHVM_FUNCTION(preg_last_error);

@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,120 +8,142 @@
  *
  *)
 
+open Core
 
-open Utils
+module Env = Typing_env
+module TLazyHeap = Typing_lazy_heap
 
 (*****************************************************************************)
 (* The place where we store the shared data in cache *)
 (*****************************************************************************)
 
 module TypeCheckStore = GlobalStorage.Make(struct
-  type t = FileInfo.fast
+  type t = TypecheckerOptions.t
 end)
 
-let neutral = [], Relative_path.Set.empty
+let neutral = Errors.empty,
+  {
+    Decl_service.errs = Relative_path.Set.empty;
+    lazy_decl_errs = Relative_path.Set.empty;
+  }
 
 (*****************************************************************************)
 (* The job that will be run on the workers *)
 (*****************************************************************************)
 
-let type_fun x =
-  try
-    let fun_ = Naming_heap.FunHeap.find_unsafe x in
-    let tenv = Typing_env.empty (Pos.filename (fst fun_.Nast.f_name)) in
-    Typing.fun_def tenv x fun_;
-  with Not_found -> ()
+let type_fun tcopt fn x =
+  match Parser_heap.find_fun_in_file fn x with
+  | Some f ->
+    let fun_ = Naming.fun_ tcopt f in
+    Typing.fun_def tcopt fun_
+  | None -> ()
 
-let type_class x =
-  try
-    let class_ = Naming_heap.ClassHeap.find_unsafe x in
-    let filename = Pos.filename (fst class_.Nast.c_name) in
-    let tenv = Typing_env.empty filename in
-    Typing.class_def tenv x class_
-  with Not_found -> ()
+let type_class tcopt fn x =
+  match Parser_heap.find_class_in_file fn x with
+  | Some cls ->
+    let class_ = Naming.class_ tcopt cls in
+    Typing.class_def tcopt class_
+  | None -> ()
 
-let check_typedef x =
-  try
-    let _, args, hint as typedef = Naming_heap.TypedefHeap.find_unsafe x in
-    let filename = Pos.filename (fst hint) in
-    let tenv = Typing_env.empty filename in
-    (* Mode for typedefs themselves doesn't really matter right now, but
-     * they can expand hints, so make it loose so that the typedef doesn't
-     * fail. (The hint will get re-checked with the proper mode anyways.)
-     * Ideally the typedef would carry the right mode with it, but it's a
-     * slightly larger change than I want to deal with right now. *)
-    let tenv = Typing_env.set_mode tenv Ast.Mdecl in
-    let tenv = Typing_env.set_root tenv (Typing_deps.Dep.Class x) in
-    Typing.typedef_def tenv x typedef;
-    Typing_variance.typedef x
-  with Not_found ->
-    ()
+let check_typedef tcopt fn x =
+  match Parser_heap.find_typedef_in_file fn x with
+  | Some t ->
+    let typedef = Naming.typedef tcopt t in
+    Typing.typedef_def typedef;
+    Typing_variance.typedef tcopt x
+  | None -> ()
 
-let check_const x =
-  try
-    match Typing_env.GConsts.get x with
+let check_const tcopt fn x =
+  match Parser_heap.find_const_in_file fn x with
+  | None -> ()
+  | Some cst ->
+    let cst = Naming.global_const tcopt cst in
+    match cst.Nast.cst_value with
     | None -> ()
-    | Some declared_type ->
-        let cst = Naming_heap.ConstHeap.find_unsafe x in
-        match cst.Nast.cst_value with
-        | Some v -> begin
-          let filename = Pos.filename (fst cst.Nast.cst_name) in
-          let env = Typing_env.empty filename in
-          let env = Typing_env.set_mode env cst.Nast.cst_mode in
-          let root = Typing_deps.Dep.GConst (snd cst.Nast.cst_name) in
-          let env = Typing_env.set_root env root in
-          let env, value_type = Typing.expr env v in
-          let _env = Typing_subtype.sub_type env declared_type value_type in
-          ()
-        end
-        | None -> ()
-  with Not_found ->
-    ()
-
-let check_file fast (errors, failed) fn =
-  let errors', () = Errors.do_
-    begin fun () ->
-      match Relative_path.Map.get fn fast with
+    | Some v ->
+      let filename = Pos.filename (fst cst.Nast.cst_name) in
+      let dep = Typing_deps.Dep.GConst (snd cst.Nast.cst_name) in
+      let env =
+        Typing_env.empty TypecheckerOptions.default filename (Some dep) in
+      let env = Typing_env.set_mode env cst.Nast.cst_mode in
+      let env, value_type = Typing.expr env v in
+      match cst.Nast.cst_type with
+      | Some h ->
+        let declared_type = Decl_hint.hint env.Typing_env.decl_env h in
+        let env, dty = Typing_phase.localize_with_self env declared_type in
+        let _env = Typing_utils.sub_type env value_type dty in
+        ()
       | None -> ()
-      | Some { FileInfo.n_funs; n_classes; n_types; n_consts } ->
-          SSet.iter type_fun n_funs;
-          SSet.iter type_class n_classes;
-          SSet.iter check_typedef n_types;
-          SSet.iter check_const n_consts;
-    end
-  in
-  let failed =
-    if errors' <> [] then Relative_path.Set.add fn failed else failed in
-  List.rev_append errors' errors, failed
 
-let check_files fast (errors, failed) fnl =
+let check_file tcopt (errors, failed, decl_failed) (fn, file_infos) =
+  let { FileInfo.n_funs; n_classes; n_types; n_consts } = file_infos in
+  let errors', (), err_flags = Errors.do_ begin fun () ->
+    SSet.iter (type_fun tcopt fn) n_funs;
+    SSet.iter (type_class tcopt fn) n_classes;
+    SSet.iter (check_typedef tcopt fn) n_types;
+    SSet.iter (check_const tcopt fn) n_consts;
+  end in
+  let lazy_decl_err = Errors.get_lazy_decl_flag err_flags in
+  let errors = Errors.merge errors' errors in
+  let failed =
+    if not (Errors.is_empty errors')
+    then Relative_path.Set.add failed fn
+    else failed in
+  let decl_failed =
+    if lazy_decl_err
+    then Relative_path.Set.add decl_failed fn
+    else decl_failed in
+  errors, failed, decl_failed
+
+let check_files tcopt (errors, err_info) fnl =
   SharedMem.invalidate_caches();
-  let errors, failed = List.fold_left (check_file fast) (errors, failed) fnl in
-  errors, failed
+  let { Decl_service.
+    errs = failed;
+    lazy_decl_errs = decl_failed;
+  } = err_info in
+  let check_file =
+    if !Utils.profile
+    then (fun acc fn ->
+      let t = Unix.gettimeofday () in
+      let result = check_file tcopt acc fn in
+      let t' = Unix.gettimeofday () in
+      let msg =
+        Printf.sprintf "%f %s [type-check]" (t' -. t)
+          (Relative_path.suffix (fst fn)) in
+      !Utils.log msg;
+      result)
+    else check_file tcopt in
+  let errors, failed, decl_failed = List.fold_left fnl
+    ~f:check_file ~init:(errors, failed, decl_failed) in
+  let error_record = { Decl_service.
+    errs = failed;
+    lazy_decl_errs = decl_failed;
+  } in
+  errors, error_record
 
 let load_and_check_files acc fnl =
-  let fast = TypeCheckStore.load() in
-  check_files fast acc fnl
+  let tcopt = TypeCheckStore.load() in
+  check_files tcopt acc fnl
 
 (*****************************************************************************)
 (* Let's go! That's where the action is *)
 (*****************************************************************************)
 
-let parallel_check workers fast fnl =
-  TypeCheckStore.store fast;
+let parallel_check workers tcopt fnl =
+  TypeCheckStore.store tcopt;
   let result =
     MultiWorker.call
       workers
       ~job:load_and_check_files
       ~neutral
-      ~merge:Typing_decl_service.merge_decl
-      ~next:(Bucket.make fnl)
+      ~merge:Decl_service.merge_lazy_decl
+      ~next:(MultiWorker.next workers fnl)
   in
   TypeCheckStore.clear();
   result
 
-let go workers fast =
-  let fnl = Relative_path.Map.fold (fun x _ y -> x :: y) fast [] in
+let go workers tcopt fast =
+  let fnl = Relative_path.Map.elements fast in
   if List.length fnl < 10
-  then check_files fast neutral fnl
-  else parallel_check workers fast fnl
+  then check_files tcopt neutral fnl
+  else parallel_check workers tcopt fnl

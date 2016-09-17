@@ -136,8 +136,15 @@ typedef struct _zend_fcall_info_cache {
 
 #ifdef HHVM
 #define ZEND_GET_MODULE(module_name) \
+  static HPHP::ExtensionBuildInfo s_##module_name##_extension_build_info = { \
+    HHVM_DSO_VERSION, \
+    HHVM_VERSION_BRANCH, \
+  }; \
   extern "C" HPHP::Extension * getModule() { \
     return &module_name##_module_entry.name; \
+  } \
+  extern "C" HPHP::ExtensionBuildInfo * getModuleBuildInfo() { \
+    return &s_##module_name##_extension_build_info; \
   }
 #else
 #define ZEND_GET_MODULE(name) \
@@ -583,7 +590,8 @@ END_EXTERN_C()
 #define ZVAL_RESOURCE(z, l) do {  \
     TSRMLS_FETCH();       \
     zval *__z = (z);      \
-    zval_follow_ref(*__z).m_data.pres = zend_list_id_to_resource_data(l TSRMLS_CC); \
+    zval_follow_ref(*__z).m_data.pres = \
+      zend_list_id_to_resource_data(l TSRMLS_CC)->ResourceData::hdr(); \
     Z_TYPE_P(__z) = IS_RESOURCE;\
   } while (0)
 #else

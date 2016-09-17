@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,8 +22,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class StaticClassName : public IParseHandler {
-public:
+struct StaticClassName : IParseHandler {
   explicit StaticClassName(ExpressionPtr classExp);
 
   void onParse(AnalysisResultConstPtr ar, FileScopePtr scope);
@@ -32,31 +31,23 @@ public:
   bool isParent() const { return m_parent; }
   bool isStatic() const { return m_static; }
   bool isRedeclared() const { return m_redeclared; }
-  bool isPresent() const { return m_present || m_forcePresent; }
-  bool forcedPresent() const { return m_forcePresent; }
+  bool isPresent() const { return m_present; }
   bool isUnknown() const { return m_unknown; }
-
-  void setPresent() { m_present = m_forcePresent = true; }
 
   void setRedeclared() { m_redeclared = true; }
 
-  void resolveStatic(const std::string &name);
-
   const std::string &getOriginalClassName() const { return m_origClassName; }
-  const std::string &getClassName() const { return m_className; }
 
   ExpressionPtr getClass() const { return m_class; }
 
   ClassScopePtr resolveClass();
-  bool checkPresent();
-  ClassScopePtr resolveClassWithChecks();
+  bool isNamed(folly::StringPiece clsName) const;
+  bool hasStaticClass() const { return !m_origClassName.empty(); }
 protected:
   ExpressionPtr m_class;
   std::string m_origClassName;
-  std::string m_className;
 
   void updateClassName();
-  void outputCodeModel(CodeGenerator &cg);
   void outputPHP(CodeGenerator &cg, AnalysisResultPtr ar);
 private:
   unsigned m_self : 1;
@@ -64,7 +55,6 @@ private:
   unsigned m_static : 1;
   unsigned m_redeclared : 1;
   unsigned m_present : 1;
-  unsigned m_forcePresent : 1;
   unsigned m_unknown : 1;
 };
 

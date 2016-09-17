@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -20,6 +20,8 @@
 #include <unicode/utf8.h>
 
 #include "hphp/util/lock.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/hash-map-typedefs.h"
 
 namespace HPHP {
 
@@ -27,6 +29,44 @@ namespace HPHP {
 // UTF-8 entity tables
 
 using namespace entity_charset_enum;
+
+static entity_table_t ent_cp_866[] = {
+  "Acy", "Bcy", "Vcy", "Gcy", "Dcy", "IEcy", "ZHcy", "Zcy",
+  "Icy", "Jcy", "Kcy", "Lcy", "Mcy", "Ncy", "Ocy", "Pcy",
+  "Rcy", "Scy", "Tcy", "Ucy", "Fcy", "KHcy", "TScy", "CHcy",
+  "SHcy", "SHCHcy", "HARDcy", "Ycy", "SOFTcy", "Ecy", "YUcy", "YAcy",
+  "acy", "bcy", "vcy", "gcy", "dcy", "iecy", "zhcy", "zcy",
+  "icy", "jcy", "kcy", "lcy", "mcy", "ncy", "ocy", "pcy",
+  "blk14", "blk12", "blk34", "boxv", "boxvl", "boxvL", "boxVl", "boxDl",
+  "boxdL", "boxVL", "boxV", "boxDL", "boxUL", "boxUl", "boxuL", "boxdl",
+  "boxur", "boxhu", "boxhd", "boxvr", "boxh", "boxvh", "boxvR", "boxVr",
+  "boxUR", "boxDR", "boxHU", "boxHD", "boxVR", "boxH", "boxVH", "boxHu",
+  "boxhU", "boxHd", "boxhD", "boxUr", "boxuR", "boxdR", "boxDr", "boxVh",
+  "boxvH", "boxul", "boxdr", "block", "lhblk", nullptr, nullptr, "uhblk",
+  "rcy", "scy", "tcy", "ucy", "fcy", "khcy", "tscy", "chcy",
+  "shcy", "shchcy", "hardcy", "ycy", "softcy", "ecy", "yucy", "yacy",
+  "IOcy", "iocy", "Jukcy", "jukcy", "YIcy", "yicy", "Ubrcy", "ubrcy",
+  "deg", nullptr, "middot", "Sqrt", "numero", "curren", nullptr, "nbsp"
+};
+
+static entity_table_t ent_cp_1251[] = {
+  "DJcy", "GJcy", "sbquo", "gjcy", "bdquo", "hellip", "dagger", "Dagger",
+  "euro", "permil", "LJcy", "lsaquo", "NJcy", "KJcy", "TSHcy", "DZcy",
+  "djcy", "lsquo", "rsquo", "ldquo", "rdquo", "bull", "ndash", "mdash",
+  nullptr, "trade", "ljcy", "rsaquo", "njcy", "kjcy", "tshcy", "dzcy",
+  "nbsp", "Ubrcy", "ubrcy", "Jsercy", "curren", nullptr, "brvbar", "sect",
+  "IOcy", "copy", "Jukcy", "laquo", "not", "shy", "reg", "YIcy",
+  "deg", "pm", "Iukcy", "iukcy", nullptr, "micro", "para", "middot",
+  "iocy", "numero", "jukcy", "raquo", "jsercy", "DScy", "dscy", "yicy",
+  "Acy", "Bcy", "Vcy", "Gcy", "Dcy", "IEcy", "ZHcy", "Zcy",
+  "Icy", "Jcy", "Kcy", "Lcy", "Mcy", "Ncy", "Ocy", "Pcy",
+  "Rcy", "Scy", "Tcy", "Ucy", "Fcy", "KHcy", "TScy", "CHcy",
+  "SHcy", "SHCHcy", "HARDcy", "Ycy", "SOFTcy", "Ecy", "YUcy", "YAcy",
+  "acy", "bcy", "vcy", "gcy", "dcy", "iecy", "zhcy", "zcy",
+  "icy", "jcy", "kcy", "lcy", "mcy", "ncy", "ocy", "pcy",
+  "rcy", "scy", "tcy", "ucy", "fcy", "khcy", "tscy", "chcy",
+  "shcy", "shchcy", "hardcy", "ycy", "softcy", "ecy", "yucy", "yacy"
+};
 
 /* codepage 1252 is a Windows extension to iso-8859-1. */
 static entity_table_t ent_cp_1252[] = {
@@ -53,6 +93,21 @@ static entity_table_t ent_iso_8859_1[] = {
   "iuml", "eth", "ntilde", "ograve", "oacute", "ocirc", "otilde",
   "ouml", "divide", "oslash", "ugrave", "uacute", "ucirc",
   "uuml", "yacute", "thorn", "yuml"
+};
+
+static entity_table_t ent_iso_8859_5[] = {
+  "nbsp", "IOcy", "DJcy", "GJcy", "Jukcy", "DScy", "Iukcy", "YIcy",
+  "Jsercy", "LJcy", "NJcy", "TSHcy", "KJcy", "shy", "Ubrcy", "DZcy",
+  "Acy", "Bcy", "Vcy", "Gcy", "Dcy", "IEcy", "ZHcy", "Zcy",
+  "Icy", "Jcy", "Kcy", "Lcy", "Mcy", "Ncy", "Ocy", "Pcy",
+  "Rcy", "Scy", "Tcy", "Ucy", "Fcy", "KHcy", "TScy", "CHcy",
+  "SHcy", "SHCHcy", "HARDcy", "Ycy", "SOFTcy", "Ecy", "YUcy", "YAcy",
+  "acy", "bcy", "vcy", "gcy", "dcy", "iecy", "zhcy", "zcy",
+  "icy", "jcy", "kcy", "lcy", "mcy", "ncy", "ocy", "pcy",
+  "rcy", "scy", "tcy", "ucy", "fcy", "khcy", "tscy", "chcy",
+  "shcy", "shchcy", "hardcy", "ycy", "softcy", "ecy", "yucy", "yacy",
+  "numero", "iocy", "djcy", "gjcy", "jukcy", "dscy", "iukcy", "yicy",
+  "jsercy", "ljcy", "njcy", "tshcy", "kjcy", "sect", "ubrcy", "dzcy"
 };
 
 static entity_table_t ent_iso_8859_15[] = {
@@ -240,9 +295,12 @@ static entity_table_t ent_uni_9824_9830[] = {
 };
 
 static const struct html_entity_map entity_map[] = {
+  { cs_cp866,     0x80, 0xff, ent_cp_866 },
+  { cs_cp1251,    0x80, 0xff, ent_cp_1251 },
   { cs_cp1252,    0x80, 0x9f, ent_cp_1252 },
   { cs_cp1252,    0xa0, 0xff, ent_iso_8859_1 },
   { cs_8859_1,    0xa0, 0xff, ent_iso_8859_1 },
+  { cs_8859_5,    0xa0, 0xff, ent_iso_8859_5 },
   { cs_8859_15,   0xa0, 0xff, ent_iso_8859_15 },
   { cs_utf_8,     0xa0, 0xff, ent_iso_8859_1 },
   { cs_utf_8,     338,  402,  ent_uni_338_402 },
@@ -261,9 +319,6 @@ static const struct html_entity_map entity_map[] = {
   { cs_eucjp,     0xa0, 0xff, ent_iso_8859_1 },
   /* Missing support for these at the moment
   { cs_koi8r,     0xa3, 0xff, ent_koi8r },
-  { cs_cp1251,    0x80, 0xff, ent_cp_1251 },
-  { cs_8859_5,    0xc0, 0xff, ent_iso_8859_5 },
-  { cs_cp866,     0xc0, 0xff, ent_cp_866 },
   { cs_macroman,  0x0b, 0xff, ent_macroman },
   */
   { cs_terminator }
@@ -275,9 +330,17 @@ static const struct {
 } charset_map[] = {
   { "ISO-8859-1",     cs_8859_1 },
   { "ISO8859-1",      cs_8859_1 },
+  { "ISO-8859-5",     cs_8859_5 },
+  { "ISO8859-5",      cs_8859_5 },
   { "ISO-8859-15",    cs_8859_15 },
   { "ISO8859-15",     cs_8859_15 },
   { "utf-8",          cs_utf_8 },
+  { "cp866",          cs_cp866 },
+  { "866",            cs_cp866 },
+  { "ibm866",         cs_cp866 },
+  { "cp1251",         cs_cp1251 },
+  { "Windows-1251",   cs_cp1251 },
+  { "win-1251",       cs_cp1251 },
   { "cp1252",         cs_cp1252 },
   { "Windows-1252",   cs_cp1252 },
   { "1252",           cs_cp1252 },
@@ -295,14 +358,6 @@ static const struct {
   { "KOI8-R",         cs_koi8r },
   { "koi8-ru",        cs_koi8r },
   { "koi8r",          cs_koi8r },
-  { "cp1251",         cs_cp1251 },
-  { "Windows-1251",   cs_cp1251 },
-  { "win-1251",       cs_cp1251 },
-  { "iso8859-5",      cs_8859_5 },
-  { "iso-8859-5",     cs_8859_5 },
-  { "cp866",          cs_cp866 },
-  { "866",            cs_cp866 },
-  { "ibm866",         cs_cp866 },
   { "MacRoman",       cs_macroman },
   */
   { nullptr }
@@ -427,12 +482,12 @@ static void init_entity_table() {
     XHPEntityMap[charset]["amp"] = "&";
     // XHP-specific entities
     XHPEntityMap[charset]["apos"] = "\'";
-    XHPEntityMap[charset]["cloud"] = "\u2601";
-    XHPEntityMap[charset]["umbrella"] = "\u2602";
-    XHPEntityMap[charset]["snowman"] = "\u2603";
-    XHPEntityMap[charset]["snowflake"] = "\u2745";
-    XHPEntityMap[charset]["comet"] = "\u2604";
-    XHPEntityMap[charset]["thunderstorm"] = "\u2608";
+    XHPEntityMap[charset]["cloud"] = u8"\u2601";
+    XHPEntityMap[charset]["umbrella"] = u8"\u2602";
+    XHPEntityMap[charset]["snowman"] = u8"\u2603";
+    XHPEntityMap[charset]["snowflake"] = u8"\u2745";
+    XHPEntityMap[charset]["comet"] = u8"\u2604";
+    XHPEntityMap[charset]["thunderstorm"] = u8"\u2608";
   }
 
   // the first element is an empty table
@@ -442,12 +497,12 @@ static void init_entity_table() {
   EntityMap[cs_terminator]["amp"] = "&";
   // XHP-specific entities
   XHPEntityMap[cs_terminator]["apos"] = "\'";
-  XHPEntityMap[cs_terminator]["cloud"] = "\u2601";
-  XHPEntityMap[cs_terminator]["umbrella"] = "\u2602";
-  XHPEntityMap[cs_terminator]["snowman"] = "\u2603";
-  XHPEntityMap[cs_terminator]["snowflake"] = "\u2745";
-  XHPEntityMap[cs_terminator]["comet"] = "\u2604";
-  XHPEntityMap[cs_terminator]["thunderstorm"] = "\u2608";
+  XHPEntityMap[cs_terminator]["cloud"] = u8"\u2601";
+  XHPEntityMap[cs_terminator]["umbrella"] = u8"\u2602";
+  XHPEntityMap[cs_terminator]["snowman"] = u8"\u2603";
+  XHPEntityMap[cs_terminator]["snowflake"] = u8"\u2745";
+  XHPEntityMap[cs_terminator]["comet"] = u8"\u2604";
+  XHPEntityMap[cs_terminator]["thunderstorm"] = u8"\u2608";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -732,40 +787,50 @@ char *string_html_encode(const char *input, int &len,
 
       auto avail = end - p;
       auto utf8_trail = [](unsigned char c) { return c >= 0x80 && c <= 0xbf; };
+      auto utf8_lead = [](unsigned char c) {
+        return c < 0x80 || (c >= 0xC2 && c <= 0xF4);
+      };
 
       // This has to be a macro since it needs to be able to break away from
       // the for loop we're in.
       // ENT_IGNORE has higher precedence than ENT_SUBSTITUTE
       // \uFFFD is Unicode Replacement Character (U+FFFD)
-      #define UTF8_ERROR_IF(cond) \
+      #define UTF8_ERROR_IF_LEN(cond, len) \
         if (cond) { \
+          p += (len) - 1; \
           if (should_skip) { break; } \
-          else if (should_replace) { strcpy(q, "\uFFFD"); q += 3; break; } \
+          else if (should_replace) { strcpy(q, u8"\uFFFD"); q += 3; break; } \
           else { goto exit_error; } \
         }
+
+      #define UTF8_ERROR_IF(cond) UTF8_ERROR_IF_LEN(cond, 1)
 
       if (utf8) {
         if (c < 0xc2) {
           UTF8_ERROR_IF(true);
         } else if (c < 0xe0) {
-          UTF8_ERROR_IF(avail < 2 || !utf8_trail(*(p + 1)));
+          UTF8_ERROR_IF(avail < 2);
+          UTF8_ERROR_IF_LEN(!utf8_trail(*(p + 1)), utf8_lead(*(p + 1)) ? 1 : 2);
 
           uint16_t tc = ((c & 0x1f) << 6) | (p[1] & 0x3f);
-          UTF8_ERROR_IF(tc < 0x80); // non-shortest form
+          UTF8_ERROR_IF_LEN(tc < 0x80, 2); // non-shortest form
 
           codeLength = 2;
           entity[0] = *p;
           entity[1] = *(p + 1);
           entity[2] = '\0';
         } else if (c < 0xf0) {
-          UTF8_ERROR_IF(avail < 3);
-          UTF8_ERROR_IF(!utf8_trail(*(p + 1)) || !utf8_trail(*(p + 2)));
+          if (avail < 3 || !utf8_trail(*(p + 1)) || !utf8_trail(*(p + 2))) {
+            UTF8_ERROR_IF_LEN(avail < 2 || utf8_lead(*(p + 1)), 1);
+            UTF8_ERROR_IF_LEN(avail < 3 || utf8_lead(*(p + 2)), 2);
+            UTF8_ERROR_IF_LEN(true, 3);
+          }
 
           uint32_t tc = ((c & 0x0f) << 12) |
                         ((*(p+1) & 0x3f) << 6) |
                         (*(p+2) & 0x3f);
-          UTF8_ERROR_IF(tc < 0x800); // non-shortest form
-          UTF8_ERROR_IF(tc >= 0xd800 && tc <= 0xdfff); // surrogate
+          UTF8_ERROR_IF_LEN(tc < 0x800, 3); // non-shortest form
+          UTF8_ERROR_IF_LEN(tc >= 0xd800 && tc <= 0xdfff, 3); // surrogate
 
           codeLength = 3;
           entity[0] = *p;
@@ -773,10 +838,13 @@ char *string_html_encode(const char *input, int &len,
           entity[2] = *(p + 2);
           entity[3] = '\0';
         } else if (c < 0xf5) {
-          UTF8_ERROR_IF(avail < 4);
-          UTF8_ERROR_IF(!utf8_trail(*(p + 1)));
-          UTF8_ERROR_IF(!utf8_trail(*(p + 2)));
-          UTF8_ERROR_IF(!utf8_trail(*(p + 3)));
+          if (avail < 4 || !utf8_trail(*(p + 1)) || !utf8_trail(*(p + 2)) ||
+              !utf8_trail(*(p + 3))) {
+            UTF8_ERROR_IF_LEN(avail < 2 || utf8_lead(*(p + 1)), 1);
+            UTF8_ERROR_IF_LEN(avail < 3 || utf8_lead(*(p + 2)), 2);
+            UTF8_ERROR_IF_LEN(avail < 4 || utf8_lead(*(p + 3)), 3);
+            UTF8_ERROR_IF_LEN(true, 4);
+          }
 
           uint32_t tc = ((c & 0x07) << 18) |
                         ((*(p+1) & 0x3f) << 12) |
@@ -784,7 +852,7 @@ char *string_html_encode(const char *input, int &len,
                         (*(p+3) & 0x3f);
 
           // non-shortest form or outside range
-          UTF8_ERROR_IF(tc < 0x10000 || tc > 0x10ffff);
+          UTF8_ERROR_IF_LEN(tc < 0x10000 || tc > 0x10ffff, 4);
 
           codeLength = 4;
           entity[0] = *p;
@@ -832,6 +900,7 @@ char *string_html_encode(const char *input, int &len,
   }
 
   #undef UTF8_ERROR_IF
+  #undef UTF8_ERROR_IF_LEN
 
   if (q - ret > INT_MAX) {
     goto exit_error;
@@ -868,7 +937,7 @@ char *string_html_encode_extra(const char *input, int &len,
     return nullptr;
   }
   char *q = ret;
-  const char *rep = "\ufffd";
+  const char *rep = u8"\ufffd";
   int32_t srcPosBytes;
   for (srcPosBytes = 0; srcPosBytes < len; /* incremented in-loop */) {
     unsigned char c = input[srcPosBytes];

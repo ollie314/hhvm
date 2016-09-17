@@ -45,13 +45,7 @@
 #define PHP_DEBUG ZEND_DEBUG
 
 #ifdef PHP_WIN32
-#  include "tsrm_win32.h"
-#  include "win95nt.h"
-#  ifdef PHP_EXPORTS
-#    define PHPAPI __declspec(dllexport)
-#  else
-#    define PHPAPI __declspec(dllimport)
-#  endif
+#  define PHPAPI
 #  define PHP_DIR_SEPARATOR '\\'
 #  define PHP_EOL "\r\n"
 #else
@@ -161,9 +155,7 @@ typedef unsigned int socklen_t;
 
 #include <stdlib.h>
 #include <ctype.h>
-#if HAVE_UNISTD_H
-#include <unistd.h>
-#endif
+#include <folly/portability/Unistd.h>
 #if HAVE_STDARG_H
 #include <stdarg.h>
 #else

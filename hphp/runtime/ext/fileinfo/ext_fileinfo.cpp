@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,20 +16,20 @@
 */
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/ext/fileinfo/libmagic/magic.h"
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP {
 const StaticString s_finfo("finfo");
 
-class FileinfoResource : public SweepableResourceData {
-public:
+struct FileinfoResource : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(FileinfoResource)
   CLASSNAME_IS("file_info")
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   explicit FileinfoResource(struct magic_set* magic) : m_magic(magic) {}
   virtual ~FileinfoResource() { close(); }
@@ -68,20 +68,16 @@ static Variant HHVM_FUNCTION(finfo_open,
     return false;
   }
 
-  return newres<FileinfoResource>(magic);
+  return Variant(req::make<FileinfoResource>(magic));
 }
 
 static bool HHVM_FUNCTION(finfo_close, const Resource& finfo) {
-  auto res = finfo.getTyped<FileinfoResource>();
-  if (!res) {
-    return false;
-  }
-  res->close();
+  cast<FileinfoResource>(finfo)->close();
   return true;
 }
 
 static bool HHVM_FUNCTION(finfo_set_flags, const Resource& finfo, int64_t options) {
-  auto magic = finfo.getTyped<FileinfoResource>()->getMagic();
+  auto magic = cast<FileinfoResource>(finfo)->getMagic();
   if (magic_setflags(magic, options) == -1) {
     raise_warning(
       "Failed to set option '%" PRId64 "' %d:%s",
@@ -122,9 +118,9 @@ static Variant php_finfo_get_type(
       raise_warning("Failed to load magic database.");
       goto common;
     }
-  } else if (object.get()) {
+  } else if (object) {
     buffer = what.toString();
-    magic = object.getTyped<FileinfoResource>()->getMagic();
+    magic = cast<FileinfoResource>(object)->getMagic();
   } else {
     // if we want to support finfo as a resource as well, do it here
     not_reached();
@@ -144,7 +140,7 @@ static Variant php_finfo_get_type(
 
     case FILEINFO_MODE_STREAM:
     {
-      auto stream = what.toResource().getTyped<File>();
+      auto stream = cast<File>(what);
       if (!stream) {
         goto common;
       }
@@ -152,7 +148,7 @@ static Variant php_finfo_get_type(
       auto streampos = stream->tell(); // remember stream position
       stream->seek(0, SEEK_SET);
 
-      ret_val = magic_stream(magic, stream);
+      ret_val = magic_stream(magic, stream.get());
 
       stream->seek(streampos, SEEK_SET);
       break;
@@ -166,8 +162,7 @@ static Variant php_finfo_get_type(
         goto clean;
       }
 
-      auto resource = File::Open(buffer, "rb");
-      auto stream = resource.getTyped<File>(true);
+      auto stream = File::Open(buffer, "rb");
       if (!stream) {
         ret_val.reset();
         goto clean;
@@ -178,7 +173,7 @@ static Variant php_finfo_get_type(
         if (st.st_mode & S_IFDIR) {
           ret_val = mime_directory;
         } else {
-          ret_val = magic_stream(magic, stream);
+          ret_val = magic_stream(magic, stream.get());
         }
       }
       break;
@@ -223,7 +218,7 @@ static String HHVM_FUNCTION(finfo_buffer,
   }
   return php_finfo_get_type(
       finfo, s, options, context,
-      FILEINFO_MODE_BUFFER, 0);
+      FILEINFO_MODE_BUFFER, 0).toString();
 }
 
 static String HHVM_FUNCTION(finfo_file,
@@ -236,56 +231,29 @@ static String HHVM_FUNCTION(finfo_file,
   }
   return php_finfo_get_type(
       finfo, fn, options, context,
-      FILEINFO_MODE_FILE, 0);
+      FILEINFO_MODE_FILE, 0).toString();
 }
 
 static String HHVM_FUNCTION(mime_content_type, const Variant& filename) {
-  return php_finfo_get_type(nullptr, filename, 0, uninit_null(), -1, 1);
+  return php_finfo_get_type(
+    Resource{}, filename, 0, uninit_null(), -1, 1
+  ).toString();
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
-const StaticString s_FILEINFO_NONE("FILEINFO_NONE");
-const StaticString s_FILEINFO_SYMLINK("FILEINFO_SYMLINK");
-const StaticString s_FILEINFO_MIME("FILEINFO_MIME");
-const StaticString s_FILEINFO_MIME_TYPE("FILEINFO_MIME_TYPE");
-const StaticString s_FILEINFO_MIME_ENCODING("FILEINFO_MIME_ENCODING");
-const StaticString s_FILEINFO_DEVICES("FILEINFO_DEVICES");
-const StaticString s_FILEINFO_CONTINUE("FILEINFO_CONTINUE");
-const StaticString s_FILEINFO_PRESERVE_ATIME("FILEINFO_PRESERVE_ATIME");
-const StaticString s_FILEINFO_RAW("FILEINFO_RAW");
-
-class fileinfoExtension : public Extension {
- public:
+struct fileinfoExtension final : Extension {
   fileinfoExtension() : Extension("fileinfo", "1.0.5-dev") {}
-  virtual void moduleInit() {
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_NONE.get(), MAGIC_NONE
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_SYMLINK.get(), MAGIC_SYMLINK
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_MIME.get(), MAGIC_MIME
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_MIME_TYPE.get(), MAGIC_MIME_TYPE
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_MIME_ENCODING.get(),MAGIC_MIME_ENCODING
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_DEVICES.get(), MAGIC_DEVICES
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_CONTINUE.get(), MAGIC_CONTINUE
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_PRESERVE_ATIME.get(), MAGIC_PRESERVE_ATIME
-    );
-    Native::registerConstant<KindOfInt64>(
-      s_FILEINFO_RAW.get(), MAGIC_RAW
-    );
+  void moduleInit() override {
+    HHVM_RC_INT(FILEINFO_NONE, MAGIC_NONE);
+    HHVM_RC_INT(FILEINFO_SYMLINK, MAGIC_SYMLINK);
+    HHVM_RC_INT(FILEINFO_MIME, MAGIC_MIME);
+    HHVM_RC_INT(FILEINFO_MIME_TYPE, MAGIC_MIME_TYPE);
+    HHVM_RC_INT(FILEINFO_MIME_ENCODING,MAGIC_MIME_ENCODING);
+    HHVM_RC_INT(FILEINFO_DEVICES, MAGIC_DEVICES);
+    HHVM_RC_INT(FILEINFO_CONTINUE, MAGIC_CONTINUE);
+    HHVM_RC_INT(FILEINFO_PRESERVE_ATIME, MAGIC_PRESERVE_ATIME);
+    HHVM_RC_INT(FILEINFO_RAW, MAGIC_RAW);
     HHVM_FE(finfo_open);
     HHVM_FE(finfo_buffer);
     HHVM_FE(finfo_file);

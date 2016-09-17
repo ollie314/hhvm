@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -91,11 +91,15 @@ struct dataflow_worklist {
     return t;
   }
 
-  void push(T t) {
+  /*
+   * Enqueue t. Returns true iff the item was newly inserted.
+   */
+  bool push(T t) {
     assert(t < m_set.size());
-    if (m_set[t]) return;
+    if (m_set[t]) return false;
     m_q.push(t);
     m_set.set(t);
+    return true;
   }
 
 private:

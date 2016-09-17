@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,11 +18,15 @@
 #ifndef incl_HPHP_EXT_IPC_H_
 #define incl_HPHP_EXT_IPC_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // message queue
+
+constexpr int64_t k_MSG_IPC_NOWAIT = 1;
+constexpr int64_t k_MSG_NOERROR    = 2;
+constexpr int64_t k_MSG_EXCEPT     = 4;
 
 int64_t HHVM_FUNCTION(ftok,
                       const String& pathname,
@@ -61,7 +65,8 @@ Array HHVM_FUNCTION(msg_stat_queue,
 // semaphore
 
 bool HHVM_FUNCTION(sem_acquire,
-                   const Resource& sem_identifier);
+                   const Resource& sem_identifier,
+                   bool nowait = false);
 Variant HHVM_FUNCTION(sem_get,
                       int64_t key,
                       int64_t max_acquire = 1,

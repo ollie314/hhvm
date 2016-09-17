@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,13 +15,15 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_where.h"
+
 #include "hphp/runtime/base/array-iterator.h"
-#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/backtrace.h"
-#include "hphp/runtime/ext/ext_generator.h"
-#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/debugger/debugger_client.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
 #include "hphp/runtime/ext/asio/ext_asio.h"
-#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
+#include "hphp/runtime/ext/asio/ext_waitable-wait-handle.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -46,7 +48,7 @@ void CmdWhere::recvImpl(DebuggerThriftBuffer &thrift) {
     if (DebuggerWireHelpers::WireUnserialize(sdata, m_stacktrace) !=
         DebuggerWireHelpers::NoError) {
       m_stacktrace.reset();
-      m_wireError = sdata;
+      m_wireError = sdata.toCppString();
     }
   }
   thrift.read(m_stackArgs);
@@ -193,22 +195,22 @@ static Array createAsyncStacktrace() {
   auto currentWaitHandle = HHVM_FN(asio_get_running)();
   if (currentWaitHandle.isNull()) return trace;
   Array depStack =
-    objToWaitableWaitHandle(currentWaitHandle)->t_getdependencystack();
+    objToWaitableWaitHandle(currentWaitHandle)->getDependencyStack();
   for (ArrayIter iter(depStack); iter; ++iter) {
     if (iter.secondRef().isNull()) {
       trace.append(Array(staticEmptyArray()));
     } else {
       auto wh = objToWaitableWaitHandle(iter.secondRef().toObject());
-      auto parents = wh->t_getparents();
+      auto parents = wh->getParents();
       Array ancestors;
       for (ArrayIter piter(parents); piter; ++piter) {
         // Note: the parent list contains no nulls.
         auto parent = objToWaitableWaitHandle(piter.secondRef().toObject());
-        ancestors.append(parent->t_getname());
+        ancestors.append(parent->getName());
       }
       Array frameData;
-      frameData.set(s_function, wh->t_getname(), true);
-      frameData.set(s_id, wh->t_getid(), true);
+      frameData.set(s_function, wh->getName(), true);
+      frameData.set(s_id, wh->getId(), true);
       frameData.set(s_ancestors, ancestors, true);
       // Async function wait handles may have a source location to add.
       if (wh->getKind() == c_WaitHandle::Kind::AsyncFunction) {

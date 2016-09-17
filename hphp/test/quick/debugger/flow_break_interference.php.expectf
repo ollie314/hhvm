@@ -1,10 +1,10 @@
 Program %s/flow_break_interference.php loaded. Type '[r]un' or '[c]ontinue' to go.
 b flow_break_interference.php:15
 Breakpoint 1 set on line 15 of flow_break_interference.php
-But wont break until file flow_break_interference.php has been loaded.
+But won't break until file flow_break_interference.php has been loaded.
 b flow_break_interference.php:27
 Breakpoint 2 set on line 27 of flow_break_interference.php
-But wont break until file flow_break_interference.php has been loaded.
+But won't break until file flow_break_interference.php has been loaded.
 c
 int(8)
 Breakpoint 1 reached at genFoo() on line 15 of %s/flow_break_interference.php
@@ -24,7 +24,7 @@ c
 int(1)
 Finished in genFoo
 Breakpoint 2 reached at main() on line 27 of %s/flow_break_interference.php
-  26   // chaning $a will show in $z.
+  26   // changing $a will show in $z.
   27*  $z = $a;
   28   var_dump($z);
 

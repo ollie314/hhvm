@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,9 +15,9 @@
 */
 
 #include "hphp/runtime/vm/jit/reg-algorithms.h"
-#include "hphp/runtime/vm/jit/abi-x64.h"
-#include "hphp/runtime/vm/jit/abi-arm.h"
-#include "hphp/util/slice.h"
+
+#include "hphp/runtime/vm/jit/abi.h"
+#include "hphp/runtime/vm/jit/vasm-unit.h"
 
 namespace HPHP { namespace jit {
 
@@ -38,11 +38,11 @@ bool cycleHasSIMDReg(const CycleInfo& cycle, MovePlan& moves) {
 
 jit::vector<VMoveInfo>
 doVregMoves(Vunit& unit, MovePlan& moves) {
-  constexpr auto N = 64;
-  assert(std::max(x64::abi.all().size(), arm::abi.all().size()) <= N);
+  constexpr auto N = PhysReg::kMaxRegs;
+  assertx(abi().all().size() <= N);
   jit::vector<VMoveInfo> howTo;
-  CycleInfo cycle_mem[N];
-  List<CycleInfo> cycles(cycle_mem, 0, N);
+  CycleInfo cycles[N];
+  size_t num_cycles = 0;
   PhysReg::Map<int> outDegree;
   PhysReg::Map<int> index;
 
@@ -60,7 +60,7 @@ doVregMoves(Vunit& unit, MovePlan& moves) {
 
     // Begin walking a path from reg.
     for (auto node = reg;;) {
-      assert(nextIndex < N);
+      assertx(nextIndex < N);
       index[node] = nextIndex++;
       auto next = moves[node];
       if (next != InvalidReg) {
@@ -74,7 +74,8 @@ doVregMoves(Vunit& unit, MovePlan& moves) {
         // next already visited; check if next is on current path.
         if (index[next] >= index[reg]) {
           // found a cycle.
-          cycles.push_back({ next, nextIndex - index[next] });
+          assert(num_cycles < N);
+          cycles[num_cycles++] = { next, nextIndex - index[next] };
         }
       }
       break;
@@ -86,7 +87,7 @@ doVregMoves(Vunit& unit, MovePlan& moves) {
   {
     PhysReg q[N];
     int qBack = 0;
-    auto enque = [&](PhysReg r) { assert(qBack < N); q[qBack++] = r; };
+    auto enque = [&](PhysReg r) { assertx(qBack < N); q[qBack++] = r; };
     for (auto node : outDegree) {
       if (outDegree[node] == 0) enque(node);
     }
@@ -101,7 +102,8 @@ doVregMoves(Vunit& unit, MovePlan& moves) {
   }
 
   // Deal with any cycles we encountered
-  for (auto const& cycle : cycles) {
+  for (size_t i = 0; i < num_cycles; ++i) {
+    auto const& cycle = cycles[i];
     // can't use xchg if one of the registers is SIMD
     bool hasSIMDReg = cycleHasSIMDReg(cycle, moves);
     if (cycle.length == 2 && !hasSIMDReg) {
@@ -132,15 +134,15 @@ doVregMoves(Vunit& unit, MovePlan& moves) {
 }
 
 jit::vector<MoveInfo> doRegMoves(MovePlan& moves, PhysReg rTmp) {
-  constexpr auto N = 64;
-  assert(std::max(x64::abi.all().size(), arm::abi.all().size()) <= N);
+  constexpr auto N = PhysReg::kMaxRegs;
+  assertx(abi().all().size() <= N);
   jit::vector<MoveInfo> howTo;
-  CycleInfo cycle_mem[N];
-  List<CycleInfo> cycles(cycle_mem, 0, N);
+  CycleInfo cycles[N];
+  size_t num_cycles = 0;
   PhysReg::Map<int> outDegree;
   PhysReg::Map<int> index;
 
-  assert(moves[rTmp] == InvalidReg);
+  assertx(moves[rTmp] == InvalidReg);
   for (auto reg : moves) {
     // Ignore moves from a register to itself
     if (reg == moves[reg]) moves[reg] = InvalidReg;
@@ -155,7 +157,7 @@ jit::vector<MoveInfo> doRegMoves(MovePlan& moves, PhysReg rTmp) {
 
     // Begin walking a path from reg.
     for (auto node = reg;;) {
-      assert(nextIndex < N);
+      assertx(nextIndex < N);
       index[node] = nextIndex++;
       auto next = moves[node];
       if (next != InvalidReg) {
@@ -169,7 +171,8 @@ jit::vector<MoveInfo> doRegMoves(MovePlan& moves, PhysReg rTmp) {
         // next already visited; check if next is on current path.
         if (index[next] >= index[reg]) {
           // found a cycle.
-          cycles.push_back({ next, nextIndex - index[next] });
+          assert(num_cycles < N);
+          cycles[num_cycles++] = { next, nextIndex - index[next] };
         }
       }
       break;
@@ -181,7 +184,7 @@ jit::vector<MoveInfo> doRegMoves(MovePlan& moves, PhysReg rTmp) {
   {
     PhysReg q[N];
     int qBack = 0;
-    auto enque = [&](PhysReg r) { assert(qBack < N); q[qBack++] = r; };
+    auto enque = [&](PhysReg r) { assertx(qBack < N); q[qBack++] = r; };
     for (auto node : outDegree) {
       if (outDegree[node] == 0) enque(node);
     }
@@ -196,7 +199,8 @@ jit::vector<MoveInfo> doRegMoves(MovePlan& moves, PhysReg rTmp) {
   }
 
   // Deal with any cycles we encountered
-  for (auto const& cycle : cycles) {
+  for (size_t i = 0; i < num_cycles; ++i) {
+    auto const& cycle = cycles[i];
     // can't use xchg if one of the registers is SIMD
     bool hasSIMDReg = cycleHasSIMDReg(cycle, moves);
     if (cycle.length == 2 && !hasSIMDReg) {

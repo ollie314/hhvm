@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -304,7 +304,7 @@ void analyze_iteratively(Index& index, php::Program& program) {
 }
 
 void analyze_public_statics(Index& index, php::Program& program) {
-  PublicSPropIndexer publicStatics;
+  PublicSPropIndexer publicStatics{&index};
 
   {
     trace_time timer("analyze public statics");

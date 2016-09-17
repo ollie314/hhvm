@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,8 +32,7 @@ struct WarmupRequestHandlerFactory;
  * It counts the number of requests, and adds additional worker threads to the
  * server after a specified threshold.
  */
-class WarmupRequestHandler : public RequestHandler {
-public:
+struct WarmupRequestHandler : RequestHandler {
   explicit WarmupRequestHandler(
       int timeout,
       const std::shared_ptr<WarmupRequestHandlerFactory>& factory)
@@ -43,15 +42,16 @@ public:
   void teardownRequest(Transport* transport) noexcept override;
   void handleRequest(Transport* transport) override;
   void abortRequest(Transport* transport) override;
+  void logToAccessLog(Transport* transport) override;
 
 private:
   std::shared_ptr<WarmupRequestHandlerFactory> m_factory;
   HttpRequestHandler m_reqHandler;
 };
 
-class WarmupRequestHandlerFactory :
-  public std::enable_shared_from_this<WarmupRequestHandlerFactory> {
-public:
+struct WarmupRequestHandlerFactory
+  : std::enable_shared_from_this<WarmupRequestHandlerFactory>
+{
   WarmupRequestHandlerFactory(Server *server,
                               uint32_t additionalThreads,
                               uint32_t reqCount,

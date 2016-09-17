@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,11 +38,17 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(_M_X64) || defined(__powerpc64__) || \
+    defined(__aarch64__)
 
 template<class T, class TagType = uint32_t>
 struct CompactTaggedPtr {
+  using Opaque = uintptr_t;
   CompactTaggedPtr() { set(TagType{}, 0); }
+
+  // for save and restore
+  explicit CompactTaggedPtr(Opaque v) : m_data(v) {}
+  Opaque getOpaque() const { return m_data; }
 
   void set(TagType ttag, T* ptr) {
     auto const tag = static_cast<uint64_t>(ttag);
@@ -68,7 +74,13 @@ private:
 
 template<class T, class TagType = uint32_t>
 struct CompactTaggedPtr {
+  using Opaque = std::pair<T*,TagType>;
+
   CompactTaggedPtr() { set(TagType{}, 0); }
+
+  // for save and restore
+  explicit CompactTaggedPtr(Opaque v) : m_ptr(v.first), m_tag(v.second) {}
+  Opaque getOpaque() const { return std::make_pair(m_ptr, m_tag); }
 
   void set(TagType ttag, T* ptr) {
     auto const tag = static_cast<uint32_t>(ttag);

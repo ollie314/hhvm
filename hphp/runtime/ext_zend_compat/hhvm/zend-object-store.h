@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,39 +26,47 @@
 
 namespace HPHP {
 
-class ZendObjectStore final : public RequestEventHandler {
-  public:
-    static ZendObjectStore & getInstance() {
-      return *tl_instance;
-    }
+struct ZendObjectStore final : RequestEventHandler {
+  static ZendObjectStore & getInstance() {
+    return *tl_instance;
+  }
 
-    ZendObjectStore()
-      : m_free_list_head(0)
-    {}
+  ZendObjectStore()
+    : m_free_list_head(0)
+  {}
 
-    virtual void requestInit() {}
-    virtual void requestShutdown();
+  void requestInit() override {}
+  void requestShutdown() override;
 
-    // Defer shutdown until after other requestShutdown hooks are done
-    // freeing their objects.
-    virtual int priority() const {
-      return 10;
-    }
+  // Defer shutdown until after other requestShutdown hooks are done
+  // freeing their objects.
+  int priority() const override {
+    return 10;
+  }
 
-    zend_object_handle insertObject(void *object,
-        zend_objects_store_dtor_t dtor,
-        zend_objects_free_object_storage_t free_storage,
-        zend_objects_store_clone_t clone);
+  zend_object_handle insertObject(void *object,
+      zend_objects_store_dtor_t dtor,
+      zend_objects_free_object_storage_t free_storage,
+      zend_objects_store_clone_t clone);
 
-    void * getObject(zend_object_handle handle);
-    void freeObject(zend_object_handle handle);
-    zend_object_handle cloneObject(zend_object_handle handle);
+  void * getObject(zend_object_handle handle);
+  void freeObject(zend_object_handle handle);
+  zend_object_handle cloneObject(zend_object_handle handle);
 
-  private:
-    static __thread RequestLocal<ZendObjectStore> tl_instance;
+  void vscan(IMarker& mark) const override {
+    // zend_object_store_buckets can have pointers:
+    // m_store[i].bucket.obj.object is a void* that typically points to an
+    // extension custom object, which can contain zval* (RefData*),
+    // HashTable* (ArrayData*), etc. idea: support smart-malloc'd
+    // objects in the tracing loop, mark them, and conservatively-scan them.
+    for (auto& b : m_store) mark(&b, sizeof(b));
+  }
 
-    std::vector<zend_object_store_bucket> m_store;
-    zend_object_handle m_free_list_head;
+private:
+  DECLARE_STATIC_REQUEST_LOCAL(ZendObjectStore, tl_instance);
+
+  std::vector<zend_object_store_bucket> m_store;
+  zend_object_handle m_free_list_head;
 };
 
 }

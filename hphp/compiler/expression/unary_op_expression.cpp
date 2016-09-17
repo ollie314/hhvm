@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,26 +15,30 @@
 */
 
 #include "hphp/compiler/expression/unary_op_expression.h"
-#include "hphp/compiler/expression/object_property_expression.h"
-#include "hphp/parser/hphp.tab.hpp"
+
 #include "hphp/compiler/analysis/code_error.h"
 #include "hphp/compiler/analysis/file_scope.h"
-#include "hphp/compiler/statement/statement_list.h"
-#include "hphp/compiler/code_model_enums.h"
-#include "hphp/compiler/option.h"
-#include "hphp/compiler/expression/expression_list.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include "hphp/compiler/expression/simple_variable.h"
 #include "hphp/compiler/analysis/variable_table.h"
-#include "hphp/compiler/expression/scalar_expression.h"
-#include "hphp/compiler/expression/constant_expression.h"
+#include "hphp/compiler/expression/array_pair_expression.h"
 #include "hphp/compiler/expression/binary_op_expression.h"
+#include "hphp/compiler/expression/constant_expression.h"
 #include "hphp/compiler/expression/encaps_list_expression.h"
-#include "hphp/runtime/base/type-conversions.h"
-#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/compiler/expression/expression_list.h"
+#include "hphp/compiler/expression/object_property_expression.h"
+#include "hphp/compiler/expression/scalar_expression.h"
+#include "hphp/compiler/expression/simple_variable.h"
+#include "hphp/compiler/option.h"
 #include "hphp/compiler/parser/parser.h"
+#include "hphp/compiler/statement/statement_list.h"
+#include "hphp/parser/hphp.tab.hpp"
 
-using namespace HPHP;
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/type-conversions.h"
+
+namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 // constructors/destructors
@@ -77,9 +81,9 @@ inline void UnaryOpExpression::ctorInit() {
     m_localEffects = CreateEffect;
     break;
   case T_ARRAY:
-  case T_VARRAY:
-  case T_MIARRAY:
-  case T_MSARRAY:
+  case T_DICT:
+  case T_VEC:
+  case T_KEYSET:
   default:
     break;
   }
@@ -111,19 +115,43 @@ ExpressionPtr UnaryOpExpression::clone() {
   return exp;
 }
 
-bool UnaryOpExpression::isTemporary() const {
-  switch (m_op) {
-  case '!':
-  case '+':
-  case '-':
-  case '~':
-  case T_ARRAY:
-  case T_VARRAY:
-  case T_MIARRAY:
-  case T_MSARRAY:
-    return true;
+bool isDictScalar(ExpressionPtr exp) {
+  if (!exp) return true;
+  assertx(exp->is(Expression::KindOfExpressionList));
+
+  auto list = static_pointer_cast<ExpressionList>(exp);
+  assertx(list->getListKind() == ExpressionList::ListKindParam);
+
+  for (int i = 0; i < list->getCount(); ++i) {
+    auto& itemExp = (*list)[i];
+    if (!itemExp) continue;
+    assertx(itemExp->is(Expression::KindOfArrayPairExpression));
+
+    auto pair = static_pointer_cast<ArrayPairExpression>(itemExp);
+    auto name = pair->getName();
+
+    Variant val;
+    if (!name || !name->getScalarValue(val)) return false;
+    if (!val.isString() && !val.isInteger()) return false;
+    if (pair->getValue() && !pair->getValue()->isScalar()) return false;
   }
-  return false;
+  return true;
+}
+
+bool isKeysetScalar(ExpressionPtr exp) {
+  if (!exp) return true;
+  assertx(exp->is(Expression::KindOfExpressionList));
+
+  auto list = static_pointer_cast<ExpressionList>(exp);
+  assertx(list->getListKind() == ExpressionList::ListKindParam);
+
+  for (int i = 0; i < list->getCount(); ++i) {
+    Variant val;
+    auto& item = (*list)[i];
+    if (!item || !item->getScalarValue(val)) return false;
+    if (!val.isString() && !val.isInteger()) return false;
+  }
+  return true;
 }
 
 bool UnaryOpExpression::isScalar() const {
@@ -135,7 +163,12 @@ bool UnaryOpExpression::isScalar() const {
   case '@':
     return m_exp->isScalar();
   case T_ARRAY:
+  case T_VEC:
     return (!m_exp || m_exp->isScalar());
+  case T_KEYSET:
+    return isKeysetScalar(m_exp);
+  case T_DICT:
+    return isDictScalar(m_exp);
   default:
     break;
   }
@@ -156,19 +189,6 @@ bool UnaryOpExpression::isCast() const {
   return false;
 }
 
-TypePtr UnaryOpExpression::getCastType() const {
-  switch (m_op) {
-  case T_INT_CAST:    return Type::Int64;
-  case T_DOUBLE_CAST: return Type::Double;
-  case T_STRING_CAST: return Type::String;
-  case T_ARRAY_CAST:  return Type::Array;
-  case T_OBJECT_CAST: return Type::Object;
-  case T_BOOL_CAST:   return Type::Boolean;
-  default: break;
-  }
-  return TypePtr();
-}
-
 bool UnaryOpExpression::isRefable(bool checkError /*= false */) const {
   if (m_op == T_INC || m_op == T_DEC) {
     return m_exp->isRefable(checkError);
@@ -185,9 +205,9 @@ bool UnaryOpExpression::containsDynamicConstant(AnalysisResultPtr ar) const {
   case '+':
   case '-':
   case T_ARRAY:
-  case T_VARRAY:
-  case T_MIARRAY:
-  case T_MSARRAY:
+  case T_DICT:
+  case T_VEC:
+  case T_KEYSET:
     return m_exp && m_exp->containsDynamicConstant(ar);
   default:
     break;
@@ -200,10 +220,47 @@ bool UnaryOpExpression::getScalarValue(Variant &value) {
     if (m_op == T_ARRAY) {
       return m_exp->getScalarValue(value);
     }
+    if (m_op == T_DICT) {
+      if (m_exp->getScalarValue(value)) {
+        value = value.toArray().toDict();
+        return true;
+      }
+      return false;
+    }
+    if (m_op == T_VEC) {
+      if (m_exp->getScalarValue(value)) {
+        value = value.toArray().toVec();
+        return true;
+      }
+      return false;
+    }
+    if (m_op == T_KEYSET) {
+      if (m_exp->getScalarValue(value)) {
+        value = value.toArray().toKeyset();
+        return true;
+      }
+      return false;
+    }
     Variant t;
     return m_exp->getScalarValue(t) &&
       preCompute(t, value);
   }
+
+  if (m_op == T_DICT) {
+    value = Array::CreateDict();
+    return true;
+  }
+
+  if (m_op == T_VEC) {
+    value = Array::CreateVec();
+    return true;
+  }
+
+  if (m_op == T_KEYSET) {
+    value = Array::CreateKeyset();
+    return true;
+  }
+
   if (m_op != T_ARRAY) return false;
   value = Array::Create();
   return true;
@@ -225,10 +282,6 @@ void UnaryOpExpression::onParse(AnalysisResultConstPtr ar, FileScopePtr scope) {
 
 void UnaryOpExpression::analyzeProgram(AnalysisResultPtr ar) {
   if (m_exp) m_exp->analyzeProgram(ar);
-  if ((m_op == T_CLASS || m_op == T_FUNCTION) &&
-      ar->getPhase() == AnalysisResult::AnalyzeFinal) {
-    ar->link(getFileScope(), m_definedScope->getContainingFile());
-  }
 }
 
 bool UnaryOpExpression::preCompute(const Variant& value, Variant &result) {
@@ -314,15 +367,6 @@ void UnaryOpExpression::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-bool UnaryOpExpression::canonCompare(ExpressionPtr e) const {
-  if (!Expression::canonCompare(e)) return false;
-  UnaryOpExpressionPtr u =
-    static_pointer_cast<UnaryOpExpression>(e);
-
-  return m_op == u->m_op &&
-    m_front == u->m_front;
-}
-
 ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
   Variant value;
   Variant result;
@@ -342,7 +386,7 @@ ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
   if (m_op == T_ISSET && m_exp->is(KindOfExpressionList) &&
       static_pointer_cast<ExpressionList>(m_exp)->getListKind() ==
       ExpressionList::ListKindParam) {
-    ExpressionListPtr el(static_pointer_cast<ExpressionList>(m_exp));
+    auto el = static_pointer_cast<ExpressionList>(m_exp);
     result = true;
     int i = 0, n = el->getCount();
     for (; i < n; i++) {
@@ -356,9 +400,9 @@ ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
       return replaceValue(makeScalarExpression(ar, result));
     }
   } else if (m_op != T_ARRAY &&
-             m_op != T_VARRAY &&
-             m_op != T_MIARRAY &&
-             m_op != T_MSARRAY &&
+             m_op != T_VEC &&
+             m_op != T_DICT &&
+             m_op != T_KEYSET &&
              m_exp &&
              m_exp->isScalar() &&
              m_exp->getScalarValue(value) &&
@@ -380,6 +424,7 @@ ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
           case T_IS_SMALLER_OR_EQUAL:
           case '>':
           case T_IS_GREATER_OR_EQUAL:
+          case T_SPACESHIP:
           case T_IS_IDENTICAL:
           case T_IS_NOT_IDENTICAL:
           case T_IS_EQUAL:
@@ -408,7 +453,7 @@ ExpressionPtr UnaryOpExpression::preOptimize(AnalysisResultConstPtr ar) {
 void UnaryOpExpression::setExistContext() {
   if (m_exp) {
     if (m_exp->is(Expression::KindOfExpressionList)) {
-      ExpressionListPtr exps = dynamic_pointer_cast<ExpressionList>(m_exp);
+      auto exps = dynamic_pointer_cast<ExpressionList>(m_exp);
       if (exps->getListKind() == ExpressionList::ListKindParam) {
         for (int i = 0; i < exps->getCount(); i++) {
           (*exps)[i]->setContext(Expression::ExistContext);
@@ -435,117 +480,6 @@ ExpressionPtr UnaryOpExpression::unneededHelper() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-void UnaryOpExpression::outputCodeModel(CodeGenerator &cg) {
-  auto numProps = m_exp == nullptr ? 2 : 3;
-  switch (m_op) {
-    case T_UNSET:
-    case T_EXIT:
-    case T_ARRAY:
-    case T_VARRAY:
-    case T_MIARRAY:
-    case T_MSARRAY:
-    case T_ISSET:
-    case T_EMPTY:
-    case T_EVAL: {
-      cg.printObjectHeader("SimpleFunctionCallExpression", numProps);
-      std::string funcName;
-      switch (m_op) {
-        case T_UNSET: funcName = "unset"; break;
-        case T_EXIT: funcName = "exit"; break;
-        case T_ARRAY: funcName = "array"; break;
-        case T_VARRAY: funcName = "varray"; break;
-        case T_MIARRAY: funcName = "miarray"; break;
-        case T_MSARRAY: funcName = "msarray"; break;
-        case T_ISSET: funcName = "isset"; break;
-        case T_EMPTY: funcName = "empty"; break;
-        case T_EVAL: funcName = "eval"; break;
-        default: break;
-      }
-      cg.printPropertyHeader("functionName");
-      cg.printValue(funcName);
-      if (m_exp != nullptr) {
-        cg.printPropertyHeader("arguments");
-        cg.printExpressionVector(m_exp);
-      }
-      cg.printPropertyHeader("sourceLocation");
-      cg.printLocation(this->getLocation());
-      cg.printObjectFooter();
-      return;
-    }
-    default:
-      break;
-  }
-
-  switch (m_op) {
-    case T_FILE:
-    case T_DIR:
-    case T_CLASS:
-    case T_FUNCTION: {
-      cg.printObjectHeader("SimpleConstantExpression", 2);
-      std::string varName;
-      switch (m_op) {
-        case T_FILE: varName = "__FILE__"; break;
-        case T_DIR: varName = "__DIR__"; break;
-        //case T_CLASS: varName = "class"; break;
-        //case T_FUNCTION: varName = "function"; break;
-        default:
-          assert(false); //fishing expedition. Are these cases dead?
-          break;
-      }
-      cg.printPropertyHeader("constantName");
-      cg.printValue(varName);
-      cg.printPropertyHeader("sourceLocation");
-      cg.printLocation(this->getLocation());
-      cg.printObjectFooter();
-      return;
-    }
-    default:
-      break;
-  }
-
-  cg.printObjectHeader("UnaryOpExpression", numProps);
-  if (m_exp != nullptr) {
-    cg.printPropertyHeader("expression");
-    m_exp->outputCodeModel(cg);
-  }
-  cg.printPropertyHeader("operation");
-  int op = 0;
-  switch (m_op) {
-    case T_CLONE: op = PHP_CLONE_OP; break;
-    case T_INC:
-      op = m_front ? PHP_PRE_INCREMENT_OP : PHP_POST_INCREMENT_OP;
-      break;
-    case T_DEC:
-      op = m_front ? PHP_PRE_DECREMENT_OP : PHP_POST_DECREMENT_OP;
-      break;
-    case '+': op = PHP_PLUS_OP; break;
-    case '-': op = PHP_MINUS_OP; break;
-    case '!': op = PHP_NOT_OP;  break;
-    case '~': op = PHP_BITWISE_NOT_OP; break;
-    case T_INT_CAST: op = PHP_INT_CAST_OP; break;
-    case T_DOUBLE_CAST: op = PHP_FLOAT_CAST_OP; break;
-    case T_STRING_CAST: op = PHP_STRING_CAST_OP; break;
-    case T_ARRAY_CAST: op = PHP_ARRAY_CAST_OP; break;
-    case T_OBJECT_CAST: op = PHP_OBJECT_CAST_OP; break;
-    case T_BOOL_CAST: op = PHP_BOOL_CAST_OP; break;
-    case T_UNSET_CAST: op = PHP_UNSET_CAST_OP; break;
-    case '@': op = PHP_ERROR_CONTROL_OP; break;
-    case T_PRINT: op = PHP_PRINT_OP; break;
-    case T_INCLUDE: op = PHP_INCLUDE_OP; break;
-    case T_INCLUDE_ONCE: op = PHP_INCLUDE_ONCE_OP; break;
-    case T_REQUIRE: op = PHP_REQUIRE_OP; break;
-    case T_REQUIRE_ONCE: op = PHP_REQUIRE_ONCE_OP; break;
-    default:
-      assert(false);
-  }
-  cg.printValue(op);
-  cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
-  cg.printObjectFooter();
-}
-
-///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
@@ -569,9 +503,9 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     case T_EXIT:          cg_printf("exit(");         break;
     case '@':             cg_printf("@");             break;
     case T_ARRAY:         cg_printf("array(");        break;
-    case T_VARRAY:        cg_printf("varray(");       break;
-    case T_MIARRAY:       cg_printf("miarray(");      break;
-    case T_MSARRAY:       cg_printf("msarray(");      break;
+    case T_DICT:          cg_printf("dict[");         break;
+    case T_VEC:           cg_printf("vec[");          break;
+    case T_KEYSET:        cg_printf("keyset[");       break;
     case T_PRINT:         cg_printf("print ");        break;
     case T_ISSET:         cg_printf("isset(");        break;
     case T_EMPTY:         cg_printf("empty(");        break;
@@ -596,12 +530,12 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     case T_UNSET:
     case T_EXIT:
     case T_ARRAY:
-    case T_VARRAY:
-    case T_MIARRAY:
-    case T_MSARRAY:
     case T_ISSET:
     case T_EMPTY:
     case T_EVAL:          cg_printf(")");  break;
+    case T_DICT:          cg_printf("]");  break;
+    case T_VEC:           cg_printf("]");  break;
+    case T_KEYSET:        cg_printf("]");  break;
     default:
       break;
     }
@@ -613,4 +547,6 @@ void UnaryOpExpression::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
       assert(false);
     }
   }
+}
+
 }

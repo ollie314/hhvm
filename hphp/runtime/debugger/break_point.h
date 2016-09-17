@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,18 +17,28 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_BREAK_POINT_H_
 #define incl_HPHP_EVAL_DEBUGGER_BREAK_POINT_H_
 
-#include <memory>
-#include <vector>
 #include <list>
+#include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
-#include "hphp/runtime/debugger/debugger_thrift_buffer.h"
+#include "hphp/runtime/base/type-variant.h"
+#include "hphp/runtime/vm/unit.h"
 
-namespace HPHP { namespace Eval {
+namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-// The type of interrupt that is sent from the server to notify the debugger
-// client about a notable event during execution.
+struct ActRec;
+struct DebuggerThriftBuffer;
+
+namespace Eval {
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * The type of interrupt that is sent from the server to notify the debugger
+ * client about a notable event during execution.
+ */
 enum InterruptType : int8_t {
   // The server is now ready to interact with the debugger
   SessionStarted,
@@ -60,11 +70,12 @@ enum InterruptType : int8_t {
   // We have assertions that check that these interrupts stays server-side.
 };
 
-// Represents a site in the code, at the source level.
-// Forms an InterruptSite by looking at the current thread's current PC and
-// grabbing source data out of the corresponding Unit.
-class InterruptSite {
-public:
+/*
+ * Represents a site in the code, at the source level.  Forms an InterruptSite
+ * by looking at the current thread's current PC and grabbing source data out of
+ * the corresponding Unit.
+ */
+struct InterruptSite {
   InterruptSite(bool hardBreakPoint, const Variant& e);
 
   const InterruptSite *getCallingSite() const;
@@ -87,22 +98,25 @@ public:
   std::string &url() const { return m_url; }
   std::string desc() const;
 
-  const SourceLoc *getSourceLoc() const { return &m_sourceLoc; }
+  const SourceLoc* getSourceLoc() const { return &m_sourceLoc; }
   const Offset getCurOffset() const { return m_offset; }
   const Unit* getUnit() const { return m_unit; }
 
   bool valid() const { return m_valid; }
   bool funcEntry() const { return m_funcEntry; }
+  bool isBuiltin() const { return m_builtin; }
+
+  // for unique_ptr constructor
+  InterruptSite(ActRec* fp, Offset offset, const Variant& error);
 
 private:
-  InterruptSite(ActRec* fp, Offset offset, const Variant& error);
   void Initialize(ActRec *fp);
 
   Variant m_error;
   ActRec *m_activationRecord;
 
   // cached
-  mutable std::unique_ptr<const InterruptSite> m_callingSite;
+  mutable req::unique_ptr<const InterruptSite> m_callingSite;
   mutable const char *m_class;
   mutable std::string m_function;
   mutable String m_file;
@@ -118,6 +132,7 @@ private:
   Unit* m_unit;
   bool m_valid;
   bool m_funcEntry;
+  bool m_builtin;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -129,8 +144,7 @@ struct DFunctionInfo;
 using BreakPointInfoPtr = std::shared_ptr<BreakPointInfo>;
 using DebuggerProxyPtr = std::shared_ptr<DebuggerProxy>;
 
-class BreakPointInfo {
-public:
+struct BreakPointInfo {
   // The state of the break point
   enum State : int8_t {
     Always   = -1, // always break when reaching this break point
@@ -152,7 +166,6 @@ public:
                         const std::string &needle);
   static bool MatchFile(const std::string& file, const std::string& fullPath);
 
-public:
   BreakPointInfo() : m_index(0) {} // for thrift
   BreakPointInfo(bool regex, State state, const std::string &file, int line);
   BreakPointInfo(bool regex, State state, InterruptType interrupt,

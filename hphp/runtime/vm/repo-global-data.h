@@ -29,6 +29,8 @@ namespace HPHP {
  * Only used in RepoAuthoritative mode.  See loadGlobalData().
  */
 struct Repo::GlobalData {
+  GlobalData() {}
+
   /*
    * Indicates whether a repo was compiled using HHBBC.
    */
@@ -42,6 +44,15 @@ struct Repo::GlobalData {
    * would allow violating assumptions from the optimizer.
    */
   bool HardTypeHints = false;
+
+  /*
+   * Indicates whether a repo was compiled with HardReturnTypeHints.
+   *
+   * If so, we disallow recovering from the E_RECOVERABLE_ERROR we
+   * raise if you violate a return typehint, because doing so would
+   * allow violating assumptions from the optimizer.
+   */
+  bool HardReturnTypeHints = false;
 
   /*
    * Indicates whether a repo was compiled with HardPrivatePropInference.
@@ -62,13 +73,35 @@ struct Repo::GlobalData {
   bool DisallowDynamicVarEnvFuncs = false;
 
   /*
-   * Indicates whether a repo was compiled with HardReturnTypeHints.
-   *
-   * If so, we disallow recovering from the E_RECOVERABLE_ERROR we
-   * raise if you violate a return typehint, because doing so would
-   * allow violating assumptions from the optimizer.
+   * Indicates whether the repo was compiled with PHP7 integer semantics. This
+   * slightly changes the way certain arithmetic operations are evaluated, in
+   * small enough ways that don't warrant new bytecodes, but in ways that do
+   * affect everything from hphpc's constant folding up through the JIT, and
+   * so need to be kept consistent.
    */
-  bool HardReturnTypeHints = false;
+  bool PHP7_IntSemantics = false;
+
+  /*
+   * Indicates whether the repo was compiled with PHP7 scalar type hint support.
+   * In this mode non hh units will default to weak types and scalar types will
+   * be available outside the HH namespace.
+   */
+  bool PHP7_ScalarTypes = false;
+
+  /*
+   * Indicates whether the repo was compiled with PHP7 substr behavior which
+   * returns an empty string if the stringi length is equal to start characters
+   * long, instead of PHP5's false.
+   */
+  bool PHP7_Substr = false;
+
+  /*
+   * Indicates that generators should be autoprimed and not require an initial
+   * call to next() before calling other generator functions.
+   */
+  bool AutoprimeGenerators = true;
+
+  std::vector<const StringData*> APCProfile;
 
   template<class SerDe> void serde(SerDe& sd) {
     sd(UsedHHBBC)
@@ -77,6 +110,11 @@ struct Repo::GlobalData {
       (arrayTypeTable)
       (DisallowDynamicVarEnvFuncs)
       (HardReturnTypeHints)
+      (PHP7_IntSemantics)
+      (PHP7_ScalarTypes)
+      (PHP7_Substr)
+      (AutoprimeGenerators)
+      (APCProfile)
       ;
   }
 };

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -27,15 +27,14 @@ namespace HPHP {
 /**
  * zlib based files.
  */
-class ZipFile : public File {
-public:
+struct ZipFile : File {
   DECLARE_RESOURCE_ALLOCATION(ZipFile);
 
   ZipFile();
   virtual ~ZipFile();
 
   // overriding ResourceData
-  const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   bool open(const String& filename, const String& mode) override;
   bool close() override;
@@ -50,12 +49,11 @@ public:
 
   // Proxy the lock to the underlying stream
   bool lock(int operation, bool &wouldblock) override {
-    auto inner = m_innerFile.getTyped<File>(true, true);
-    if (!inner || inner->isClosed()) {
+    if (!m_innerFile || m_innerFile->isClosed()) {
       raise_warning("Inner file descriptor is closed");
       return false;
     }
-    return inner->lock(operation, wouldblock);
+    return m_innerFile->lock(operation, wouldblock);
   }
   bool lock(int operation) override {
     bool wouldBlock = false;
@@ -64,8 +62,8 @@ public:
 
 private:
   gzFile m_gzFile;
-  Resource m_innerFile;
-  Resource m_tempFile;
+  req::ptr<File> m_innerFile;
+  req::ptr<File> m_tempFile;
 
   bool closeImpl();
 };

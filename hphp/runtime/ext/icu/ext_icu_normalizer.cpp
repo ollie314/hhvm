@@ -9,7 +9,7 @@ namespace HPHP { namespace Intl {
 
 const StaticString s_Normalizer("Normalizer");
 
-static Variant HHVM_STATIC_METHOD(Normalizer, isNormalized,
+static bool HHVM_STATIC_METHOD(Normalizer, isNormalized,
                                   const String& input, int64_t form) {
   s_intl_error->clearError();
   switch (form) {
@@ -22,7 +22,7 @@ static Variant HHVM_STATIC_METHOD(Normalizer, isNormalized,
       s_intl_error->setError(U_ILLEGAL_ARGUMENT_ERROR,
                              "normalizer_isnormalized: "
                              "illegal normalization form");
-      return init_null();
+      return false;
   }
 
   UErrorCode error = U_ZERO_ERROR;
@@ -33,9 +33,9 @@ static Variant HHVM_STATIC_METHOD(Normalizer, isNormalized,
   }
 
   error = U_ZERO_ERROR;
-  UBool ret = unorm_isNormalizedWithOptions(uinput.getBuffer(), uinput.length(),
+  bool ret = (unorm_isNormalizedWithOptions(uinput.getBuffer(), uinput.length(),
                                             (UNormalizationMode)form,
-                                            0, &error);
+                                            0, &error) == 1 ? true : false);
 
   if (U_FAILURE(error)) {
     s_intl_error->setError(error, "Error testing if string is the given "
@@ -64,7 +64,7 @@ static Variant HHVM_STATIC_METHOD(Normalizer, normalize,
       s_intl_error->setError(U_ILLEGAL_ARGUMENT_ERROR,
                              "normalizer_normalize: "
                              "illegal normalization form");
-      return init_null();
+      return false;
   }
 
   UErrorCode error = U_ZERO_ERROR;
@@ -85,7 +85,7 @@ static Variant HHVM_STATIC_METHOD(Normalizer, normalize,
   if (U_FAILURE(error) &&
       (error != U_BUFFER_OVERFLOW_ERROR) &&
       (error != U_STRING_NOT_TERMINATED_WARNING)) {
-    return init_null();
+    return false;
   }
 
   if (size_needed > capacity) {
@@ -97,7 +97,7 @@ static Variant HHVM_STATIC_METHOD(Normalizer, normalize,
                                   &error);
     if (U_FAILURE(error)) {
       s_intl_error->setError(error, "Error normalizing string");
-      return init_null();
+      return false;
     }
   }
   dest.releaseBuffer(size_needed);
@@ -107,32 +107,26 @@ static Variant HHVM_STATIC_METHOD(Normalizer, normalize,
   if (U_FAILURE(error)) {
     s_intl_error->setError(error, "normalizer_normalize: "
                                   "error converting normalized text UTF-8");
-    return init_null();
+    return false;
   }
   return ret;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
-#define CONST_NORM(v) \
-  Native::registerClassConstant<KindOfInt64> \
-    (s_Normalizer.get(), makeStaticString("FORM_" #v), UNORM_NF ## v); \
-  Native::registerClassConstant<KindOfInt64> \
-    (s_Normalizer.get(), makeStaticString("NF" #v), UNORM_NF ## v)
-
-const StaticString s_NONE("NONE");
-
 void IntlExtension::initNormalizer() {
   HHVM_STATIC_ME(Normalizer, isNormalized);
   HHVM_STATIC_ME(Normalizer, normalize);
 
-  Native::registerClassConstant<KindOfInt64>
-    (s_Normalizer.get(), s_NONE.get(), UNORM_NONE);
-
-  CONST_NORM(D);
-  CONST_NORM(KD);
-  CONST_NORM(C);
-  CONST_NORM(KC);
+  HHVM_RCC_INT(Normalizer, NONE, UNORM_NONE);
+  HHVM_RCC_INT(Normalizer, FORM_D, UNORM_NFD);
+  HHVM_RCC_INT(Normalizer, NFD, UNORM_NFD);
+  HHVM_RCC_INT(Normalizer, FORM_KD, UNORM_NFKD);
+  HHVM_RCC_INT(Normalizer, NFKD, UNORM_NFKD);
+  HHVM_RCC_INT(Normalizer, FORM_C, UNORM_NFC);
+  HHVM_RCC_INT(Normalizer, NFC, UNORM_NFC);
+  HHVM_RCC_INT(Normalizer, FORM_KC, UNORM_NFKC);
+  HHVM_RCC_INT(Normalizer, NFKC, UNORM_NFKC);
 
   loadSystemlib("icu_normalizer");
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,12 +17,13 @@
 #ifndef incl_HPHP_ICU_H
 #define incl_HPHP_ICU_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/vm/native-data.h"
 #include <unicode/utypes.h>
 #include <unicode/ucnv.h>
 #include <unicode/ustring.h>
 #include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/base/request-local.h"
 
 namespace HPHP {
 /////////////////////////////////////////////////////////////////////////////
@@ -31,19 +32,12 @@ namespace Intl {
 
 /* Common error handling logic used by all Intl classes
  */
-class IntlError {
- public:
+struct IntlError {
   void setError(UErrorCode code, const char *format = nullptr, ...);
   void clearError(bool clearGlobalError = true);
 
-  Object getException(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    char buffer[1024];
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-    return Object(SystemLib::AllocExceptionObject(buffer));
-  }
+  [[noreturn]]
+  void throwException(const char *format, ...);
 
   UErrorCode getErrorCode() const { return m_errorCode; }
 
@@ -98,8 +92,7 @@ inline String u8(const icu::UnicodeString& u16, UErrorCode& error) {
   return u8(u16.getBuffer(), u16.length(), error);
 }
 
-class IntlExtension : public Extension {
- public:
+struct IntlExtension final : Extension {
   IntlExtension() : Extension("intl", "1.1.0") {}
 
   void moduleInit() override {
@@ -110,9 +103,11 @@ class IntlExtension : public Extension {
     initTimeZone();
     initIterator();
     initDateFormatter();
+    initDatePatternGenerator();
     initCalendar();
     initGrapheme();
     initBreakIterator(); // Must come after initIterator()
+    initUChar();
     initUConverter();
     initUcsDet();
     initUSpoof();
@@ -137,9 +132,11 @@ class IntlExtension : public Extension {
   void initTimeZone();
   void initIterator();
   void initDateFormatter();
+  void initDatePatternGenerator();
   void initCalendar();
   void initGrapheme();
   void initBreakIterator();
+  void initUChar();
   void initUConverter();
   void initUcsDet();
   void initUSpoof();
@@ -162,6 +159,7 @@ struct IntlGlobalError final : RequestEventHandler, Intl::IntlError {
   void requestShutdown() override {
     clearError();
   }
+  void vscan(IMarker&) const override {}
 };
 DECLARE_EXTERN_REQUEST_LOCAL(IntlGlobalError, s_intl_error);
 

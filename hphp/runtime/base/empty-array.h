@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,10 @@
 
 #include "hphp/runtime/base/array-common.h"
 #include "hphp/runtime/base/typed-value.h"
+#include "hphp/runtime/base/sort-flags.h"
+#include "hphp/runtime/base/header-kind.h"
+
+#include "hphp/util/type-scan.h"
 
 namespace HPHP {
 
@@ -33,6 +37,7 @@ struct ArrayData;
 struct RefData;
 struct StringData;
 struct MArrayIter;
+struct MixedArray;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -42,14 +47,16 @@ struct MArrayIter;
  * Other arrays may also be empty in the sense that size() == 0, but
  * this one is dealt with commonly enough to deserve special handlers.
  */
-struct EmptyArray {
+struct EmptyArray final: type_scan::MarkCountable<EmptyArray> {
   static void Release(ArrayData*);
   static const TypedValue* NvGetInt(const ArrayData*, int64_t) {
     return nullptr;
   }
+  static constexpr auto NvTryGetInt = &NvGetInt;
   static const TypedValue* NvGetStr(const ArrayData*, const StringData*) {
     return nullptr;
   }
+  static constexpr auto NvTryGetStr = &NvGetStr;
   static void NvGetKey(const ArrayData*, TypedValue* out, ssize_t pos);
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
@@ -71,9 +78,12 @@ struct EmptyArray {
     return false;
   }
   static ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& ret, bool copy);
+  static constexpr auto LvalIntRef = &LvalInt;
   static ArrayData* LvalStr(ArrayData*, StringData* k, Variant*& ret,
                             bool copy);
+  static constexpr auto LvalStrRef = &LvalStr;
   static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
+  static constexpr auto LvalNewRef = &LvalNew;
   static ArrayData* SetRefInt(ArrayData*, int64_t k, Variant& v, bool copy);
   static ArrayData* SetRefStr(ArrayData*, StringData* k, Variant& v,
     bool copy);
@@ -91,7 +101,7 @@ struct EmptyArray {
     return false;
   }
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
-  static ArrayData* EscalateForSort(ArrayData* ad) {
+  static ArrayData* EscalateForSort(ArrayData* ad, SortFunction sf) {
     return ad;
   }
   static void Ksort(ArrayData*, int, bool) {}
@@ -111,16 +121,22 @@ struct EmptyArray {
   static constexpr auto Dequeue = &PopOrDequeue;
   static ArrayData* Copy(const ArrayData* ad);
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
-  static ArrayData* NonSmartCopy(const ArrayData*);
+  static ArrayData* CopyStatic(const ArrayData*);
   static ArrayData* ZSetInt(ArrayData* ad, int64_t k, RefData* v);
   static ArrayData* ZSetStr(ArrayData* ad, StringData* k, RefData* v);
   static ArrayData* ZAppend(ArrayData* ad, RefData* v, int64_t* key_ptr);
-  static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Append(ArrayData*, Cell v, bool copy);
   static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
   static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
   static ArrayData* PlusEq(ArrayData*, const ArrayData* elems);
   static ArrayData* Merge(ArrayData*, const ArrayData* elems);
-  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Prepend(ArrayData*, Cell v, bool copy);
+  static ArrayData* ToPHPArray(ArrayData* ad, bool) {
+    return ad;
+  }
+  static ArrayData* ToDict(ArrayData*, bool);
+  static ArrayData* ToVec(ArrayData*, bool);
+  static ArrayData* ToKeyset(ArrayData*, bool);
   static void Renumber(ArrayData*) {}
   static void OnSetEvalScalar(ArrayData*);
   static ArrayData* Escalate(const ArrayData* ad) {

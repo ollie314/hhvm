@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,13 +17,14 @@
 #ifndef incl_ZEND_CLASS_ENTRY_H_
 #define incl_ZEND_CLASS_ENTRY_H_
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/vm/class.h"
 
 typedef struct _zend_class_entry zend_class_entry;
 struct _zend_class_entry;
 
 namespace HPHP {
+
+struct StringData;
 
 zend_class_entry* zend_hphp_class_to_class_entry(Class* cls);
 Class * zend_hphp_class_entry_to_class(const zend_class_entry * ce);

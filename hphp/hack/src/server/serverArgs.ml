@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -9,32 +9,19 @@
  *)
 
 (*****************************************************************************)
-(* File parsing the arguments on the command line *)
-(*****************************************************************************)
-
-open Utils
-
-(*****************************************************************************)
 (* The options from the command line *)
 (*****************************************************************************)
 
 type options = {
-    check_mode       : bool;
-    json_mode        : bool;
-    root             : Path.path;
-    should_detach    : bool;
-    convert          : Path.path option;
-    load_save_opt    : env_store_action option;
-    version          : bool;
-  }
-
-and env_store_action =
-  | Load of load_info
-  | Save of string
-
-and load_info = {
-  filename : string;
-  to_recheck : string list;
+  ai_mode          : Ai_options.prepared option;
+  check_mode       : bool;
+  json_mode        : bool;
+  root             : Path.t;
+  should_detach    : bool;
+  convert          : Path.t option;
+  no_load          : bool;
+  save_filename    : string option;
+  waiting_client   : Unix.file_descr option;
 }
 
 (*****************************************************************************)
@@ -42,16 +29,13 @@ and load_info = {
 (*****************************************************************************)
 let usage = Printf.sprintf "Usage: %s [WWW DIRECTORY]\n" Sys.argv.(0)
 
-let print_usage_and_exit () =
-  Printf.fprintf stderr "%s" usage;
-  exit 1
-
 (*****************************************************************************)
 (* Options *)
 (*****************************************************************************)
 
 module Messages = struct
   let debug         = " debugging mode"
+  let ai            = " run ai with options"
   let check         = " check and exit"
   let json          = " output errors in json format (arc lint mode)"
   let daemon        = " detach process"
@@ -59,122 +43,121 @@ module Messages = struct
   let from_emacs    = " passed from hh_client"
   let from_hhclient = " passed from hh_client"
   let convert       = " adds type annotations automatically"
-  let save          = " save server state to file"
-  let load          = " a space-separated list of files; the first file is"^
-                      " the file containing the saved state, and the rest are"^
-                      " the list of files to recheck"
+  let save          = " DEPRECATED"
+  let save_mini     = " save mini server state to file"
+  let no_load       = " don't load from a saved state"
+  let waiting_client= " send message to fd/handle when server has begun \
+                      \ starting and again when it's done starting"
 end
 
-
-(*****************************************************************************)
-(* CAREFUL!!!!!!! *)
-(*****************************************************************************)
-(* --json is used for the linters. External tools are relying on the
-   format -- don't change it in an incompatible way!
-*)
-(*****************************************************************************)
-
-let arg x = Arg.Unit (fun () -> x := true)
-
-let populate_options () =
-  let root          = ref "" in
-  let from_vim      = ref false in
-  let from_emacs    = ref false in
-  let from_hhclient = ref false in
-  let debug         = ref false in
-  let check_mode    = ref false in
-  let json_mode     = ref false in
-  let should_detach = ref false in
-  let convert_dir   = ref None  in
-  let load_save_opt = ref None  in
-  let version       = ref false in
-  let cdir          = fun s -> convert_dir := Some s in
-  let save          = fun s -> load_save_opt := Some (Save s) in
-  let load          = fun s ->
-    let arg_l       = Str.split (Str.regexp " +") s in
-    match arg_l with
-    | [] -> raise (Invalid_argument "--load needs at least one argument")
-    | [filename] ->
-        load_save_opt := Some (Load { filename; to_recheck = [] })
-    | [filename; recheck_fn] ->
-        let to_recheck = cat recheck_fn |> Str.split (Str.regexp "\n") in
-        load_save_opt := Some (Load { filename; to_recheck; })
-    | _ -> raise (Invalid_argument "--load takes at most 2 arguments")
-  in
-  let options =
-    ["--debug"         , arg debug         , Messages.debug;
-     "--check"         , arg check_mode    , Messages.check;
-     "--json"          , arg json_mode     , Messages.json; (* CAREFUL!!! *)
-     "--daemon"        , arg should_detach , Messages.daemon;
-     "-d"              , arg should_detach , Messages.daemon;
-     "--from-vim"      , arg from_vim      , Messages.from_vim;
-     "--from-emacs"    , arg from_emacs    , Messages.from_emacs;
-     "--from-hhclient" , arg from_hhclient , Messages.from_hhclient;
-     "--convert"       , Arg.String cdir   , Messages.convert;
-     "--save"          , Arg.String save   , Messages.save;
-     "--load"          , Arg.String load   , Messages.load;
-     "--version"       , arg version       , "";
-    ] in
-  let options = Arg.align options in
-  Arg.parse options (fun s -> root := s) usage;
-  (* json implies check *)
-  let check_mode = !check_mode || !json_mode; in
-  (* Conversion mode implies check *)
-  let check_mode = check_mode || !convert_dir <> None in
-  let convert = Utils.opt_map Path.mk_path (!convert_dir) in
-  (match !root with
-  | "" ->
-      Printf.fprintf stderr "You must specify a root directory!\n";
-      exit 2
-  | _ -> ());
-  { json_mode     = !json_mode;
-    check_mode    = check_mode;
-    root          = Path.mk_path !root;
-    should_detach = !should_detach;
-    convert       = convert;
-    load_save_opt = !load_save_opt;
-    version       = !version;
-  }
-
-(* useful in testing code *)
-let default_options ~root =
-{
-  check_mode = false;
-  json_mode = false;
-  root = Path.mk_path root;
-  should_detach = false;
-  convert = None;
-  load_save_opt = None;
-  version = false;
-}
-
-(*****************************************************************************)
-(* Code checking that the options passed are correct.
- * Pretty minimalistic for now.
- *)
-(*****************************************************************************)
-
-let check_options options =
-  let root = options.root in
-  Wwwroot.assert_www_directory root;
-  ()
+let print_json_version () =
+  let open Hh_json in
+  let json = JSON_Object [
+    "commit", JSON_String Build_id.build_revision;
+    "commit_time", int_ Build_id.build_commit_time;
+    "api_version", int_ Build_id.build_api_version;
+  ] in
+  print_endline @@ json_to_string json
 
 (*****************************************************************************)
 (* The main entry point *)
 (*****************************************************************************)
 
 let parse_options () =
-  let options = populate_options () in
-  check_options options;
-  options
+  let root          = ref "" in
+  let from_vim      = ref false in
+  let from_emacs    = ref false in
+  let from_hhclient = ref false in
+  let debug         = ref false in
+  let ai_mode       = ref None in
+  let check_mode    = ref false in
+  let json_mode     = ref false in
+  let should_detach = ref false in
+  let convert_dir   = ref None  in
+  let save          = ref None in
+  let no_load       = ref false in
+  let version       = ref false in
+  let waiting_client= ref None in
+  let cdir          = fun s -> convert_dir := Some s in
+  let set_ai        = fun s -> ai_mode := Some (Ai_options.prepare ~server:true s) in
+  let set_save ()   = Printf.eprintf "DEPRECATED\n"; exit 1 in
+  let set_save_mini = fun s -> save := Some s in
+  let set_wait      = fun fd -> waiting_client := Some (Handle.wrap_handle fd) in
+  let options =
+    ["--debug"         , Arg.Set debug         , Messages.debug;
+     "--ai"            , Arg.String set_ai     , Messages.ai;
+     "--check"         , Arg.Set check_mode    , Messages.check;
+     "--json"          , Arg.Set json_mode     , Messages.json; (* CAREFUL!!! *)
+     "--daemon"        , Arg.Set should_detach , Messages.daemon;
+     "-d"              , Arg.Set should_detach , Messages.daemon;
+     "--from-vim"      , Arg.Set from_vim      , Messages.from_vim;
+     "--from-emacs"    , Arg.Set from_emacs    , Messages.from_emacs;
+     "--from-hhclient" , Arg.Set from_hhclient , Messages.from_hhclient;
+     "--convert"       , Arg.String cdir       , Messages.convert;
+     "--save"          , Arg.Unit set_save     , Messages.save;
+     "--save-mini"     , Arg.String set_save_mini, Messages.save_mini;
+     "--no-load"       , Arg.Set no_load       , Messages.no_load;
+     "--version"       , Arg.Set version       , "";
+     "--waiting-client", Arg.Int set_wait      , Messages.waiting_client;
+    ] in
+  let options = Arg.align options in
+  Arg.parse options (fun s -> root := s) usage;
+  if !version then begin
+    if !json_mode then print_json_version ()
+    else print_endline Build_id.build_id_ohai;
+    exit 0
+  end;
+  (* --json and --save both imply check *)
+  let check_mode = !check_mode || !json_mode || !save <> None; in
+  (* Conversion mode implies check *)
+  let check_mode = check_mode || !convert_dir <> None in
+  let convert = Option.map ~f:Path.make !convert_dir in
+  if check_mode && !waiting_client <> None then begin
+    Printf.eprintf "--check is incompatible with wait modes!\n";
+    Exit_status.(exit Input_error)
+  end;
+  (match !root with
+  | "" ->
+      Printf.eprintf "You must specify a root directory!\n";
+      Exit_status.(exit Input_error)
+  | _ -> ());
+  let root_path = Path.make !root in
+  Wwwroot.assert_www_directory root_path;
+  {
+    json_mode     = !json_mode;
+    ai_mode       = !ai_mode;
+    check_mode    = check_mode;
+    root          = root_path;
+    should_detach = !should_detach;
+    convert       = convert;
+    no_load       = !no_load;
+    save_filename = !save;
+    waiting_client= !waiting_client;
+  }
+
+(* useful in testing code *)
+let default_options ~root = {
+  ai_mode = None;
+  check_mode = false;
+  json_mode = false;
+  root = Path.make root;
+  should_detach = false;
+  convert = None;
+  no_load = true;
+  save_filename = None;
+  waiting_client = None;
+}
 
 (*****************************************************************************)
 (* Accessors *)
 (*****************************************************************************)
 
+let ai_mode options = options.ai_mode
 let check_mode options = options.check_mode
 let json_mode options = options.json_mode
 let root options = options.root
 let should_detach options = options.should_detach
 let convert options = options.convert
-let load_save_opt options = options.load_save_opt
+let no_load options = options.no_load
+let save_filename options = options.save_filename
+let waiting_client options = options.waiting_client

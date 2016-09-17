@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -18,7 +18,18 @@
  *)
 (*****************************************************************************)
 
-open Utils
+(*****************************************************************************)
+(* Parsing modes *)
+(*****************************************************************************)
+
+type file_type =
+  | PhpFile
+  | HhFile
+
+type mode =
+  | Mdecl    (* just declare signatures, don't check anything *)
+  | Mstrict  (* check everthing! *)
+  | Mpartial (* Don't fail if you see a function/class you don't know *)
 
 (*****************************************************************************)
 (* The record produced by the parsing phase. *)
@@ -27,13 +38,16 @@ open Utils
 type id = Pos.t * string
 
 type t = {
+  file_mode : mode option;
   funs : id list;
   classes : id list;
-  types : id list;
+  typedefs : id list;
   consts : id list;
   comments : (Pos.t * string) list;
   consider_names_just_for_autoload: bool;
 }
+
+val empty_t: t
 
 (*****************************************************************************)
 (* The simplified record used after parsing. *)
@@ -56,4 +70,4 @@ val empty_names: names
 
 val simplify: t -> names
 val merge_names: names -> names -> names
-val simplify_fast: t Relative_path.Map.t -> names Relative_path.Map.t
+val simplify_fast: t Relative_path.Map.t -> fast

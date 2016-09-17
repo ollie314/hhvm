@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,11 +17,13 @@
 #ifndef incl_HPHP_VM_PRINT_H_
 #define incl_HPHP_VM_PRINT_H_
 
-#include <iosfwd>
-#include "hphp/util/trace.h"
-#include "hphp/runtime/vm/jit/code-gen.h"
 #include "hphp/runtime/vm/jit/reg-alloc.h"
+#include "hphp/runtime/vm/jit/type-constraint.h"
 #include "hphp/runtime/vm/jit/type.h"
+
+#include "hphp/util/trace.h"
+
+#include <iosfwd>
 
 namespace HPHP { namespace jit {
 
@@ -29,7 +31,7 @@ struct AsmInfo;
 struct Block;
 struct GuardConstraints;
 struct IRInstruction;
-class  SSATmp;
+struct SSATmp;
 
 // IRInstruction
 void printInstr(std::ostream& ostream, const IRInstruction*,
@@ -67,11 +69,12 @@ void print(const IRUnit& unit);
  * control most IR logging via the hhir trace module.
  */
 static inline bool dumpIREnabled(int level = 1) {
-  return HPHP::Trace::moduleEnabledRelease(HPHP::Trace::printir, level);
+  return HPHP::Trace::moduleEnabledRelease(HPHP::Trace::printir, level) ||
+         RuntimeOption::EvalDumpIR >= level;
 }
 
-constexpr int kIRLevel = 1;
-constexpr int kCodeGenLevel = 2;
+constexpr int kCodeGenLevel = 1;
+constexpr int kIRLevel = 2;
 constexpr int kOptLevel = 3;
 constexpr int kTraceletLevel = 4;
 constexpr int kRegAllocLevel = 4;
@@ -80,9 +83,10 @@ constexpr int kExtraLevel = 6;
 constexpr int kExtraExtraLevel = 7;
 
 void printUnit(int level, const IRUnit&, const char* caption,
-               AsmInfo* ai = nullptr, const GuardConstraints* guards = nullptr);
+               AsmInfo* ai = nullptr, const GuardConstraints* guards = nullptr,
+               Annotations* annot = nullptr);
 
-inline std::ostream& operator<<(std::ostream& os, Type t) {
+inline std::ostream& operator<<(std::ostream& os, const Type& t) {
   return os << t.toString();
 }
 inline std::ostream& operator<<(std::ostream& os, TypeConstraint tc) {

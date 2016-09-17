@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,15 +13,17 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/debugger/cmd/cmd_variable.h"
 
-#include "hphp/runtime/base/hphp-system.h"
-#include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/debugger/cmd/cmd_where.h"
-#include "hphp/runtime/ext/ext_generator.h"
-#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
+#include "hphp/runtime/debugger/debugger_client.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
 #include "hphp/runtime/ext/asio/ext_asio.h"
-#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
+#include "hphp/runtime/ext/asio/ext_waitable-wait-handle.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
+#include "hphp/runtime/vm/runtime.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -38,6 +40,7 @@ void CmdVariable::sendImpl(DebuggerThriftBuffer &thrift) {
   }
   thrift.write(m_global);
   if (m_version == 2) {
+    thrift.write(m_formatMaxLen);
     thrift.write(m_varName);
     thrift.write(m_filter);
   }
@@ -54,12 +57,13 @@ void CmdVariable::recvImpl(DebuggerThriftBuffer &thrift) {
       m_variables.reset();
       if (error != DebuggerWireHelpers::HitLimit || m_version == 0) {
         // Unexpected error. Log it.
-        m_wireError = sdata;
+        m_wireError = sdata.toCppString();
       }
     }
   }
   thrift.read(m_global);
   if (m_version == 2) {
+    thrift.read(m_formatMaxLen);
     thrift.read(m_varName);
     thrift.read(m_filter);
   }
@@ -84,56 +88,72 @@ void CmdVariable::help(DebuggerClient &client) {
   );
 }
 
+const StaticString
+  s_HTTP_RAW_POST_DATA("HTTP_RAW_POST_DATA"),
+  s_omitted("...(omitted)");
+
 void CmdVariable::PrintVariable(DebuggerClient &client, const String& varName) {
   CmdVariable cmd(client.isStackTraceAsync()
                   ? KindOfVariableAsync : KindOfVariable);
   auto charCount = client.getDebuggerClientShortPrintCharCount();
   cmd.m_frame = client.getFrame();
   auto rcmd = client.xend<CmdVariable>(&cmd);
-  if (rcmd->m_version == 2) {
-    // Using the new protocol. rcmd contains a list of variables only.
-    // Fetch value of varName only, so that we can recover nicely when its
-    // value is too large to serialize.
-    cmd.m_varName = varName;
-    cmd.m_variables.reset();
-    cmd.m_version = 2;
+
+  always_assert(rcmd->m_version == 2);
+
+  // Using the new protocol.  rcmd contains a list of variables only.  Fetch
+  // value of varName only, so that we can recover nicely when its value is too
+  // large to serialize.
+  cmd.m_varName = varName;
+  cmd.m_variables.reset();
+  cmd.m_formatMaxLen = charCount;
+  cmd.m_version = 2;
+  rcmd = client.xend<CmdVariable>(&cmd);
+
+  if (rcmd->m_variables.empty()) {
+    // Perhaps the value is too large? See recvImpl.  Retry the command with
+    // version 1, in which case values are omitted.
+    cmd.m_version = 1;
     rcmd = client.xend<CmdVariable>(&cmd);
-    if (rcmd->m_variables.empty()) {
-      // Perhaps the value is too large? See recvImpl.
-      // Retry the command with version 1, in which case values are omitted.
-      cmd.m_version = 1;
-      rcmd = client.xend<CmdVariable>(&cmd);
-      if (!rcmd->m_variables.empty()) {
-        // It's there without values, and gone with values, so it is too large.
-        client.output("...(omitted)");
-        return;
-      }
+    if (!rcmd->m_variables.empty()) {
+      // It's there without values, and gone with values, so it is too large.
+      client.output(s_omitted);
     }
+    return;
   }
-  if (!rcmd->m_variables.empty()) {
-    for (ArrayIter iter(rcmd->m_variables); iter; ++iter) {
-      String name = iter.first().toString();
-      if (!name.equal(varName)) continue;
-      String value = DebuggerClient::FormatVariable(iter.second(), -1);
-      auto excess = value.length() - charCount;
-      if (charCount <= 0 || excess <= 0) {
-        client.output("%s", value.data());
-      } else {
-        client.output("%s", value.substr(0, charCount).data());
-        if (client.ask("There are %d more characters. Continue? [y/N]", excess)
-            == 'y') {
-          client.output("%s", value.substr(charCount).data());
-          client.tutorial("You can use 'set cc n' to increase the character"
-              " limit. 'set cc -1' will remove the limit.");
-        }
-      }
-    }
+
+  auto const get_var = [varName] (const CmdVariable& cmd) {
+    assert(cmd.m_variables.size() == 1);
+    assert(cmd.m_variables.exists(varName, true /* isKey */));
+    assert(cmd.m_variables[varName].isString());
+    return cmd.m_variables[varName].toString();
+  };
+
+  auto const value = get_var(*rcmd);
+  if (charCount <= 0 || value.size() <= charCount) {
+    client.output(value);
+    return;
+  }
+
+  // Don't show the "omitted" suffix.
+  auto piece = folly::StringPiece{value.data(), static_cast<size_t>(charCount)};
+  client.output(piece);
+  if (client.ask("There are more characters. Continue? [y/N]") == 'y') {
+    // Now we get the full value, and show the rest.
+    cmd.m_variables.reset();
+    cmd.m_formatMaxLen = -1;
+    rcmd = client.xend<CmdVariable>(&cmd);
+
+    auto value = get_var(*rcmd);
+    auto rest = folly::StringPiece {
+      value.data() + charCount,
+      static_cast<size_t>(value.size() - charCount)
+    };
+    client.output(rest);
+    client.tutorial("You can use 'set cc n' to increase the character"
+                    " limit. 'set cc -1' will remove the limit.");
   }
 }
-
-const StaticString s_HTTP_RAW_POST_DATA("HTTP_RAW_POST_DATA");
-const StaticString s_omitted("...(omitted)");
-
 
 void CmdVariable::PrintVariables(DebuggerClient &client, const Array& variables,
                                  int frame, const String& text, int version) {
@@ -142,72 +162,60 @@ void CmdVariable::PrintVariables(DebuggerClient &client, const Array& variables,
   bool system = true;
   int i = 0;
   bool found = false;
+
+  always_assert(version == 2);
+
   for (ArrayIter iter(variables); iter; ++iter) {
-    String name = iter.first().toString();
+    auto const name = iter.first().toString();
     String value;
-    if (version == 2) {
-      // Using the new protocol, so variables contain only names.
-      // Fetch the value separately.
-      CmdVariable cmd(client.isStackTraceAsync()
-        ? KindOfVariableAsync : KindOfVariable);
-      cmd.m_frame = frame;
-      cmd.m_variables.reset();
-      cmd.m_varName = name;
-      cmd.m_filter = text;
-      cmd.m_version = 2;
-      auto rcmd = client.xend<CmdVariable>(&cmd);
-      if (!rcmd->m_variables.empty()) {
-        value = DebuggerClient::FormatVariable(rcmd->m_variables[name], 200);
-        found = true;
-      } else if (text.empty()) {
-        // Not missing because filtered out, assume the value is too large.
-        value = s_omitted;
-        found = true;
-      } else {
-        if (name.find(text, 0, false) >= 0) {
-          // Server should have matched it.
-          // Assume missing because value is too large.
-          value = s_omitted;
-          found = true;
-        } else {
-          // The variable was filtered out on the server, using text.
-          // Or it was just too large. Either way we let skip over it.
-          continue;
-        }
-      }
+
+    // Using the new protocol, so variables contain only names.  Fetch the value
+    // separately.
+    CmdVariable cmd(client.isStackTraceAsync()
+                    ? KindOfVariableAsync : KindOfVariable);
+    cmd.m_frame = frame;
+    cmd.m_variables.reset();
+    cmd.m_varName = name;
+    cmd.m_filter = text;
+    cmd.m_formatMaxLen = 200;
+    cmd.m_version = 2;
+    auto rcmd = client.xend<CmdVariable>(&cmd);
+    if (!rcmd->m_variables.empty()) {
+      assert(rcmd->m_variables[name].isString());
+      value = rcmd->m_variables[name].toString();
+      found = true;
+    } else if (text.empty()) {
+      // Not missing because filtered out, assume the value is too large.
+      value = s_omitted;
+      found = true;
+    } else if (name.find(text, 0, false) >= 0) {
+      // Server should have matched it.  Assume missing because value is too
+      // large.
+      value = s_omitted;
+      found = true;
     } else {
-      value = DebuggerClient::FormatVariable(iter.second(), 200);
+      // The variable was filtered out on the server, using text.  Or it was
+      // just too large.  Either way we skip over it.
+      continue;
     }
-    if (version == 0 && !text.empty()) {
-      if (name.find(text, 0, false) >= 0) {
-        client.print("%s = %s", name.data(), value.data());
-        found = true;
-      } else {
-        String fullvalue = DebuggerClient::FormatVariable(value, -1);
-        if (fullvalue.find(text, 0, false) >= 0) {
-          client.print("%s = %s", name.data(), value.data());
-          found = true;
-        }
-      }
+
+    if (global && system) {
+      client.print("$%s = %s", name.data(), value.data());
     } else {
-      if (global && system) {
-        client.print("$%s = %s", name.data(), value.data());
-      } else {
-        client.output("$%s = %s", name.data(), value.data());
-      }
+      client.output("$%s = %s", name.data(), value.data());
+    }
 
-      // we know s_HTTP_RAW_POST_DATA is the last system global
-      if (global && name == s_HTTP_RAW_POST_DATA) {
-        client.output("%s", "");
-        system = false;
-      }
+    // We know s_HTTP_RAW_POST_DATA is the last system global.
+    if (global && name == s_HTTP_RAW_POST_DATA) {
+      client.output("%s", "");
+      system = false;
+    }
 
-      ++i;
-      if (i % DebuggerClient::ScrollBlockSize == 0 &&
-          client.ask("There are %zd more variables. Continue? [Y/n]",
-                      variables.size() - i) == 'n') {
-        break;
-      }
+    ++i;
+    if (i % DebuggerClient::ScrollBlockSize == 0 &&
+        client.ask("There are %zd more variables. Continue? [Y/n]",
+                   variables.size() - i) == 'n') {
+      break;
     }
   }
 
@@ -276,48 +284,24 @@ c_AsyncFunctionWaitHandle *getWaitHandleAtAsyncStackPosition(int position) {
   }
 
   Array depStack =
-    objToWaitableWaitHandle(top)->t_getdependencystack();
+    objToWaitableWaitHandle(top)->getDependencyStack();
 
   return objToContinuationWaitHandle(depStack[position].toObject());
 }
 
-static Array getVariables(const ActRec *fp) {
-  if (fp->hasVarEnv()) {
-    return fp->m_varEnv->getDefinedVariables();
-  } else {
-    const Func *func = fp->m_func;
-    auto numLocals = func->numNamedLocals();
-    ArrayInit ret(numLocals, ArrayInit::Map{});
-    for (Id id = 0; id < numLocals; ++id) {
-      TypedValue* ptv = frame_local(fp, id);
-      if (ptv->m_type == KindOfUninit) {
-        continue;
-      }
-      Variant name(func->localVarName(id), Variant::StaticStrInit{});
-      ret.add(name, tvAsVariant(ptv));
-    }
-    return ret.toArray();
-  }
-}
-
 bool CmdVariable::onServer(DebuggerProxy &proxy) {
   if (m_type == KindOfVariableAsync) {
-    //we only do variable inspection on continuation wait handles
+    // We only do variable inspection on continuation wait handles.
     auto frame = getWaitHandleAtAsyncStackPosition(m_frame);
-
     if (frame != nullptr) {
-      auto fp = frame->actRec();
-      if (fp != nullptr) {
-        m_variables = getVariables(fp);
-      }
+      m_variables = getDefinedVariables(frame->actRec());
     }
-  }
-  else if (m_frame < 0) {
+  } else if (m_frame < 0) {
     m_variables = g_context->m_globalVarEnv->getDefinedVariables();
     m_global = true;
   } else {
     m_variables = g_context->getLocalDefinedVariables(m_frame);
-    m_global = g_context->getVarEnv(m_frame) == g_context->m_globalVarEnv;
+    m_global = g_context->hasVarEnv(m_frame) == g_context->m_globalVarEnv;
     auto oThis = g_context->getThis();
     if (nullptr != oThis) {
       TypedValue tvThis;
@@ -333,36 +317,49 @@ bool CmdVariable::onServer(DebuggerProxy &proxy) {
   if (m_global) {
     m_variables.remove(s_GLOBALS);
   }
+
+  // Deprecated IDE uses this, so keep it around for now.  It expects all
+  // variable values to be fully serialized across the wire.
+  if (m_version == 0) {
+    return proxy.sendToClient(this);
+  }
+
+  // Version 1 of this command means we want the names of all variables, but we
+  // don't care about their values just yet.
   if (m_version == 1) {
-    // Remove the values before sending to client.
     ArrayInit ret(m_variables->size(), ArrayInit::Map{});
     Variant v;
     for (ArrayIter iter(m_variables); iter; ++iter) {
+      assert(iter.first().isString());
       ret.add(iter.first().toString(), v);
     }
     m_variables = ret.toArray();
     m_version = 2;
-  } else if (m_version == 2) {
-    // Remove entries that do not match a non empty m_varName.
-    if (!m_varName.empty()) {
-      ArrayInit ret(1, ArrayInit::Map{});
-      ret.add(m_varName, m_variables[m_varName]);
-      m_variables = ret.toArray();
-    }
-    // Remove entries whose name or contents do not match a non empty m_filter
-    if (!m_filter.empty()) {
-      ArrayInit ret(m_variables.size(), ArrayInit::Map{});
-      for (ArrayIter iter(m_variables); iter; ++iter) {
-        String name = iter.first().toString();
-        if (name.find(m_filter, 0, false) < 0) {
-          String fullvalue = DebuggerClient::FormatVariable(iter.second(), -1);
-          if (fullvalue.find(m_filter, 0, false) < 0) {
-            continue;
-          }
-        }
-        ret.add(name, iter.second());
-      }
-      m_variables = ret.toArray();
+    return proxy.sendToClient(this);
+  }
+
+  // Version 2 of this command means we're trying to get the value of a single
+  // variable.
+  always_assert(m_version == 2);
+  always_assert(!m_varName.empty());
+
+  // Variable name might not exist.
+  if (!m_variables.exists(m_varName, true /* isKey */)) {
+    m_variables = Array::Create();
+    return proxy.sendToClient(this);
+  }
+
+  auto const value = m_variables[m_varName];
+  auto const result = m_formatMaxLen < 0
+    ? DebuggerClient::FormatVariable(value)
+    : DebuggerClient::FormatVariableWithLimit(value, m_formatMaxLen);
+  m_variables = Array::Create(m_varName, result);
+
+  // Remove the entry if its name or context does not match the filter.
+  if (!m_filter.empty() && m_varName.find(m_filter, 0, false) < 0) {
+    auto const fullvalue = DebuggerClient::FormatVariable(value);
+    if (fullvalue.find(m_filter, 0, false) < 0) {
+      m_variables = Array::Create();
     }
   }
 

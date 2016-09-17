@@ -15,9 +15,17 @@ function main() {
   $x = bar();
 
   try {
-    var_dump($x->join());
+    var_dump(HH\Asio\join($x));
   } catch (Blah $x) {
-    echo "caught exception\n";
+    echo "caught exception (join)\n";
+  }
+
+  $x = bar();
+  if (!$x->isFinished()) { die("test failed"); }
+  try {
+    var_dump(HH\Asio\result($x));
+  } catch (Blah $x) {
+    echo "caught exception (result)\n";
   }
 }
 

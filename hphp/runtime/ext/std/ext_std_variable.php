@@ -141,7 +141,7 @@ function var_export(mixed $expression,
  */
 /* Dumps a string representation of an internal zend value to output.
  */
-<<__Native>>
+<<__Native("NoFCallBuiltin")>>
 function var_dump(mixed $arg1, ...$argv): void;
 
 <<__Native>>
@@ -156,7 +156,7 @@ function serialize(mixed $value): string;
 
 <<__Native>>
 function unserialize(string $str,
-                     array $class_whitelist = []): mixed;
+                     array $options = []): mixed;
 
 /* This function returns a multidimensional array containing a list of all
  * defined variables, be they environment, server or user-defined
@@ -226,4 +226,22 @@ namespace __SystemLib {
 
   <<__Native>>
   function parse_str(string $str, mixed &$arr = null): void;
+}
+
+namespace HH {
+
+  /* Finds whether the given variable is a vec.
+   */
+  <<__Native, __ParamCoerceModeFalse>>
+  function is_vec(mixed $var): bool;
+
+  /* Finds whether the given variable is a dict.
+   */
+  <<__Native, __ParamCoerceModeFalse>>
+  function is_dict(mixed $var): bool;
+
+  /* Finds whether the given variable is a keyset.
+   */
+  <<__Native, __ParamCoerceModeFalse>>
+  function is_keyset(mixed $var): bool;
 }

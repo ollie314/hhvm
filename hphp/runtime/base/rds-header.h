@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,14 +21,13 @@
 #include <cstddef>
 
 #include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/minstr-state.h"
 
 namespace HPHP {
 
 /*
- * Do not access this struct directly from RDS::header(). Use the accessors in
+ * Do not access this struct directly from rds::header(). Use the accessors in
  * runtime/vm/vm-regs.h.
  */
 struct VMRegs {
@@ -50,20 +49,52 @@ struct VMRegs {
 
   /* First ActRec of this VM instance. */
   ActRec* firstAR;
+
+  /* If the current VM nesting level is dispatchBB() as called by
+   * MCGenerator::handleResume(), this is set to what vmfp() was on the first
+   * entry to dispatchBB(). Otherwise, it's nullptr. See jitReturnPre() and
+   * jitReturnPost() in bytecode.cpp for usage. Note that we will have at most
+   * one active call to handleResume() in each VM nesting level, which is why
+   * this is just a single pointer. */
+  ActRec* jitCalledFrame;
+
+  TYPE_SCAN_CUSTOM() {
+    // ActRecs are always interior pointers so the type-scanner won't
+    // automatically enqueue them.
+    scanner.scan(fp);
+    scanner.scan(mInstrState);
+    scanner.scan(firstAR);
+    scanner.scan(jitCalledFrame);
+  };
 };
 
-namespace RDS {
+namespace rds {
 
 /*
  * Statically layed-out header that goes at the front of RDS.
  */
 struct Header {
   /*
-   * Surprise flags.  May be written by other threads.  At various
-   * points, the runtime will check whether this word is non-zero, and
-   * if so go to a slow path to handle unusual conditions (e.g. OOM).
+   * Combination of surprise flags and the limit (lowest address) of the
+   * evaluation stack.  May be written to by other threads.
+   *
+   * At various points, the runtime will check whether this word contains a
+   * higher number than what it believes the evaluation stack needs to be
+   * (remember the eval stack grows down), which combines a stack overflow
+   * check and a check for unusual conditions.  If this check triggers, the
+   * runtime will do more detailed checks to see if it's actually dealing with
+   * a stack overflow, or a surprise condition.
+   *
+   * All the surprise flag bits are in the upper 16 bits of this value, which
+   * must be zero if it is actually a pointer to the lowest address of the
+   * evaluation stack (the normal, "unsurprised" situation)---if one of the
+   * surprise flags is set, the pointer will be higher than any legal eval
+   * stack pointer and we'll go to a slow path to handle possible unusual
+   * conditions (e.g. OOM).  (This is making use of the x64 property that
+   * "canonical form" addresses have all their upper bits the same as bit 47,
+   * and that this is zero for linux userland pointers.)
    */
-  std::atomic<ssize_t> conditionFlags;
+  std::atomic<size_t> stackLimitAndSurprise;
 
   VMRegs vmRegs;
 };
@@ -75,7 +106,8 @@ inline Header* header() {
   return static_cast<Header*>(tl_base);
 }
 
-constexpr ptrdiff_t kConditionFlagsOff = offsetof(Header, conditionFlags);
+constexpr ptrdiff_t kSurpriseFlagsOff  = offsetof(Header,
+                                                  stackLimitAndSurprise);
 constexpr ptrdiff_t kVmRegsOff         = offsetof(Header, vmRegs);
 constexpr ptrdiff_t kVmspOff           = kVmRegsOff + offsetof(VMRegs, stack) +
                                            Stack::topOfStackOffset();
@@ -86,13 +118,10 @@ constexpr ptrdiff_t kVmMInstrStateOff  = kVmRegsOff +
                                            offsetof(VMRegs, mInstrState);
 
 static_assert((kVmMInstrStateOff % 16) == 0,
-              "MInstrState should be 16-byte aligned in RDS::Header");
+              "MInstrState should be 16-byte aligned in rds::Header");
 static_assert(kVmspOff == 16, "Eager vm-reg save in translator-asm-helpers.S");
 static_assert(kVmfpOff == 32, "Eager vm-reg save in translator-asm-helpers.S");
 
 } }
-
-/* MInstrState is stored in VMRegs, at a constant offset from RDS::header(). */
-#define MISOFF(nm) (RDS::kVmMInstrStateOff + offsetof(MInstrState, nm))
 
 #endif

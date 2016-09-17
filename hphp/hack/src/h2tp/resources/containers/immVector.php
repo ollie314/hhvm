@@ -1,5 +1,13 @@
 <?php
-// Copyright 2004-present Facebook. All Rights Reserved.
+/**
+ * Copyright (c) 2014, Facebook, Inc.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the "hack" directory of this source tree. An additional grant
+ * of patent rights can be found in the PATENTS file in the same directory.
+ *
+ */
 
 namespace HH {
   require_once(__DIR__.SEP.'interfaces.php');
@@ -52,10 +60,11 @@ namespace HH {
       }
       if (is_null($it)) {
         return new self();
-      } else {
-        throw new \InvalidArgumentException(
-          'Parameter must be a container (array or collection)');
       }
+      throw new \InvalidArgumentException(\sprintf(
+        'Parameter must be a container (array or collection), got %s',
+        is_object($it) ? get_class($it) : gettype($it),
+      ));
     }
 
     /**

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,32 +17,34 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_CMD_THREAD_H_
 #define incl_HPHP_EVAL_DEBUGGER_CMD_THREAD_H_
 
-#include "hphp/runtime/debugger/debugger_command.h"
 #include <vector>
+
 #include "hphp/runtime/base/debuggable.h"
+#include "hphp/runtime/base/req-root.h"
+#include "hphp/runtime/debugger/debugger_base.h"
+#include "hphp/runtime/debugger/debugger_command.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-class CmdThread : public DebuggerCommand, public IDebuggable {
-public:
+struct CmdThread : DebuggerCommand, IDebuggable {
   CmdThread() : DebuggerCommand(KindOfThread) {}
 
-  virtual void list(DebuggerClient &client);
-  virtual void help(DebuggerClient &client);
+  void list(DebuggerClient&) override;
+  void help(DebuggerClient&) override;
 
-  virtual bool onServer(DebuggerProxy &proxy);
-  virtual void onClient(DebuggerClient &client);
+  bool onServer(DebuggerProxy&) override;
+  void onClient(DebuggerClient&) override;
 
 protected:
-  virtual void sendImpl(DebuggerThriftBuffer &thrift);
-  virtual void recvImpl(DebuggerThriftBuffer &thrift);
+  void sendImpl(DebuggerThriftBuffer&) override;
+  void recvImpl(DebuggerThriftBuffer&) override;
 
 private:
   // implementing IDebuggable
-  virtual void debuggerInfo(InfoVec &info);
+  void debuggerInfo(InfoVec&) override;
 
-  String m_out;
+  req::root<String> m_out;
   std::vector<DThreadInfoPtr> m_threads;
 
   void processList(DebuggerClient &client, bool output = true);

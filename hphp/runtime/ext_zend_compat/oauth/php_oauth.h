@@ -19,10 +19,6 @@
 
 #include "php.h"
 
-#ifdef PHP_WIN32
-#include "win32/time.h"
-#endif
-
 #include "SAPI.h"
 #include "zend_API.h"
 #include "zend_variables.h"
@@ -298,7 +294,7 @@ char *oauth_generate_sig_base(php_so_object *soo, const char *http_method, const
 #define SO_MALIAS(func, alias, arg_info, flags) PHP_MALIAS(oauth, func, alias, arg_info, flags)
 #define SO_METHOD(func) PHP_METHOD(oauth, func)
 #define FREE_ARGS_HASH(a)  \
-  if (a) { \
+  if ((bool)a) {           \
     zend_hash_destroy(a);  \
     FREE_HASHTABLE(a); \
   }

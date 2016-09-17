@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,13 +17,15 @@
 #ifndef incl_HPHP_TEST_H_
 #define incl_HPHP_TEST_H_
 
-#include "hphp/compiler/hphp.h"
 #include "hphp/test/ext/test_logger.h"
+
+#include <folly/portability/SysTime.h>
+
+#include <string>
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class Test {
-public:
+struct Test {
   static std::string s_suite;
   static int s_total;
   static int s_passed;
@@ -73,17 +75,6 @@ private:
                    test.fail_count, test.skip_count);                   \
   }                                                                     \
 
-#ifdef SEP_EXTENSION
-#define IMPLEMENT_SEP_EXTENSION_TEST(name)                              \
-  void Test::RunTestsImpl(bool &allPassed, std::string &suite,          \
-                          std::string &which, std::string &set) {       \
-    RUN_TESTSUITE(TestExt ## name);                                     \
-  }
-#else
-#define IMPLEMENT_SEP_EXTENSION_TEST(name)
-#endif
-
-extern const char *php_path;
 ///////////////////////////////////////////////////////////////////////////////
 
 #endif // incl_HPHP_TEST_H_

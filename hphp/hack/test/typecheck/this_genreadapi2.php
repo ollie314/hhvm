@@ -8,12 +8,10 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  */
-interface GenReadApi<Tk, Tv> {}
+interface GenReadApi<Tk, +Tv> {}
 
-class GenReadApiClass<Tk, Tv> implements GenReadApi<Tk, Tv> {
-  public function __construct(
-    private Tv $v,
-  ) {}
+class GenReadApiClass<Tk, +Tv> implements GenReadApi<Tk, Tv> {
+  public function __construct(private Tv $v) {}
 }
 
 class Foo {
@@ -28,12 +26,10 @@ final class Bar extends Foo {
   }
 }
 
-interface GenReadIdxApi<Tk, Tv> {}
+interface GenReadIdxApi<Tk, +Tv> {}
 
-class GenReadIdxApiClass<Tk, Tv> implements GenReadIdxApi<Tk, Tv> {
-  public function __construct(
-    private Tv $v,
-  ) {}
+class GenReadIdxApiClass<Tk, +Tv> implements GenReadIdxApi<Tk, Tv> {
+  public function __construct(private Tv $v) {}
 }
 
 class FooIdx {
@@ -42,7 +38,7 @@ class FooIdx {
   }
 }
 
-<<ConsistentConstruct>>
+<<__ConsistentConstruct>>
 class BarIdx extends FooIdx {
   public static function make<Tk>(): GenReadIdxApi<Tk, this> {
     return new GenReadIdxApiClass(new static());

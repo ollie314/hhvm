@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,8 @@
 */
 
 #include "hphp/runtime/debugger/cmd/cmd_help.h"
+
+#include "hphp/runtime/debugger/debugger_client.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -56,7 +58,6 @@ void CmdHelp::HelpAll(DebuggerClient &client) {
     "[<?]php",      "starts input of a block of PHP code",
     "?>",           "ends and evaluates a block a PHP code",
     "[a]bort",      "aborts input of a block of PHP code",
-    "[z]end",       "evaluates the last snippet in PHP5",
 
     "Documentation and Source Code", "",
     "[i]nfo",       "displays documentations and other information",

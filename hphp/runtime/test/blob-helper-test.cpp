@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,6 +14,8 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/vm/blob-helper.h"
+#include "hphp/runtime/base/type-string.h"
+
 #include <gtest/gtest.h>
 #include <limits>
 #include <iostream>
@@ -31,12 +33,13 @@ void testSerializationExactEquality(const T& val) {
   BlobDecoder decoder(encoder.data(), encoder.size());
 
   decoder(decodedVal);
+  decoder.assertDone();
 
   EXPECT_EQ(decodedVal, val);
 }
 
 template <typename T>
-class IntegerSerializationTest : public ::testing::Test {};
+struct IntegerSerializationTest : ::testing::Test {};
 
 typedef ::testing::Types<
                 int8_t,
@@ -67,9 +70,11 @@ TEST(BlobHelperTest, TestInputs) {
   testSerializationExactEquality(false);
   testSerializationExactEquality(std::make_pair(false, 1));
   testSerializationExactEquality(std::make_pair(0xdeadbeef, 0xfaceb00c));
-  // Can't get StringData to link
-  //testSerializationExactEquality((const StringData*) nullptr);
 
+  testSerializationExactEquality((const StringData*) nullptr);
+  testSerializationExactEquality(const_cast<const StringData*>(staticEmptyString()));
+  const auto& heyo = makeStaticString("heyo");
+  testSerializationExactEquality(const_cast<const StringData*>(heyo));
 }
 
 }

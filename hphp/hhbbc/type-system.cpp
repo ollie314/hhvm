@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,6 +27,9 @@
 #include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/base/repo-auth-type-array.h"
 #include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/set-array.h"
 #include "hphp/hhbbc/index.h"
 
 namespace HPHP { namespace HHBBC {
@@ -53,6 +56,18 @@ bool mayHaveData(trep bits) {
   case BOptArr:  case BOptSArr:  case BOptCArr:
   case BOptArrN: case BOptSArrN: case BOptCArrN:
   case BRef:
+  case BVec:      case BSVec:      case BCVec:
+  case BVecN:     case BSVecN:     case BCVecN:
+  case BOptVec:   case BOptSVec:   case BOptCVec:
+  case BOptVecN:  case BOptSVecN:  case BOptCVecN:
+  case BDict:     case BSDict:     case BCDict:
+  case BDictN:    case BSDictN:    case BCDictN:
+  case BOptDict:  case BOptSDict:  case BOptCDict:
+  case BOptDictN: case BOptSDictN: case BOptCDictN:
+  case BKeyset:     case BSKeyset:     case BCKeyset:
+  case BKeysetN:    case BSKeysetN:    case BCKeysetN:
+  case BOptKeyset:  case BOptSKeyset:  case BOptCKeyset:
+  case BOptKeysetN: case BOptSKeysetN: case BOptCKeysetN:
     return true;
 
   case BBottom:
@@ -63,12 +78,21 @@ bool mayHaveData(trep bits) {
   case BCStr:
   case BSArrE:
   case BCArrE:
+  case BSVecE:
+  case BCVecE:
+  case BSDictE:
+  case BCDictE:
+  case BSKeysetE:
+  case BCKeysetE:
   case BRes:
   case BNull:
   case BNum:
   case BBool:
   case BStr:
   case BArrE:
+  case BVecE:
+  case BDictE:
+  case BKeysetE:
   case BInitPrim:
   case BPrim:
   case BInitUnc:
@@ -82,6 +106,15 @@ bool mayHaveData(trep bits) {
   case BOptSArrE:
   case BOptCArrE:
   case BOptArrE:
+  case BOptSVecE:
+  case BOptCVecE:
+  case BOptVecE:
+  case BOptSDictE:
+  case BOptCDictE:
+  case BOptDictE:
+  case BOptSKeysetE:
+  case BOptCKeysetE:
+  case BOptKeysetE:
   case BOptRes:
   case BInitCell:
   case BCell:
@@ -126,6 +159,18 @@ bool isPredefined(trep bits) {
   case BCArrE:
   case BSArrN:
   case BCArrN:
+  case BSVecE:
+  case BCVecE:
+  case BSVecN:
+  case BCVecN:
+  case BSDictE:
+  case BCDictE:
+  case BSDictN:
+  case BCDictN:
+  case BSKeysetE:
+  case BCKeysetE:
+  case BSKeysetN:
+  case BCKeysetN:
   case BObj:
   case BRes:
   case BCls:
@@ -139,6 +184,21 @@ bool isPredefined(trep bits) {
   case BArrE:
   case BArrN:
   case BArr:
+  case BSVec:
+  case BCVec:
+  case BVecE:
+  case BVecN:
+  case BVec:
+  case BSDict:
+  case BCDict:
+  case BDictE:
+  case BDictN:
+  case BDict:
+  case BSKeyset:
+  case BCKeyset:
+  case BKeysetE:
+  case BKeysetN:
+  case BKeyset:
   case BInitPrim:
   case BPrim:
   case BInitUnc:
@@ -161,6 +221,33 @@ bool isPredefined(trep bits) {
   case BOptArrE:
   case BOptArrN:
   case BOptArr:
+  case BOptSVecN:
+  case BOptCVecN:
+  case BOptSVecE:
+  case BOptCVecE:
+  case BOptSVec:
+  case BOptCVec:
+  case BOptVecE:
+  case BOptVecN:
+  case BOptVec:
+  case BOptSDictN:
+  case BOptCDictN:
+  case BOptSDictE:
+  case BOptCDictE:
+  case BOptSDict:
+  case BOptCDict:
+  case BOptDictE:
+  case BOptDictN:
+  case BOptDict:
+  case BOptSKeysetN:
+  case BOptCKeysetN:
+  case BOptSKeysetE:
+  case BOptCKeysetE:
+  case BOptSKeyset:
+  case BOptCKeyset:
+  case BOptKeysetE:
+  case BOptKeysetN:
+  case BOptKeyset:
   case BOptObj:
   case BOptRes:
   case BInitCell:
@@ -192,6 +279,18 @@ bool canBeOptional(trep bits) {
   case BSArrN:
   case BCArrE:
   case BCArrN:
+  case BSVecE:
+  case BSVecN:
+  case BCVecE:
+  case BCVecN:
+  case BSDictE:
+  case BSDictN:
+  case BCDictE:
+  case BCDictN:
+  case BSKeysetE:
+  case BSKeysetN:
+  case BCKeysetE:
+  case BCKeysetN:
   case BObj:
   case BRes:
     return true;
@@ -205,6 +304,21 @@ bool canBeOptional(trep bits) {
   case BArrE:
   case BArrN:
   case BArr:
+  case BSVec:
+  case BCVec:
+  case BVecE:
+  case BVecN:
+  case BVec:
+  case BSDict:
+  case BCDict:
+  case BDictE:
+  case BDictN:
+  case BDict:
+  case BSKeyset:
+  case BCKeyset:
+  case BKeysetE:
+  case BKeysetN:
+  case BKeyset:
     return true;
 
   case BCls:
@@ -229,6 +343,33 @@ bool canBeOptional(trep bits) {
   case BOptArrN:
   case BOptArrE:
   case BOptArr:
+  case BOptSVecE:
+  case BOptCVecE:
+  case BOptSVecN:
+  case BOptCVecN:
+  case BOptSVec:
+  case BOptCVec:
+  case BOptVecN:
+  case BOptVecE:
+  case BOptVec:
+  case BOptSDictE:
+  case BOptCDictE:
+  case BOptSDictN:
+  case BOptCDictN:
+  case BOptSDict:
+  case BOptCDict:
+  case BOptDictN:
+  case BOptDictE:
+  case BOptDict:
+  case BOptSKeysetE:
+  case BOptCKeysetE:
+  case BOptSKeysetN:
+  case BOptCKeysetN:
+  case BOptSKeyset:
+  case BOptCKeyset:
+  case BOptKeysetN:
+  case BOptKeysetE:
+  case BOptKeyset:
   case BOptObj:
   case BOptRes:
     return false;
@@ -253,21 +394,32 @@ bool canBeOptional(trep bits) {
  * SArrN|CArrE.  This function checks a few cases to ensure combining array
  * type bits leaves it predefined.
  */
-trep combine_arr_bits(trep a, trep b) {
-  assert((a & BArr) == a || (a & BOptArr) == a);
-  assert((b & BArr) == b || (b & BOptArr) == b);
+template<trep B>
+trep combine_arrish_bits(trep a, trep b) {
+  DEBUG_ONLY constexpr trep OptB = static_cast<trep>(BInitNull | B);
+  assert((a & B) == a || (a & OptB) == a);
+  assert((b & B) == b || (b & OptB) == b);
   auto const combined = static_cast<trep>(a | b);
-  auto const arr_part = combined & BArr;
-  // 2 bit cases:
-  if (arr_part == (BSArrN|BCArrE)) return static_cast<trep>(combined|BArr);
-  if (arr_part == (BSArrE|BCArrN)) return static_cast<trep>(combined|BArr);
-  // 3 bit cases:
-  if (arr_part == (BArrN|BCArrE)) return static_cast<trep>(combined|BArr);
-  if (arr_part == (BArrN|BSArrE)) return static_cast<trep>(combined|BArr);
-  if (arr_part == (BArrE|BCArrN)) return static_cast<trep>(combined|BArr);
-  if (arr_part == (BArrE|BSArrN)) return static_cast<trep>(combined|BArr);
+  auto const arr_part = static_cast<trep>(combined & B);
+  if (!isPredefined(arr_part)) return static_cast<trep>(combined|B);
   assert(isPredefined(combined));
   return combined;
+}
+
+trep combine_arr_bits(trep a, trep b) {
+  return combine_arrish_bits<BArr>(a, b);
+}
+
+trep combine_vec_bits(trep a, trep b) {
+  return combine_arrish_bits<BVec>(a, b);
+}
+
+trep combine_dict_bits(trep a, trep b) {
+  return combine_arrish_bits<BDict>(a, b);
+}
+
+trep combine_keyset_bits(trep a, trep b) {
+  return combine_arrish_bits<BKeyset>(a, b);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -319,7 +471,7 @@ folly::Optional<DArrStruct> toDArrStruct(SArray ar) {
   auto map = StructMap{};
   for (ArrayIter iter(ar); iter; ++iter) {
     auto const key = *iter.first().asTypedValue();
-    if (!IS_STRING_TYPE(key.m_type)) return folly::none;
+    if (!isStringType(key.m_type)) return folly::none;
     map[key.m_data.pstr] = from_cell(*iter.secondRef().asTypedValue());
   }
 
@@ -338,6 +490,46 @@ DArrMapN toDArrMapN(SArray ar) {
   }
 
   return DArrMapN { k, v };
+}
+
+DVec toDVec(SArray ar) {
+  assert(ar->isVecArray());
+  assert(!ar->empty());
+
+  auto v = TBottom;
+  for (ArrayIter iter(ar); iter; ++iter) {
+    v = union_of(v, from_cell(*iter.secondRef().asTypedValue()));
+  }
+
+  return DVec { v, int64_t(ar->size()) };
+}
+
+DDict toDDict(SArray ar) {
+  assert(ar->isDict());
+  assert(!ar->empty());
+
+  auto k = TBottom;
+  auto v = TBottom;
+  for (ArrayIter iter(ar); iter; ++iter) {
+    auto const key = *iter.first().asTypedValue();
+    k = union_of(k, from_cell(key));
+    v = union_of(v, from_cell(*iter.secondRef().asTypedValue()));
+  }
+
+  return DDict { k, v };
+}
+
+DKeyset toDKeyset(SArray ar) {
+  assert(ar->isKeyset());
+  assert(!ar->empty());
+
+  auto kv = TBottom;
+  for (ArrayIter iter(ar); iter; ++iter) {
+    auto const key = *iter.first().asTypedValue();
+    kv = union_of(kv, from_cell(key));
+  }
+
+  return DKeyset { kv };
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -567,7 +759,7 @@ struct ArrUnionImpl {
     /*
      * With the current meaning of structs, if the keys are different, we can't
      * do anything better than going to a map type.  The reason for this is
-     * that our struct types currently are implying the presense of all the
+     * that our struct types currently are implying the presence of all the
      * keys in the struct (it might be worth adding some more types for struct
      * subtyping to handle this better.)
      */
@@ -779,6 +971,9 @@ Type::Type(const Type& o) noexcept
   switch (m_dataTag) {
   case DataTag::None:   return;
   case DataTag::Str:    m_data.sval = o.m_data.sval; return;
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal: m_data.aval = o.m_data.aval; return;
   case DataTag::Int:    m_data.ival = o.m_data.ival; return;
   case DataTag::Dbl:    m_data.dval = o.m_data.dval; return;
@@ -799,6 +994,15 @@ Type::Type(const Type& o) noexcept
   case DataTag::ArrMapN:
     new (&m_data.amapn) copy_ptr<DArrMapN>(o.m_data.amapn);
     return;
+  case DataTag::Vec:
+    new (&m_data.vec) copy_ptr<DVec>(o.m_data.vec);
+    return;
+  case DataTag::Dict:
+    new (&m_data.dict) copy_ptr<DDict>(o.m_data.dict);
+    return;
+  case DataTag::Keyset:
+    new (&m_data.keyset) copy_ptr<DKeyset>(o.m_data.keyset);
+    return;
   }
   not_reached();
 }
@@ -814,6 +1018,9 @@ Type::Type(Type&& o) noexcept
   switch (m_dataTag) {
   case DataTag::None:   return;
   case DataTag::Str:    m_data.sval = o.m_data.sval; return;
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal: m_data.aval = o.m_data.aval; return;
   case DataTag::Int:    m_data.ival = o.m_data.ival; return;
   case DataTag::Dbl:    m_data.dval = o.m_data.dval; return;
@@ -833,6 +1040,15 @@ Type::Type(Type&& o) noexcept
     return;
   case DataTag::ArrMapN:
     new (&m_data.amapn) copy_ptr<DArrMapN>(move(o.m_data.amapn));
+    return;
+  case DataTag::Vec:
+    new (&m_data.vec) copy_ptr<DVec>(move(o.m_data.vec));
+    return;
+  case DataTag::Dict:
+    new (&m_data.dict) copy_ptr<DDict>(move(o.m_data.dict));
+    return;
+  case DataTag::Keyset:
+    new (&m_data.keyset) copy_ptr<DKeyset>(move(o.m_data.keyset));
     return;
   }
   not_reached();
@@ -859,6 +1075,9 @@ Type::~Type() noexcept {
   switch (m_dataTag) {
   case DataTag::None:
   case DataTag::Str:
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal:
   case DataTag::Int:
   case DataTag::Dbl:
@@ -883,6 +1102,15 @@ Type::~Type() noexcept {
     return;
   case DataTag::ArrMapN:
     m_data.amapn.~copy_ptr<DArrMapN>();
+    return;
+  case DataTag::Vec:
+    m_data.vec.~copy_ptr<DVec>();
+    return;
+  case DataTag::Dict:
+    m_data.dict.~copy_ptr<DDict>();
+    return;
+  case DataTag::Keyset:
+    m_data.keyset.~copy_ptr<DKeyset>();
     return;
   }
   not_reached();
@@ -916,6 +1144,12 @@ Ret Type::dj2nd(const Type& o, DJHelperFn<Ret,T,Function> f) const {
   case DataTag::Dbl:        return f();
   case DataTag::Cls:        return f();
   case DataTag::RefInner:   return f();
+  case DataTag::VecVal:     return f();
+  case DataTag::DictVal:    return f();
+  case DataTag::KeysetVal:  return f();
+  case DataTag::Vec:        return f();
+  case DataTag::Dict:       return f();
+  case DataTag::Keyset:     return f();
   case DataTag::ArrVal:     return f(o.m_data.aval);
   case DataTag::ArrPacked:  return f(*o.m_data.apacked);
   case DataTag::ArrPackedN: return f(*o.m_data.apackedn);
@@ -946,6 +1180,12 @@ Type::disjointDataFn(const Type& o, Function f) const {
   case DataTag::Dbl:        return f();
   case DataTag::Cls:        return f();
   case DataTag::RefInner:   return f();
+  case DataTag::VecVal:     return f();
+  case DataTag::DictVal:    return f();
+  case DataTag::KeysetVal:  return f();
+  case DataTag::Vec:        return f();
+  case DataTag::Dict:       return f();
+  case DataTag::Keyset:     return f();
   case DataTag::ArrVal:     return dj2nd(o, djbind<R>(f, m_data.aval));
   case DataTag::ArrPacked:  return dj2nd(o, djbind<R>(f, *m_data.apacked));
   case DataTag::ArrPackedN: return dj2nd(o, djbind<R>(f, *m_data.apackedn));
@@ -971,6 +1211,9 @@ bool Type::equivData(const Type& o) const {
     not_reached();
   case DataTag::Str:
     return m_data.sval == o.m_data.sval;
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal:
     return m_data.aval == o.m_data.aval;
   case DataTag::Int:
@@ -998,6 +1241,14 @@ bool Type::equivData(const Type& o) const {
   case DataTag::ArrMapN:
     return m_data.amapn->key == o.m_data.amapn->key &&
            m_data.amapn->val == o.m_data.amapn->val;
+  case DataTag::Vec:
+    return m_data.vec->val == o.m_data.vec->val &&
+           m_data.vec->len == o.m_data.vec->len;
+  case DataTag::Dict:
+    return m_data.dict->key == o.m_data.dict->key &&
+           m_data.dict->val == o.m_data.dict->val;
+  case DataTag::Keyset:
+    return m_data.keyset->keyval == o.m_data.keyset->keyval;
   }
   not_reached();
 }
@@ -1029,6 +1280,9 @@ bool Type::subtypeData(const Type& o) const {
     }
     return false;
   case DataTag::Str:
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal:
   case DataTag::Int:
   case DataTag::Dbl:
@@ -1045,6 +1299,14 @@ bool Type::subtypeData(const Type& o) const {
   case DataTag::ArrMapN:
     return m_data.amapn->key.subtypeOf(o.m_data.amapn->key) &&
            m_data.amapn->val.subtypeOf(o.m_data.amapn->val);
+  case DataTag::Vec:
+    return m_data.vec->val.subtypeOf(o.m_data.vec->val) &&
+           m_data.vec->len == o.m_data.vec->len;
+  case DataTag::Dict:
+    return m_data.dict->key.subtypeOf(o.m_data.dict->key) &&
+           m_data.dict->val.subtypeOf(o.m_data.dict->val);
+  case DataTag::Keyset:
+    return m_data.keyset->keyval.subtypeOf(o.m_data.keyset->keyval);
   }
   not_reached();
 }
@@ -1079,6 +1341,9 @@ bool Type::couldBeData(const Type& o) const {
     return false;
   case DataTag::RefInner:
     return m_data.inner->couldBe(*o.m_data.inner);
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal:
     return m_data.aval == o.m_data.aval;
   case DataTag::Str:
@@ -1096,6 +1361,15 @@ bool Type::couldBeData(const Type& o) const {
   case DataTag::ArrMapN:
     return m_data.amapn->key.couldBe(o.m_data.amapn->key) &&
            m_data.amapn->val.couldBe(o.m_data.amapn->val);
+  case DataTag::Vec:
+    return m_data.vec->val.couldBe(o.m_data.vec->val) &&
+      (!m_data.vec->len || !o.m_data.vec->len ||
+       *m_data.vec->len == *o.m_data.vec->len);
+  case DataTag::Dict:
+    return m_data.dict->key.couldBe(o.m_data.dict->key) &&
+           m_data.dict->val.couldBe(o.m_data.dict->val);
+  case DataTag::Keyset:
+    return m_data.keyset->keyval.couldBe(o.m_data.keyset->keyval);
   }
   not_reached();
 }
@@ -1241,7 +1515,13 @@ bool Type::checkInvariants() const {
       t->checkInvariants();
     }
     break;
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::ArrVal:
+    assert(m_dataTag != DataTag::VecVal || m_data.aval->isVecArray());
+    assert(m_dataTag != DataTag::DictVal || m_data.aval->isDict());
+    assert(m_dataTag != DataTag::KeysetVal || m_data.aval->isKeyset());
     assert(m_data.aval->isStatic());
     assert(!m_data.aval->empty());
     break;
@@ -1263,6 +1543,16 @@ bool Type::checkInvariants() const {
   case DataTag::ArrMapN:
     assert(m_data.amapn->key.subtypeOf(TInitCell));
     assert(m_data.amapn->val.subtypeOf(TInitGen));
+    break;
+  case DataTag::Vec:
+    assert(m_data.vec->val.subtypeOf(TInitCell));
+    break;
+  case DataTag::Dict:
+    assert(m_data.dict->key.subtypeOf(TInitCell));
+    assert(m_data.dict->val.subtypeOf(TInitCell));
+    break;
+  case DataTag::Keyset:
+    assert(m_data.keyset->keyval.subtypeOf(TInitCell));
     break;
   }
   return true;
@@ -1319,6 +1609,7 @@ Type dval(double val) {
 
 Type aval(SArray val) {
   assert(val->isStatic());
+  assert(!val->isDict() && !val->isVecArray() && !val->isKeyset());
   if (val->empty()) return aempty();
   auto r        = Type { BSArrN };
   r.m_data.aval = val;
@@ -1330,6 +1621,147 @@ Type aempty()         { return Type { BSArrE }; }
 Type sempty()         { return sval(s_empty.get()); }
 Type counted_aempty() { return Type { BCArrE }; }
 Type some_aempty()    { return Type { BArrE }; }
+
+Type vec_val(SArray val) {
+  assert(val->isStatic());
+  assert(val->isVecArray());
+  if (val->empty()) return vec_empty();
+  auto r        = Type { BSVecN };
+  r.m_data.aval = val;
+  r.m_dataTag   = DataTag::VecVal;
+  return r;
+}
+
+Type vec_empty()         { return Type { BSVecE }; }
+Type counted_vec_empty() { return Type { BCVecE }; }
+Type some_vec_empty()    { return Type { BVecE }; }
+
+template<trep t>
+Type vec_n_impl(Type ty, folly::Optional<int64_t> count) {
+  if (count && !*count) return vec_empty();
+  auto ret = Type { t };
+  new (&ret.m_data.vec) copy_ptr<DVec>(
+    make_copy_ptr<DVec>(std::move(ty), count)
+  );
+  ret.m_dataTag = DataTag::Vec;
+  return ret;
+}
+
+Type vec_n(Type ty, folly::Optional<int64_t> count) {
+  return vec_n_impl<BVecN>(std::move(ty), std::move(count));
+}
+
+Type cvec_n(Type ty, folly::Optional<int64_t> count) {
+  return vec_n_impl<BCVecN>(std::move(ty), std::move(count));
+}
+
+Type svec_n(Type ty, folly::Optional<int64_t> count) {
+  return vec_n_impl<BSVecN>(std::move(ty), std::move(count));
+}
+
+Type dict_val(SArray val) {
+  assert(val->isStatic());
+  assert(val->isDict());
+  if (val->empty()) return dict_empty();
+  auto r        = Type { BSDictN };
+  r.m_data.aval = val;
+  r.m_dataTag   = DataTag::DictVal;
+  return r;
+}
+
+Type dict_empty()         { return Type { BSDictE }; }
+Type counted_dict_empty() { return Type { BCDictE }; }
+Type some_dict_empty()    { return Type { BDictE }; }
+
+template<trep t>
+Type dict_n_impl(Type k, Type v) {
+  auto ret = Type { t };
+  new (&ret.m_data.dict) copy_ptr<DDict>(
+    make_copy_ptr<DDict>(std::move(k), std::move(v))
+  );
+  ret.m_dataTag = DataTag::Dict;
+  return ret;
+}
+
+Type dict_n(Type k, Type v) {
+  return dict_n_impl<BDictN>(std::move(k), std::move(v));
+}
+
+Type cdict_n(Type k, Type v) {
+  return dict_n_impl<BCDictN>(std::move(k), std::move(v));
+}
+
+Type sdict_n(Type k, Type v) {
+  return dict_n_impl<BSDictN>(std::move(k), std::move(v));
+}
+
+Type keyset_val(SArray val) {
+  assert(val->isStatic());
+  assert(val->isKeyset());
+  if (val->empty()) return keyset_empty();
+  auto r        = Type { BSKeysetN };
+  r.m_data.aval = val;
+  r.m_dataTag   = DataTag::KeysetVal;
+  return r;
+}
+
+Type keyset_empty()         { return Type { BSKeysetE }; }
+Type counted_keyset_empty() { return Type { BCKeysetE }; }
+Type some_keyset_empty()    { return Type { BKeysetE }; }
+
+struct StrictKey {
+  folly::Optional<int64_t> i;
+  folly::Optional<SString> s;
+  Type type;
+};
+
+template<trep t>
+Type keyset_n_impl(Type kv) {
+  kv = disect_strict_key(kv).type;
+  if (kv == TBottom) return TKeyset;
+  auto ret = Type { t };
+  new (&ret.m_data.keyset) copy_ptr<DKeyset>(
+    make_copy_ptr<DKeyset>(std::move(kv))
+  );
+  ret.m_dataTag = DataTag::Keyset;
+  return ret;
+}
+
+Type keyset_n(Type kv) {
+  return keyset_n_impl<BKeysetN>(std::move(kv));
+}
+
+Type ckeyset_n(Type kv) {
+  return keyset_n_impl<BCKeysetN>(std::move(kv));
+}
+
+Type skeyset_n(Type kv) {
+  return keyset_n_impl<BSKeysetN>(std::move(kv));
+}
+
+Type toDVecType(Type ty) {
+  assert(ty.m_dataTag == DataTag::VecVal);
+  auto dv = toDVec(ty.m_data.aval);
+  auto r = vec_n(std::move(dv.val), dv.len);
+  r.m_bits = ty.m_bits;
+  return r;
+}
+
+Type toDDictType(Type ty) {
+  assert(ty.m_dataTag == DataTag::DictVal);
+  auto dv = toDDict(ty.m_data.aval);
+  auto r = dict_n(std::move(dv.key), std::move(dv.val));
+  r.m_bits = ty.m_bits;
+  return r;
+}
+
+Type toDKeysetType(Type ty) {
+  assert(ty.m_dataTag == DataTag::KeysetVal);
+  auto kv = toDKeyset(ty.m_data.aval);
+  auto r = keyset_n(std::move(kv.keyval));
+  r.m_bits = ty.m_bits;
+  return r;
+}
 
 Type subObj(res::Class val) {
   auto r = Type { BObj };
@@ -1387,6 +1819,12 @@ bool is_specialized_array(const Type& t) {
   case DataTag::Dbl:
   case DataTag::Cls:
   case DataTag::RefInner:
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
+  case DataTag::Vec:
+  case DataTag::Dict:
+  case DataTag::Keyset:
     return false;
   case DataTag::ArrVal:
   case DataTag::ArrPacked:
@@ -1396,6 +1834,120 @@ bool is_specialized_array(const Type& t) {
     return true;
   }
   not_reached();
+}
+
+bool is_specialized_vec(const Type& t) {
+  return t.m_dataTag == DataTag::Vec || t.m_dataTag == DataTag::VecVal;
+}
+
+bool is_specialized_dict(const Type& t) {
+  return t.m_dataTag == DataTag::Dict || t.m_dataTag == DataTag::DictVal;
+}
+
+bool is_specialized_keyset(const Type& t) {
+  return t.m_dataTag == DataTag::Keyset || t.m_dataTag == DataTag::KeysetVal;
+}
+
+Type spec_vec_union(Type specVecA, Type vecB) {
+  auto const bits = combine_vec_bits(specVecA.m_bits, vecB.m_bits);
+  if (!is_specialized_vec(vecB)) {
+    if (vecB.subtypeOf(TOptVecE)) {
+      specVecA.m_bits = bits;
+      return specVecA;
+    }
+    return Type { bits };
+  }
+
+  if (specVecA.m_dataTag == DataTag::VecVal) {
+    if (vecB.m_dataTag == DataTag::VecVal) {
+      if (specVecA.m_data.aval == vecB.m_data.aval) {
+        specVecA.m_bits = bits;
+        return specVecA;
+      }
+      vecB = toDVecType(vecB);
+    }
+    specVecA = toDVecType(specVecA);
+  } else if (vecB.m_dataTag == DataTag::VecVal) {
+    vecB = toDVecType(vecB);
+  }
+  assert(specVecA.m_dataTag == DataTag::Vec);
+  assert(vecB.m_dataTag == DataTag::Vec);
+
+  auto& lenA = specVecA.m_data.vec->len;
+  auto& valA = specVecA.m_data.vec->val;
+  if (!lenA || !vecB.m_data.vec->len || *lenA != *vecB.m_data.vec->len) {
+    lenA = folly::none;
+  }
+  valA = union_of(valA, vecB.m_data.vec->val);
+  specVecA.m_bits = bits;
+
+  return specVecA;
+}
+
+Type spec_dict_union(Type specDictA, Type dictB) {
+  auto const bits = combine_dict_bits(specDictA.m_bits, dictB.m_bits);
+  if (!is_specialized_dict(dictB)) {
+    if (dictB.subtypeOf(TOptDictE)) {
+      specDictA.m_bits = bits;
+      return specDictA;
+    }
+    return Type { bits };
+  }
+
+  if (specDictA.m_dataTag == DataTag::DictVal) {
+    if (dictB.m_dataTag == DataTag::DictVal) {
+      if (specDictA.m_data.aval == dictB.m_data.aval) {
+        specDictA.m_bits = bits;
+        return specDictA;
+      }
+      dictB = toDDictType(dictB);
+    }
+    specDictA = toDDictType(specDictA);
+  } else if (dictB.m_dataTag == DataTag::DictVal) {
+    dictB = toDDictType(dictB);
+  }
+  assert(specDictA.m_dataTag == DataTag::Dict);
+  assert(dictB.m_dataTag == DataTag::Dict);
+
+  auto& keyA = specDictA.m_data.dict->key;
+  auto& valA = specDictA.m_data.dict->val;
+  keyA = union_of(keyA, dictB.m_data.dict->key);
+  valA = union_of(valA, dictB.m_data.dict->val);
+  specDictA.m_bits = bits;
+
+  return specDictA;
+}
+
+Type spec_keyset_union(Type specKeysetA, Type keysetB) {
+  auto const bits = combine_keyset_bits(specKeysetA.m_bits, keysetB.m_bits);
+  if (!is_specialized_keyset(keysetB)) {
+    if (keysetB.subtypeOf(TOptKeysetE)) {
+      specKeysetA.m_bits = bits;
+      return specKeysetA;
+    }
+    return Type { bits };
+  }
+
+  if (specKeysetA.m_dataTag == DataTag::KeysetVal) {
+    if (keysetB.m_dataTag == DataTag::KeysetVal) {
+      if (specKeysetA.m_data.aval == keysetB.m_data.aval) {
+        specKeysetA.m_bits = bits;
+        return specKeysetA;
+      }
+      keysetB = toDKeysetType(keysetB);
+    }
+    specKeysetA = toDKeysetType(specKeysetA);
+  } else if (keysetB.m_dataTag == DataTag::KeysetVal) {
+    keysetB = toDKeysetType(keysetB);
+  }
+  assert(specKeysetA.m_dataTag == DataTag::Keyset);
+  assert(keysetB.m_dataTag == DataTag::Keyset);
+
+  auto& kvA = specKeysetA.m_data.keyset->keyval;
+  kvA = union_of(kvA, keysetB.m_data.keyset->keyval);
+  specKeysetA.m_bits = bits;
+
+  return specKeysetA;
 }
 
 Type arr_packed(std::vector<Type> elems) {
@@ -1532,7 +2084,16 @@ folly::Optional<Cell> tv(Type t) {
   case BTrue:        return make_tv<KindOfBoolean>(true);
   case BFalse:       return make_tv<KindOfBoolean>(false);
   case BCArrE:       /* fallthrough */
-  case BSArrE:       return make_tv<KindOfArray>(staticEmptyArray());
+  case BSArrE:       return make_tv<KindOfPersistentArray>(staticEmptyArray());
+  case BCVecE:
+  case BSVecE:
+    return make_tv<KindOfPersistentVec>(staticEmptyVecArray());
+  case BCDictE:
+  case BSDictE:
+    return make_tv<KindOfPersistentDict>(staticEmptyDictArray());
+  case BCKeysetE:
+  case BSKeysetE:
+    return make_tv<KindOfPersistentKeyset>(staticEmptyKeysetArray());
   default:
     if (is_opt(t)) {
       break;
@@ -1540,10 +2101,27 @@ folly::Optional<Cell> tv(Type t) {
     switch (t.m_dataTag) {
     case DataTag::Int:    return make_tv<KindOfInt64>(t.m_data.ival);
     case DataTag::Dbl:    return make_tv<KindOfDouble>(t.m_data.dval);
-    case DataTag::Str:    return make_tv<KindOfStaticString>(t.m_data.sval);
+    case DataTag::Str:    return make_tv<KindOfPersistentString>(t.m_data.sval);
+    case DataTag::VecVal:
+    case DataTag::DictVal:
+    case DataTag::KeysetVal:
     case DataTag::ArrVal:
       if ((t.m_bits & BArrN) == t.m_bits) {
-        return make_tv<KindOfArray>(const_cast<ArrayData*>(t.m_data.aval));
+        return make_tv<KindOfPersistentArray>(
+          const_cast<ArrayData*>(t.m_data.aval)
+        );
+      } else if ((t.m_bits & BVecN) == t.m_bits) {
+        return make_tv<KindOfPersistentVec>(
+          const_cast<ArrayData*>(t.m_data.aval)
+        );
+      } else if ((t.m_bits & BDictN) == t.m_bits) {
+        return make_tv<KindOfPersistentDict>(
+          const_cast<ArrayData*>(t.m_data.aval)
+        );
+      } else if ((t.m_bits & BKeysetN) == t.m_bits) {
+        return make_tv<KindOfPersistentKeyset>(
+          const_cast<ArrayData*>(t.m_data.aval)
+        );
       }
       break;
     case DataTag::ArrStruct:
@@ -1558,6 +2136,9 @@ folly::Optional<Cell> tv(Type t) {
     case DataTag::Obj:
     case DataTag::Cls:
     case DataTag::None:
+    case DataTag::Vec:
+    case DataTag::Dict:
+    case DataTag::Keyset:
       break;
     }
   }
@@ -1573,6 +2154,9 @@ Type type_of_istype(IsTypeOp op) {
   case IsTypeOp::Dbl:    return TDbl;
   case IsTypeOp::Str:    return TStr;
   case IsTypeOp::Arr:    return TArr;
+  case IsTypeOp::Vec:    return TVec;
+  case IsTypeOp::Dict:   return TDict;
+  case IsTypeOp::Keyset: return TKeyset;
   case IsTypeOp::Obj:    return TObj;
   case IsTypeOp::Scalar: always_assert(0);
   }
@@ -1601,22 +2185,42 @@ Type from_cell(Cell cell) {
   case KindOfInt64:    return ival(cell.m_data.num);
   case KindOfDouble:   return dval(cell.m_data.dbl);
 
-  case KindOfStaticString:
+  case KindOfPersistentString:
   case KindOfString:
     always_assert(cell.m_data.pstr->isStatic());
     return sval(cell.m_data.pstr);
 
+  case KindOfPersistentVec:
+  case KindOfVec:
+    always_assert(cell.m_data.parr->isStatic());
+    always_assert(cell.m_data.parr->isVecArray());
+    return vec_val(cell.m_data.parr);
+
+  case KindOfPersistentDict:
+  case KindOfDict:
+    always_assert(cell.m_data.parr->isStatic());
+    always_assert(cell.m_data.parr->isDict());
+    return dict_val(cell.m_data.parr);
+
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:
+    always_assert(cell.m_data.parr->isStatic());
+    always_assert(cell.m_data.parr->isKeyset());
+    return keyset_val(cell.m_data.parr);
+
+  case KindOfPersistentArray:
   case KindOfArray:
     always_assert(cell.m_data.parr->isStatic());
+    always_assert(cell.m_data.parr->isPHPArray());
     return aval(cell.m_data.parr);
 
+  case KindOfClass:
   case KindOfRef:
   case KindOfObject:
   case KindOfResource:
-  default:
     break;
   }
-  always_assert(0 && "reference counted type in from_cell");
+  always_assert(0 && "reference counted/class type in from_cell");
 }
 
 Type from_DataType(DataType dt) {
@@ -1626,13 +2230,20 @@ Type from_DataType(DataType dt) {
   case KindOfBoolean:  return TBool;
   case KindOfInt64:    return TInt;
   case KindOfDouble:   return TDbl;
-  case KindOfStaticString:
+  case KindOfPersistentString:
   case KindOfString:   return TStr;
+  case KindOfPersistentVec:
+  case KindOfVec:      return TVec;
+  case KindOfPersistentDict:
+  case KindOfDict:     return TDict;
+  case KindOfPersistentKeyset:
+  case KindOfKeyset:   return TKeyset;
+  case KindOfPersistentArray:
   case KindOfArray:    return TArr;
   case KindOfRef:      return TRef;
   case KindOfObject:   return TObj;
   case KindOfResource: return TRes;
-  default:
+  case KindOfClass:
     break;
   }
   always_assert(0 && "dt in from_DataType didn't satisfy preconditions");
@@ -1655,6 +2266,8 @@ Type from_hni_constraint(SString s) {
   if (!strcasecmp(p, "HH\\float"))    return union_of(ret, TDbl);
   if (!strcasecmp(p, "HH\\num"))      return union_of(ret, TNum);
   if (!strcasecmp(p, "HH\\string"))   return union_of(ret, TStr);
+  if (!strcasecmp(p, "HH\\dict"))     return union_of(ret, TDict);
+  if (!strcasecmp(p, "HH\\vec"))      return union_of(ret, TVec);
   if (!strcasecmp(p, "array"))        return union_of(ret, TArr);
   if (!strcasecmp(p, "HH\\mixed"))    return TInitGen;
 
@@ -1679,6 +2292,12 @@ Type Type::unionArr(const Type& a, const Type& b) {
   }
 
   switch (a.m_dataTag) {
+  case DataTag::Vec:
+  case DataTag::Dict:
+  case DataTag::Keyset:
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
   case DataTag::None:
   case DataTag::Str:
   case DataTag::Obj:
@@ -1790,6 +2409,18 @@ Type union_of(Type a, Type b) {
     }
   }
 
+  if (is_specialized_vec(a) && b.subtypeOf(TOptVec)) {
+    return spec_vec_union(a, b);
+  }
+
+  if (is_specialized_dict(a) && b.subtypeOf(TOptDict)) {
+    return spec_dict_union(a, b);
+  }
+
+  if (is_specialized_keyset(a) && b.subtypeOf(TOptKeyset)) {
+    return spec_keyset_union(a, b);
+  }
+
   if (is_ref_with_inner(a) && is_ref_with_inner(b)) {
     return ref_to(union_of(*a.m_data.inner, *b.m_data.inner));
   }
@@ -1810,6 +2441,23 @@ Type union_of(Type a, Type b) {
   X(TNum)
   X(TStr)
   X(TArr)
+
+  X(TSVec)
+  X(TCVec)
+  X(TVecE)
+  X(TVecN)
+  X(TVec)
+  X(TSDict)
+  X(TCDict)
+  X(TDictE)
+  X(TDictN)
+  X(TDict)
+  X(TSKeyset)
+  X(TCKeyset)
+  X(TKeysetE)
+  X(TKeysetN)
+  X(TKeyset)
+
 
   /*
    * Merging option types tries to preserve subtype information where it's
@@ -1834,6 +2482,22 @@ Type union_of(Type a, Type b) {
   X(TOptCArr)
   X(TOptArr)
   X(TOptObj)
+
+  X(TOptSVec)
+  X(TOptCVec)
+  X(TOptVecE)
+  X(TOptVecN)
+  X(TOptVec)
+  X(TOptSDict)
+  X(TOptCDict)
+  X(TOptDictE)
+  X(TOptDictN)
+  X(TOptDict)
+  X(TOptSKeyset)
+  X(TOptCKeyset)
+  X(TOptKeysetE)
+  X(TOptKeysetN)
+  X(TOptKeyset)
 
   X(TInitPrim)
   X(TPrim)
@@ -1899,6 +2563,9 @@ Type loosen_statics(Type a) {
   // information, including whether the array is possibly empty.
   if (a.couldBe(TSStr)) a = union_of(a, TStr);
   if (a.couldBe(TSArr)) a = union_of(a, TArr);
+  if (a.couldBe(TSVec)) a = union_of(a, TVec);
+  if (a.couldBe(TSDict)) a = union_of(a, TDict);
+  if (a.couldBe(TSKeyset)) a = union_of(a, TKeyset);
   return a;
 }
 
@@ -1908,6 +2575,9 @@ Type loosen_values(Type a) {
          a.strictSubtypeOf(TBool) ? TBool :
          a.strictSubtypeOf(TSStr) ? TSStr :
          a.strictSubtypeOf(TSArr) ? TSArr :
+         a.strictSubtypeOf(TSVec) ? TSVec :
+         a.strictSubtypeOf(TSDict) ? TSDict :
+         a.strictSubtypeOf(TSKeyset) ? TSKeyset :
          a == TOptFalse || a == TOptTrue ? TOptBool :
          a;
 }
@@ -1940,7 +2610,7 @@ struct ArrKey {
   Type type;
 };
 
-ArrKey disect_key(const Type& keyTy) {
+ArrKey disect_array_key(const Type& keyTy) {
   auto ret = ArrKey{};
 
   if (keyTy.strictSubtypeOf(TInt)) {
@@ -2019,7 +2689,7 @@ ArrKey disect_key(const Type& keyTy) {
 Type array_elem(const Type& arr, const Type& undisectedKey) {
   assert(arr.subtypeOf(TArr));
 
-  auto const key = disect_key(undisectedKey);
+  auto const key = disect_array_key(undisectedKey);
   auto ty = [&]() -> Type {
     switch (arr.m_dataTag) {
     case DataTag::Str:
@@ -2028,6 +2698,12 @@ Type array_elem(const Type& arr, const Type& undisectedKey) {
     case DataTag::Dbl:
     case DataTag::Cls:
     case DataTag::RefInner:
+    case DataTag::Vec:
+    case DataTag::Dict:
+    case DataTag::Keyset:
+    case DataTag::VecVal:
+    case DataTag::DictVal:
+    case DataTag::KeysetVal:
       not_reached();
 
     case DataTag::None:
@@ -2084,7 +2760,8 @@ Type array_elem(const Type& arr, const Type& undisectedKey) {
 
   if (!ty.subtypeOf(TInitCell)) {
     ty = TInitCell;
-  } else if (arr.couldBe(TArrE)) {
+  } else if (arr.couldBe(TArrE) || arr.couldBe(TVecE) || arr.couldBe(TDictE) ||
+             arr.couldBe(TKeysetE)) {
     ty = union_of(std::move(ty), TInitNull);
   }
   return ty;
@@ -2106,7 +2783,7 @@ Type array_elem(const Type& arr, const Type& undisectedKey) {
 // Do the effects of array_set but without handling possibly emptiness
 // of `arr'.
 Type arrayN_set(Type arr, const Type& undisectedKey, const Type& val) {
-  auto const key = disect_key(undisectedKey);
+  auto const key = disect_array_key(undisectedKey);
 
   auto ensure_counted = [&] {
     // TODO(#3696042): this same logic should be in loosen_statics.
@@ -2127,6 +2804,12 @@ Type arrayN_set(Type arr, const Type& undisectedKey, const Type& val) {
   case DataTag::Dbl:
   case DataTag::Cls:
   case DataTag::RefInner:
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
+  case DataTag::Vec:
+  case DataTag::Dict:
+  case DataTag::Keyset:
     not_reached();
 
   case DataTag::None:
@@ -2218,7 +2901,7 @@ Type array_set(Type arr, const Type& undisectedKey, const Type& val) {
   }
 
   // Union in the effects of doing the set if the array was empty.
-  auto const key = disect_key(undisectedKey);
+  auto const key = disect_array_key(undisectedKey);
   auto emptyPart = [&] {
     if (key.s && !key.i) {
       auto map = StructMap{};
@@ -2244,6 +2927,12 @@ std::pair<Type,Type> arrayN_newelem_key(const Type& arr, const Type& val) {
   case DataTag::Dbl:
   case DataTag::Cls:
   case DataTag::RefInner:
+  case DataTag::VecVal:
+  case DataTag::DictVal:
+  case DataTag::KeysetVal:
+  case DataTag::Vec:
+  case DataTag::Dict:
+  case DataTag::Keyset:
     not_reached();
 
   case DataTag::None:
@@ -2338,7 +3027,16 @@ std::pair<Type,Type> iter_types(const Type& iterable) {
   case DataTag::Cls:
   case DataTag::RefInner:
     always_assert(0);
+  case DataTag::Vec:
+    return { TInt, iterable.m_data.vec->val };
+  case DataTag::Dict:
+    return { iterable.m_data.dict->key, iterable.m_data.dict->val };
+  case DataTag::Keyset:
+    return { iterable.m_data.keyset->keyval, iterable.m_data.keyset->keyval };
+  case DataTag::VecVal:
+  case DataTag::DictVal:
   case DataTag::ArrVal:
+  case DataTag::KeysetVal:
     {
       auto const mn = toDArrMapN(iterable.m_data.aval);
       return { mn.key, mn.val };
@@ -2358,6 +3056,416 @@ std::pair<Type,Type> iter_types(const Type& iterable) {
 
 //////////////////////////////////////////////////////////////////////
 
+struct VecKey {
+  folly::Optional<int64_t> i;
+  Type type;
+};
+
+VecKey disect_vec_key(const Type& keyTy) {
+  auto ret = VecKey{};
+  if (!keyTy.couldBe(TInt)) return {folly::none, TBottom};
+  if (keyTy.strictSubtypeOf(TInt)) {
+    ret.i = keyTy.m_data.ival;
+  }
+  ret.type = TInt;
+  return ret;
+}
+
+std::pair<Type, bool> vec_elem(const Type& vec, const Type& undisectedKey) {
+  auto const key = disect_vec_key(undisectedKey);
+  if (key.type == TBottom) return {TBottom, false};
+  if ((vec.m_bits & BVecE) == vec.m_bits) return {TBottom, false};
+
+  const bool maybeEmpty = vec.m_bits & BVecE;
+
+  switch (vec.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::DictVal:
+  case DataTag::Dict:
+  case DataTag::KeysetVal:
+  case DataTag::Keyset:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return {TInitCell, false};
+
+  case DataTag::VecVal: {
+    auto const ad = vec.m_data.aval;
+    if (key.i) {
+      if (auto const r = ad->nvGet(*key.i)) {
+        return {from_cell(*r), !maybeEmpty};
+      }
+      return {TBottom, false};
+    }
+    return {TInitCell, false};
+  }
+  case DataTag::Vec:
+    if (key.i && vec.m_data.vec->len) {
+      if (0 > *key.i || *key.i >= *vec.m_data.vec->len) return {TBottom, false};
+      return {vec.m_data.vec->val, !maybeEmpty};
+    }
+    return {vec.m_data.vec->val, false};
+  }
+  not_reached();
+}
+
+std::pair<Type, bool>
+vec_set(Type vec, const Type& undisectedKey, const Type& val) {
+  auto const key = disect_vec_key(undisectedKey);
+  if (key.type == TBottom) return {TBottom, false};
+  if ((vec.m_bits & BVecE) == vec.m_bits) return {TBottom, false};
+
+  const bool maybeEmpty = vec.m_bits & BVecE;
+  if (!(vec.m_bits & BCVec)) {
+    vec.m_bits = vec.m_bits == BSVecN ? BVecN : BVec;
+  }
+
+  switch (vec.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::DictVal:
+  case DataTag::Dict:
+  case DataTag::KeysetVal:
+  case DataTag::Keyset:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return {std::move(vec), false};
+
+  case DataTag::VecVal: {
+    vec = toDVecType(vec);
+    /* fallthrough */
+  }
+  case DataTag::Vec:
+    auto& ty = vec.m_data.vec->val;
+    ty = union_of(std::move(ty), val);
+    if (key.i && vec.m_data.vec->len) {
+      if (0 > *key.i || *key.i >= *vec.m_data.vec->len) return {TBottom, false};
+      return {vec, !maybeEmpty};
+    }
+    return {std::move(vec), false};
+  }
+  not_reached();
+}
+
+Type vec_newelem(Type vec, const Type& val) {
+  vec.m_bits = !(vec.m_bits & BSVec) ? BCVecN : BVecN;
+
+  switch (vec.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::DictVal:
+  case DataTag::Dict:
+  case DataTag::KeysetVal:
+  case DataTag::Keyset:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return vec;
+
+  case DataTag::VecVal: {
+    vec = toDVecType(vec);
+    /* fallthrough */
+  }
+  case DataTag::Vec:
+    auto& ty = vec.m_data.vec->val;
+    ty = union_of(std::move(ty), val);
+    if (vec.m_data.vec->len) (*vec.m_data.vec->len)++;
+    return vec;
+  }
+  not_reached();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+StrictKey disect_strict_key(const Type& keyTy) {
+  auto ret = StrictKey{};
+  if (!keyTy.couldBe(TInt) && !keyTy.couldBe(TStr)) {
+    ret.type = TBottom;
+    return ret;
+  }
+
+  if (keyTy.strictSubtypeOf(TInt)) {
+    ret.i = keyTy.m_data.ival;
+    ret.type = keyTy;
+    return ret;
+  }
+
+  if (keyTy.strictSubtypeOf(TStr) && keyTy.m_dataTag == DataTag::Str) {
+    ret.s = keyTy.m_data.sval;
+    ret.type = keyTy;
+    return ret;
+  }
+
+  if (!keyTy.subtypeOf(TInt) && !keyTy.subtypeOf(TStr)) {
+    ret.type = TInitCell;
+    return ret;
+  }
+  ret.type = keyTy;
+  return ret;
+}
+
+std::pair<Type, bool> dict_elem(const Type& dict, const Type& undisectedKey) {
+  auto const key = disect_strict_key(undisectedKey);
+  if (key.type == TBottom) return {TBottom, false};
+  if ((dict.m_bits & BDictE) == dict.m_bits) return {TBottom, false};
+
+  const bool maybeEmpty = dict.m_bits & BDictE;
+
+  switch (dict.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::VecVal:
+  case DataTag::Vec:
+  case DataTag::KeysetVal:
+  case DataTag::Keyset:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return {TInitCell, false};
+
+  case DataTag::DictVal: {
+    auto ad = dict.m_data.aval;
+    if (key.i) {
+      if (auto const r = ad->nvGet(*key.i)) {
+        return {from_cell(*r), !maybeEmpty};
+      }
+      return {TBottom, false};
+    } else if (key.s) {
+      if (auto const r = ad->nvGet(*key.s)) {
+        return {from_cell(*r), !maybeEmpty};
+      }
+      return {TBottom, false};
+    }
+    return {TInitCell, false};
+  }
+  case DataTag::Dict:
+    if (!key.type.couldBe(dict.m_data.dict->key)) return {TBottom, false};
+    return {dict.m_data.dict->val, false};
+  }
+  not_reached();
+}
+
+std::pair<Type, bool>
+dict_set(Type dict, const Type& undisectedKey, const Type& val) {
+  auto const key = disect_strict_key(undisectedKey);
+  if (key.type == TBottom) return {TBottom, false};
+
+  const bool validKey = key.type.subtypeOf(TInt) || key.type.subtypeOf(TStr);
+  dict.m_bits = !(dict.m_bits & BSDict) ? BCDictN : BDictN;
+
+  switch (dict.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::VecVal:
+  case DataTag::Vec:
+  case DataTag::KeysetVal:
+  case DataTag::Keyset:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return {std::move(dict), validKey};
+
+  case DataTag::DictVal: {
+    dict = toDDictType(dict);
+    /* fallthrough */
+  }
+  case DataTag::Dict:
+    auto& kt = dict.m_data.dict->key;
+    auto& vt = dict.m_data.dict->val;
+    kt = union_of(std::move(kt), key.type);
+    vt = union_of(std::move(vt), val);
+    return {std::move(dict), validKey};
+  }
+  not_reached();
+}
+
+Type dict_newelem(Type dict, const Type& val) {
+  dict.m_bits = !(dict.m_bits & BSDict) ? BCDictN : BDictN;
+
+  switch (dict.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::VecVal:
+  case DataTag::Vec:
+  case DataTag::KeysetVal:
+  case DataTag::Keyset:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return dict;
+
+  case DataTag::DictVal: {
+    dict = toDDictType(dict);
+    /* fallthrough */
+  }
+  case DataTag::Dict:
+    auto& kt = dict.m_data.dict->key;
+    auto& vt = dict.m_data.dict->val;
+    kt = union_of(std::move(kt), TInt);
+    vt = union_of(std::move(vt), val);
+    return dict;
+  }
+  not_reached();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+std::pair<Type, bool>
+keyset_elem(const Type& keyset, const Type& undisectedKey) {
+  auto const key = disect_strict_key(undisectedKey);
+  if (key.type == TBottom) return {TBottom, false};
+  if ((keyset.m_bits & BKeysetE) == keyset.m_bits) return {TBottom, false};
+
+  const bool maybeEmpty = keyset.m_bits & BKeysetE;
+
+  switch (keyset.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::DictVal:
+  case DataTag::Dict:
+  case DataTag::VecVal:
+  case DataTag::Vec:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return {TInitCell, false};
+
+  case DataTag::KeysetVal: {
+    auto ad = keyset.m_data.aval;
+    if (key.i) {
+      if (auto const r = ad->nvGet(*key.i)) {
+        return {from_cell(*r), !maybeEmpty};
+      }
+      return {TBottom, false};
+    } else if (key.s) {
+      if (auto const r = ad->nvGet(*key.s)) {
+        return {from_cell(*r), !maybeEmpty};
+      }
+      return {TBottom, false};
+    }
+    return {TInitCell, false};
+  }
+  case DataTag::Keyset:
+    if (!key.type.couldBe(keyset.m_data.keyset->keyval)) {
+      return {TBottom, false};
+    }
+    return {keyset.m_data.keyset->keyval, false};
+  }
+  not_reached();
+}
+
+std::pair<Type, bool>
+keyset_set(Type keyset, const Type&, const Type&) {
+  // The set operation on keysets is not allowed.
+  assert(keyset.m_dataTag == DataTag::None ||
+         keyset.m_dataTag == DataTag::KeysetVal ||
+         keyset.m_dataTag == DataTag::Keyset);
+  return {TBottom, false};
+}
+
+Type keyset_newelem(Type keyset, const Type& val) {
+  keyset.m_bits = !(keyset.m_bits & BSKeyset) ? BCKeysetN : BKeysetN;
+
+  switch (keyset.m_dataTag) {
+  case DataTag::ArrVal:
+  case DataTag::ArrPacked:
+  case DataTag::ArrPackedN:
+  case DataTag::ArrStruct:
+  case DataTag::ArrMapN:
+  case DataTag::DictVal:
+  case DataTag::Dict:
+  case DataTag::VecVal:
+  case DataTag::Vec:
+  case DataTag::Str:
+  case DataTag::Obj:
+  case DataTag::Int:
+  case DataTag::Dbl:
+  case DataTag::Cls:
+  case DataTag::RefInner:
+    not_reached();
+
+  case DataTag::None:
+    return keyset;
+
+  case DataTag::KeysetVal: {
+    keyset = toDKeysetType(keyset);
+    /* fallthrough */
+  }
+  case DataTag::Keyset:
+    auto& ty = keyset.m_data.keyset->keyval;
+    ty = union_of(std::move(ty), val);
+    return keyset;
+  }
+  not_reached();
+}
+
+//////////////////////////////////////////////////////////////////////
+
 RepoAuthType make_repo_type_arr(ArrayTypeTable::Builder& arrTable,
                                 const Type& t) {
   auto const emptiness  = TArrE.couldBe(t) ? RepoAuthType::Array::Empty::Maybe
@@ -2372,6 +3480,12 @@ RepoAuthType make_repo_type_arr(ArrayTypeTable::Builder& arrTable,
     case DataTag::Dbl:
     case DataTag::Cls:
     case DataTag::RefInner:
+    case DataTag::Vec:
+    case DataTag::Dict:
+    case DataTag::Keyset:
+    case DataTag::VecVal:
+    case DataTag::DictVal:
+    case DataTag::KeysetVal:
     case DataTag::ArrVal:
     case DataTag::ArrStruct:
     case DataTag::ArrMapN:
@@ -2452,6 +3566,18 @@ RepoAuthType make_repo_type(ArrayTypeTable::Builder& arrTable, const Type& t) {
   X(OptSArr)
   X(Arr)
   X(OptArr)
+  X(SVec)
+  X(OptSVec)
+  X(Vec)
+  X(OptVec)
+  X(SDict)
+  X(OptSDict)
+  X(Dict)
+  X(OptDict)
+  X(SKeyset)
+  X(OptSKeyset)
+  X(Keyset)
+  X(OptKeyset)
   X(Obj)
   X(OptObj)
   X(InitUnc)

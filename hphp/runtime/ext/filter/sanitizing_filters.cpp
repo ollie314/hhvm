@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,11 +16,11 @@
 */
 
 #include "hphp/runtime/ext/filter/sanitizing_filters.h"
+
 #include "hphp/runtime/ext/filter/ext_filter.h"
 #include "hphp/runtime/ext/string/ext_string.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/zend-string.h"
-#include "hphp/system/constants.h"
 
 namespace HPHP {
 
@@ -102,8 +102,8 @@ static Variant php_filter_strip(const String& value, long flags) {
   }
 
   /* Optimization for if no strip flags are set */
-  if (! ((flags & k_FILTER_FLAG_STRIP_LOW) ||
-         (flags & k_FILTER_FLAG_STRIP_HIGH)) ) {
+  if (!(flags & (k_FILTER_FLAG_STRIP_LOW |
+                 k_FILTER_FLAG_STRIP_HIGH | k_FILTER_FLAG_STRIP_BACKTICK))) {
     return value;
   }
 
@@ -159,7 +159,7 @@ Variant php_filter_string(PHP_INPUT_FILTER_PARAM_DECL) {
   unsigned char enc[256] = {0};
 
   /* strip high/strip low ( see flags )*/
-  String stripped(php_filter_strip(value, flags));
+  auto const stripped = php_filter_strip(value, flags).toString();
 
   if (!(flags & k_FILTER_FLAG_NO_ENCODE_QUOTES)) {
     enc[uc('\'')] = enc[uc('"')] = 1;
@@ -227,7 +227,7 @@ Variant php_filter_full_special_chars(PHP_INPUT_FILTER_PARAM_DECL) {
   if (!(flags & k_FILTER_FLAG_NO_ENCODE_QUOTES)) {
     quotes = k_ENT_QUOTES;
   } else {
-    quotes = k_ENT_NOQUOTES;
+    quotes = k_ENT_HTML_QUOTE_NONE;
   }
   return HHVM_FN(htmlentities)(value, quotes);
 }

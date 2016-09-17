@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,8 +8,8 @@
  *
  *)
 
-val get_hhi_root : unit -> Path.path option
+val get_hhi_root : unit -> Path.t
 
-val set_hhi_root_for_unit_test : Path.path -> unit
+val set_hhi_root_for_unit_test : Path.t -> unit
 
 val touch : unit -> unit

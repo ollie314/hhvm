@@ -242,7 +242,7 @@ function stream_wrapper_restore(string $protocol): bool;
 /**
  * Allows you to disable an already defined stream wrapper. Once the wrapper
  *   has been disabled you may override it with a user-defined wrapper using
- *   stream_wrapper_register() or reenable it later on with
+ *   stream_wrapper_register() or re-enable it later on with
  *   stream_wrapper_restore().
  *
  * @param string $protocol
@@ -321,13 +321,33 @@ function stream_select(mixed &$read,
                        int $tv_usec = 0): mixed;
 
 /**
+ * Awaitable version of stream_select()
+ *
+ * @param resource $fp - Stream resource, must be backed by a file descriptor
+ *                       such as a normal file, socket, tempfile, or stdio.
+ *                       Does not work with memory streams or user streams.
+ * @param int $events - Mix of STREAM_AWAIT_READ and/or STREAM_AWAIT_WRITE
+ * @param float $timeout - Timeout in seconds
+ *
+ * @return int - Result code
+ *               STREAM_AWAIT_CLOSED: Stream is closed
+ *               STREAM_AWAIT_READY: Activity on the provided stream
+ *               STREAM_AWAIT_TIMEOUT: No activity (timeout occured)
+ *               STREAM_AWAIT_ERROR: Error
+ */
+<<__Native>>
+function stream_await(resource $fp,
+                      int $events,
+                      float $timeout = 0.0): Awaitable<int>;
+
+/**
  * Sets blocking or non-blocking mode on a stream.  This function works for
  *   any stream that supports non-blocking mode (currently, regular files and
  *   socket streams).
  *
  * @param resource $stream - The stream.
- * @param int $mode - If mode is 0, the given stream will be switched to
- *   non-blocking mode, and if 1, it will be switched to blocking mode. This
+ * @param int $mode - If mode is FALSE, the given stream will be switched to
+ *   non-blocking mode, and if TRUE, it will be switched to blocking mode. This
  *   affects calls like fgets() and fread() that read from the stream. In
  *   non-blocking mode an fgets() call will always return right away while in
  *   blocking mode it will wait for data to become available on the stream.
@@ -336,7 +356,34 @@ function stream_select(mixed &$read,
  *
  */
 <<__Native>>
-function stream_set_blocking(resource $stream, int $mode): bool;
+function stream_set_blocking(resource $stream, bool $mode): bool;
+
+/**
+ * Set read file buffering on the given stream.
+ *
+ * @param resource $stream - The file pointer.
+ * @param int $buffer - The number of bytes to buffer. If buffer is 0 then
+ * read operations are unbuffered.
+ *
+ * @return int - Returns 0 on success, or another value if the request cannot
+ * be honored.
+ *
+ */
+<<__Native>>
+function stream_set_read_buffer(resource $stream, int $buffer): int;
+
+/**
+ * Set the stream chunk size.
+ *
+ * @param resource $stream - The target stream.
+ * @param int $chunk_size - The desired new chunk size.
+ *
+ * @return int - Returns the previous chunk size on success.  Will return FALSE
+ * if less than 1 or greater than PHP_INT_MAX.
+ *
+ */
+<<__Native>>
+function stream_set_chunk_size(resource $stream, int $chunk_size): mixed;
 
 /**
  * Sets the timeout value on stream, expressed in the sum of seconds and
@@ -368,8 +415,7 @@ function stream_set_timeout(resource $stream,
  *   are completed before other processes are allowed to write to that output
  *   stream.
  *
- * @return int - Returns 0 on success, or EOF if the request cannot be
- *   honored.
+ * @return int - Returns 0 on success.
  *
  */
 <<__Native>>
@@ -413,7 +459,7 @@ function stream_socket_accept(resource $server_socket,
  *   Depending on the environment, Unix domain sockets may not be available. A
  *   list of available transports can be retrieved using
  *   stream_get_transports(). See List of Supported Socket Transports for a list
- *   of bulitin transports.
+ *   of builtin transports.
  * @param mixed $errnum - If the optional errno and errstr arguments are
  *   present they will be set to indicate the actual system level error that
  *   occurred in the system-level socket(), bind(), and listen() calls. If the
@@ -478,6 +524,44 @@ function stream_socket_client(string $remote_socket,
                               float $timeout = -1.0,
                               int $flags = 0,
                               ?resource $context = null): mixed;
+
+/**
+ * Turns encryption on/off on an already connected socket. Once the crypto
+ * settings are established, cryptography can be turned on and off dynamically
+ * by passing TRUE or FALSE in the enable parameter.
+ *
+ * @param resource $stream - The stream reszource.
+ * @param bool $enable - Enable/disable cryptography on the stream.
+ * @param int crypto_type - Setup encryption on the stream. Valid methods are:
+ *   - STREAM_CRYPTO_SSLv2_CLIENT
+ *   - STREAM_CRYPTO_SSLv3_CLIENT
+ *   - STREAM_CRYPTO_SSLv23_CLIENT
+ *   - STREAM_CRYPTO_TLS_CLIENT
+ *  The following methods are valid, but not currently implemented in HHVM:
+ *   - STREAM_CRYPTO_SSLv2_SERVER
+ *   - STREAM_CRYPTO_SSLv3_SERVER
+ *   - STREAM_CRYPTO_SSLv23_SERVER
+ *   - STREAM_CRYPTO_TLS_SERVER
+ *
+ *   When enabling crypto in HHVM, this parameter is required as the
+ *   session_stream parameter is not supported.
+ *
+ *   Under PHP, if omitted, the crypto_type context option on the stream's SSL
+ *   context will be used instead.
+ * @param resource $session_stream Seed the stream with settings from
+ *   session_stream. CURRENTLY UNSUPPORTED IN HHVM.
+ *
+ * @returns mixed - Returns TRUE on success, FALSE if negoation has failed, or
+ *   0 if there isn't enough data and you should try again (only for
+ *   non-blocking sockets).
+ */
+<<__Native>>
+function stream_socket_enable_crypto(
+  resource $socket,
+  bool $enable,
+  int $crypto_type = 0,
+  ?resource $session_stream = null,
+): bool;
 
 /**
  * Returns the local or remote name of a given socket connection.

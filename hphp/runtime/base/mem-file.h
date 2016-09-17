@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,8 @@
 #define incl_HPHP_MEM_FILE_H_
 
 #include "hphp/runtime/base/file.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -26,8 +27,7 @@ namespace HPHP {
 /**
  * memory based files.
  */
-class MemFile : public File {
-public:
+struct MemFile : File {
   DECLARE_RESOURCE_ALLOCATION(MemFile);
 
   explicit MemFile(const String& wrapper_type = null_string,
@@ -39,21 +39,21 @@ public:
 
   CLASSNAME_IS("MemFile");
   // overriding ResourceData
-  const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
-  virtual bool open(const String& filename, const String& mode);
-  virtual bool close();
-  virtual int64_t readImpl(char *buffer, int64_t length);
-  virtual int getc();
-  virtual int64_t writeImpl(const char *buffer, int64_t length);
-  virtual bool seekable() { return true;}
-  virtual bool seek(int64_t offset, int whence = SEEK_SET);
-  virtual int64_t tell();
-  virtual bool eof();
-  virtual bool rewind();
-  virtual bool flush();
+  bool open(const String& filename, const String& mode) override;
+  bool close() override;
+  int64_t readImpl(char *buffer, int64_t length) override;
+  int getc() override;
+  int64_t writeImpl(const char *buffer, int64_t length) override;
+  bool seekable() override { return true;}
+  bool seek(int64_t offset, int whence = SEEK_SET) override;
+  int64_t tell() override;
+  bool eof() override;
+  bool rewind() override;
+  bool flush() override;
 
-  virtual Array getMetaData();
+  Array getMetaData() override;
 
   void unzip();
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,82 +27,6 @@ namespace HPHP {
 using std::string;
 using std::vector;
 
-// --- Static functions.
-
-bool TextUtil::BeginsWith(const string& str1, const string& str2) {
-  // | [----------str2--------]
-  // | <<<<<<<<< match >>>>>>>>
-  // | [--------------------------------str1-------]
-
-  if (str2.length() > str1.length()) {
-    return false;
-  }
-
-  return str1.find(str2) == 0;
-}
-
-string TextUtil::StripCommonStart(const string& str1, const string& str2) {
-  if (!BeginsWith(str1, str2)) {
-    return str1;
-  }
-
-  return str1.substr(str2.length());
-}
-
-bool TextUtil::EndsWith(const string& str, char ch) {
-  return *str.rbegin() == ch;
-}
-
-string TextUtil::StripTrailing(const std::string& str, char ch) {
-  string temp(str);
-
-  size_t i = str.find_last_not_of(ch);
-
-  if (i != string::npos) {
-    temp.erase(i + 1);
-  } else {
-    temp.clear();     // Nothing but those chars.
-  }
-
-  return temp;
-}
-
-vector<string> TextUtil::MakePathList(const string& path) {
-  vector<string> temp;
-
-  if (path.empty()) {
-    return temp;
-  }
-
-  size_t start = 0;
-  for (size_t i = 1; i < path.length(); ++i) {
-    if (path[i] == '/') {
-      temp.push_back(path.substr(start, i));
-    }
-  }
-
-  return temp;
-}
-
-void split(char delimiter, const char *s, vector<string> &out,
-           bool ignoreEmpty /* = false */) {
-  assert(s);
-
-  const char *start = s;
-  const char *p = s;
-  for (; *p; p++) {
-    if (*p == delimiter) {
-      if (!ignoreEmpty || p > start) {
-        out.push_back(string(start, p - start));
-      }
-      start = p + 1;
-    }
-  }
-  if (!ignoreEmpty || p > start) {
-    out.push_back(string(start, p - start));
-  }
-}
-
 void replaceAll(string &s, const char *from, const char *to) {
   assert(from && *from);
   assert(to);
@@ -116,24 +40,20 @@ void replaceAll(string &s, const char *from, const char *to) {
   }
 }
 
-std::string toLower(const std::string &s) {
-  unsigned int len = s.size();
-  string ret;
-  if (len) {
-    ret.reserve(len);
-    for (unsigned int i = 0; i < len; i++) {
-      ret += tolower(s[i]);
-    }
+std::string toLower(folly::StringPiece s) {
+  std::string ret;
+  ret.reserve(s.size());
+  for (auto const c : s) {
+    ret += tolower(c);
   }
   return ret;
 }
 
-std::string toUpper(const std::string &s) {
-  unsigned int len = s.size();
-  string ret;
-  ret.reserve(len);
-  for (unsigned int i = 0; i < len; i++) {
-    ret += toupper(s[i]);
+std::string toUpper(folly::StringPiece s) {
+  std::string ret;
+  ret.reserve(s.size());
+  for (auto const c : s) {
+    ret += toupper(c);
   }
   return ret;
 }
@@ -206,15 +126,15 @@ std::string escapeStringForPHP(const char *input, int len) {
   return output;
 }
 
-const void *buffer_duplicate(const void *src, int size) {
+const void *buffer_duplicate(const void *src, size_t size) {
   char *s = (char *)malloc(size + 1); // '\0' in the end
   memcpy(s, src, size);
   s[size] = '\0';
   return s;
 }
 
-const void *buffer_append(const void *buf1, int size1,
-                          const void *buf2, int size2) {
+const void *buffer_append(const void *buf1, size_t size1,
+                          const void *buf2, size_t size2) {
   char *s = (char *)realloc(const_cast<void *>(buf1), size1 + size2 + 1);
   memcpy((char *)s + size1, buf2, size2);
   s[size1 + size2] = '\0';

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,8 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#ifndef incl_HPHP_ALOCATION_ANALYSIS_H_
-#define incl_HPHP_ALOCATION_ANALYSIS_H_
+#ifndef incl_HPHP_ALIAS_ANALYSIS_H_
+#define incl_HPHP_ALIAS_ANALYSIS_H_
 
 #include <bitset>
 #include <string>
@@ -36,7 +36,7 @@ struct IRUnit;
  *
  * Right now we have a static maximum number of tracked locations---passes
  * using information from this module must be conservative about locations that
- * aren't assigned an id.  (E.g. via may_alias in AliasAnalysis.)
+ * aren't assigned an id.  (E.g. via calls to may_alias in AliasAnalysis.)
  */
 constexpr uint32_t kMaxTrackedALocs = 128;
 using ALocBits = std::bitset<kMaxTrackedALocs>;
@@ -65,11 +65,28 @@ struct AliasAnalysis {
    * memory location, primarily an assigned id.  There is also an inverse map
    * from id to the metadata structure.
    *
+   * Two different alias classes in this map should not alias each other.  If
+   * an alias class contains multiple locations (e.g., a range of stack slots,
+   * multiple frame locals), we need to use multiple bits in this map.
+   *
    * The keyed locations in this map take their canonical form.  You should use
    * canonicalize before doing lookups.
    */
   jit::hash_map<AliasClass,ALocMeta,AliasClass::Hash> locations;
   jit::vector<ALocMeta> locations_inv;
+
+  /*
+   * If an AStack covers multiple locations, it will have an entry in this
+   * map. It is OK if not all locations covered by the AStack are tracked. We
+   * only store the tracked subset here.
+   */
+  jit::hash_map<AliasClass,ALocBits,AliasClass::Hash> stack_ranges;
+
+  /*
+   * Similar to `stack_ranges', if an AFrame covers multiple locations, it will
+   * have an entry in this map.
+   */
+  jit::hash_map<AliasClass,ALocBits,AliasClass::Hash> local_sets;
 
   /*
    * Short-hand to find an alias class in the locations map, or get folly::none
@@ -79,31 +96,59 @@ struct AliasAnalysis {
 
   /*
    * Several larger sets of locations, we have a set of all the ids assigned to
-   * properties, elemIs, and frame locals.  This is used by may_alias below.
+   * properties, elemIs, frame locals, etc.  This is used by may_alias below.
    */
   ALocBits all_props;
   ALocBits all_elemIs;
   ALocBits all_frame;
+  ALocBits all_stack;
+  ALocBits all_ref;
+  ALocBits all_iterPos;
+  ALocBits all_iterBase;
 
   /*
-   * Return a set of locations that we've assigned ids to that may be affected
-   * by a memory operation.  This function is used to get information about
-   * possible effects from an operation on a location that we aren't tracking.
-   * This is often needed for instructions that affect very large alias classes
-   * like ANonFrame.
+   * Return the number of distinct locations we're tracking by id
+   */
+  size_t count() const { return locations_inv.size(); }
+
+  /*
+   * Return a set of locations that we've assigned ids to that may alias a
+   * given AliasClass.  Note that (as usual) memory locations we haven't
+   * assigned bits to may still be affected, but this module only reports
+   * effects on locations assigned bits.
    *
-   * Also, note that because of the kMaxTrackedALocs limit, this location could
-   * be very 'concrete' (a prop on a known object for example).  But even in
-   * those cases, since it's not tracked, we have to use things like all_props
-   * to determine what it may alias.
-   *
-   * The precondition is just because you should generally be using the
-   * conflict set in ALocMeta if we have one for `loc'---it'll be much less
-   * conservative.
-   *
-   * Pre: find(acls) == folly::none
+   * This function may conservatively return more bits than actually may
+   * overlap `acls'.
    */
   ALocBits may_alias(AliasClass acls) const;
+
+  /*
+   * Return a set of locations that we've assigned ids to that are definitely
+   * contained in `acls'.  This function may conservatively return a smaller
+   * set of bits: every bit that is set in the returned ALocBits is contained
+   * in `acls', but there may be locations contained in `acls' that don't have
+   * a bit set in the returned vector. As a consequence of this, any caller of
+   * expand() must produce correct (but potentially suboptimal) results if
+   * expand is hardcoded to always return an empty bitset.
+   *
+   * This should generally be used with AliasClasses that are exhaustive,
+   * must-style information.  That is, AliasClasses that should be interpreted
+   * as referring to every point they contain.  Right now, the primary example
+   * of that sort of AliasClasses is the class of locations in `kills' sets in
+   * certain memory effects structs: these sets indicate every location inside
+   * the class is affected.
+   *
+   * Right now, this function will work for specific AliasClasses we've
+   * assigned ids---for larger classes, it only supports stack ranges observed
+   * during alias collection, AFrameAny, and some cases of unions of those---if
+   * you need more to work, the implementation will need some improvements.
+   */
+  ALocBits expand(AliasClass acls) const;
+
+  /*
+   * Sets of alias classes that are used by expand().
+   */
+  jit::hash_map<AliasClass,ALocBits,AliasClass::Hash> stk_expand_map;
 
   /*
    * Map from frame SSATmp ids to the location bits for all of the frame's
@@ -143,6 +188,5 @@ std::string show(ALocBits);
 //////////////////////////////////////////////////////////////////////
 
 }}
-
 
 #endif

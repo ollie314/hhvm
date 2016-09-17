@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,71 +13,72 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/base/thread-info.h"
 
-#include <atomic>
-
-#include <sys/time.h>
-#include <sys/mman.h>
-#include <sys/resource.h>
-#include <signal.h>
-#include <limits>
 #include <map>
 #include <set>
 
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/hphp-system.h"
-#include "hphp/runtime/base/code-coverage.h"
-#include "hphp/runtime/base/ini-setting.h"
-#include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/ext/string/ext_string.h"
-#include "hphp/util/lock.h"
-#include "hphp/util/alloc.h"
-#include "hphp/util/logger.h"
-#include <folly/String.h>
+#include <folly/Format.h>
 
-using std::map;
+#include "hphp/util/alloc.h"
+#include "hphp/util/lock.h"
+#include "hphp/util/hphp-config.h"
+
+#include "hphp/runtime/base/backtrace.h"
+#include "hphp/runtime/base/code-coverage.h"
+#include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/base/surprise-flags.h"
+#include "hphp/runtime/ext/process/ext_process.h"
+#include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/runtime/base/builtin-functions.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-static Mutex s_thread_info_mutex;
-static std::set<ThreadInfo*> s_thread_infos;
+namespace {
+///////////////////////////////////////////////////////////////////////////////
 
-__thread char* ThreadInfo::t_stackbase = 0;
+/*
+ * Set of all ThreadInfos for the running process.
+ */
+std::set<ThreadInfo*> s_thread_infos;
+Mutex s_thread_info_mutex;
+
+/*
+ * Either null, or populated by initialization of ThreadInfo as an approximation
+ * of the highest address of the current thread's stack.
+ */
+__thread char* t_stackbase = nullptr;
+
+///////////////////////////////////////////////////////////////////////////////
+}
 
 IMPLEMENT_THREAD_LOCAL_NO_CHECK(ThreadInfo, ThreadInfo::s_threadInfo);
 
-ThreadInfo::ThreadInfo()
-    : m_stacklimit(0), m_executing(Idling) {
+ThreadInfo::ThreadInfo() {
   assert(!t_stackbase);
   t_stackbase = static_cast<char*>(stack_top_ptr());
 
-  m_mm = &MM();
-
-  m_profiler = nullptr;
-  m_pendingException = nullptr;
   m_coverage = new CodeCoverage();
-  m_debugHookHandler = nullptr;
 }
 
 ThreadInfo::~ThreadInfo() {
-  t_stackbase = 0;
+  assert(t_stackbase);
+  t_stackbase = nullptr;
 
   Lock lock(s_thread_info_mutex);
   s_thread_infos.erase(this);
   delete m_coverage;
-  RDS::threadExit();
+  rds::threadExit();
 }
 
 void ThreadInfo::init() {
   m_reqInjectionData.threadInit();
-  RDS::threadInit();
+  rds::threadInit();
   onSessionInit();
-
   Lock lock(s_thread_info_mutex);
   s_thread_infos.insert(this);
-  Sweepable::InitSweepableList();
 }
 
 bool ThreadInfo::valid(ThreadInfo* info) {
@@ -85,116 +86,145 @@ bool ThreadInfo::valid(ThreadInfo* info) {
   return s_thread_infos.find(info) != s_thread_infos.end();
 }
 
-void ThreadInfo::GetExecutionSamples(std::map<Executing, int> &counts) {
+void ThreadInfo::GetExecutionSamples(std::map<Executing, int>& counts) {
   Lock lock(s_thread_info_mutex);
-  for (std::set<ThreadInfo*>::const_iterator iter = s_thread_infos.begin();
-       iter != s_thread_infos.end(); ++iter) {
-    ++counts[(*iter)->m_executing];
+  for (auto const info : s_thread_infos) {
+    ++counts[info->m_executing];
   }
 }
 
 void ThreadInfo::ExecutePerThread(std::function<void(ThreadInfo*)> f) {
   Lock lock(s_thread_info_mutex);
-  for (auto& thread : s_thread_infos) {
+  for (auto thread : s_thread_infos) {
     f(thread);
   }
 }
 
 void ThreadInfo::onSessionInit() {
   m_reqInjectionData.onSessionInit();
-
-  // Take the address of the cached per-thread stackLimit, and use this to allow
-  // some slack for (a) stack usage above the caller of reset() and (b) stack
-  // usage after the position gets checked.
-  // If we're not in a threaded environment, then s_stackSize will be
-  // zero. Use getrlimit to figure out what the size of the stack is to
-  // calculate an approximation of where the bottom of the stack should be.
-  if (s_stackSize == 0) {
-    struct rlimit rl;
-
-    getrlimit(RLIMIT_STACK, &rl);
-    m_stacklimit = t_stackbase - (rl.rlim_cur - StackSlack);
-  } else {
-    m_stacklimit = (char *)s_stackLimit + StackSlack;
-    assert(uintptr_t(m_stacklimit) < s_stackLimit + s_stackSize);
-  }
-}
-
-void ThreadInfo::clearPendingException() {
-  m_reqInjectionData.clearPendingExceptionFlag();
-  if (m_pendingException != nullptr) delete m_pendingException;
-  m_pendingException = nullptr;
 }
 
 void ThreadInfo::setPendingException(Exception* e) {
-  m_reqInjectionData.setPendingExceptionFlag();
-  if (m_pendingException != nullptr) delete m_pendingException;
+  m_reqInjectionData.setFlag(PendingExceptionFlag);
+
+  auto tmp = m_pendingException;
   m_pendingException = e;
+  delete tmp;
 }
 
 void ThreadInfo::onSessionExit() {
   // Clear any timeout handlers to they don't fire when the request has already
-  // been destroyed
+  // been destroyed.
   m_reqInjectionData.setTimeout(0);
   m_reqInjectionData.setCPUTimeout(0);
 
   m_reqInjectionData.reset();
-  RDS::requestExit();
+
+  if (auto tmp = m_pendingException) {
+    m_pendingException = nullptr;
+    // request memory has already been freed
+    if (auto ee = dynamic_cast<ExtendedException*>(tmp)) {
+      ee->leakBacktrace();
+    }
+    delete tmp;
+  }
+
+  rds::requestExit();
 }
 
 //////////////////////////////////////////////////////////////////////
 
-void throw_infinite_recursion_exception() {
+void raise_infinite_recursion_error() {
   if (!RuntimeOption::NoInfiniteRecursionDetection) {
-    // Reset profiler otherwise it might recurse further causing segfault
-    DECLARE_THREAD_INFO
-    info->m_profiler = nullptr;
+    // Reset profiler otherwise it might recurse further causing segfault.
+    TI().m_profiler = nullptr;
     raise_error("infinite recursion detected");
   }
 }
 
-ssize_t check_request_surprise(ThreadInfo* info) {
-  auto& p = info->m_reqInjectionData;
-  bool do_timedout, do_cpuTimedOut, do_memExceeded, do_signaled;
+static Exception* generate_request_timeout_exception(c_WaitableWaitHandle* wh) {
+  auto exceptionMsg = folly::sformat(
+    RuntimeOption::ClientExecutionMode()
+      ? "Maximum execution time of {} seconds exceeded"
+      : "entire web request took longer than {} seconds and timed out",
+    RID().getTimeout());
+  auto exceptionStack = createBacktrace(BacktraceArgs()
+                                        .fromWaitHandle(wh)
+                                        .withSelf()
+                                        .withThis());
+  return new RequestTimeoutException(exceptionMsg, exceptionStack);
+}
 
-  ssize_t flags = p.fetchAndClearFlags();
-  do_timedout = (flags & RequestInjectionData::TimedOutFlag) &&
-    !p.getDebuggerAttached();
-  do_cpuTimedOut = (flags & RequestInjectionData::CPUTimedOutFlag) &&
-    !p.getDebuggerAttached();
-  do_memExceeded = (flags & RequestInjectionData::MemExceededFlag);
-  do_signaled = (flags & RequestInjectionData::SignaledFlag);
+static Exception* generate_request_cpu_timeout_exception(
+  c_WaitableWaitHandle* wh
+) {
+  auto exceptionMsg = folly::sformat(
+    "Maximum CPU time of {} seconds exceeded",
+    RID().getCPUTimeout()
+  );
+
+  auto exceptionStack = createBacktrace(BacktraceArgs()
+                                        .fromWaitHandle(wh)
+                                        .withSelf()
+                                        .withThis());
+  return new RequestCPUTimeoutException(exceptionMsg, exceptionStack);
+}
+
+static Exception* generate_memory_exceeded_exception(c_WaitableWaitHandle* wh) {
+  auto exceptionStack = createBacktrace(BacktraceArgs()
+                                        .fromWaitHandle(wh)
+                                        .withSelf()
+                                        .withThis());
+  return new RequestMemoryExceededException(
+    "request has exceeded memory limit", exceptionStack);
+}
+
+size_t handle_request_surprise(c_WaitableWaitHandle* wh, size_t mask) {
+  auto& info = TI();
+  auto& p = info.m_reqInjectionData;
+
+  auto const flags = fetchAndClearSurpriseFlags() & mask;
+  auto const debugging = p.getDebuggerAttached();
 
   // Start with any pending exception that might be on the thread.
-  Exception* pendingException = info->m_pendingException;
-  info->m_pendingException = nullptr;
+  auto pendingException = info.m_pendingException;
+  info.m_pendingException = nullptr;
 
-  if (do_timedout) {
+  if ((flags & TimedOutFlag) && !debugging) {
     p.setCPUTimeout(0);  // Stop CPU timer so we won't time out twice.
     if (pendingException) {
-      p.setTimedOutFlag();
+      setSurpriseFlag(TimedOutFlag);
     } else {
-      pendingException = generate_request_timeout_exception();
+      pendingException = generate_request_timeout_exception(wh);
     }
-  }
-  // Don't bother with the CPU timeout if we're already handling a wall timeout.
-  if (do_cpuTimedOut && !do_timedout) {
+  } else if ((flags & CPUTimedOutFlag) && !debugging) {
+    // Don't bother with the CPU timeout if we're already handling a wall
+    // timeout.
     p.setTimeout(0);  // Stop wall timer so we won't time out twice.
     if (pendingException) {
-      p.setCPUTimedOutFlag();
+      setSurpriseFlag(CPUTimedOutFlag);
     } else {
-      pendingException = generate_request_cpu_timeout_exception();
+      pendingException = generate_request_cpu_timeout_exception(wh);
     }
   }
-  if (do_memExceeded) {
+  if (flags & MemExceededFlag) {
     if (pendingException) {
-      p.setMemExceededFlag();
+      setSurpriseFlag(MemExceededFlag);
     } else {
-      pendingException = generate_memory_exceeded_exception();
+      pendingException = generate_memory_exceeded_exception(wh);
     }
   }
-  if (do_signaled) {
-    extern bool HHVM_FN(pcntl_signal_dispatch)();
+  if (flags & PendingGCFlag) {
+    if (StickyFlags & PendingGCFlag) {
+      clearSurpriseFlag(PendingGCFlag);
+    }
+    if (RuntimeOption::EvalEnableGC) {
+      MM().collect("surprise");
+    } else {
+      MM().checkHeap("surprise");
+    }
+  }
+  if (flags & SignaledFlag) {
     HHVM_FN(pcntl_signal_dispatch)();
   }
 
@@ -203,17 +233,5 @@ ssize_t check_request_surprise(ThreadInfo* info) {
   }
   return flags;
 }
-
-ssize_t check_request_surprise_unlikely() {
-  auto info = ThreadInfo::s_threadInfo.getNoCheck();
-  auto flags = info->m_reqInjectionData.getConditionFlags()->load();
-
-  if (UNLIKELY(flags)) {
-    check_request_surprise(info);
-  }
-  return flags;
-}
-
-//////////////////////////////////////////////////////////////////////
 
 }

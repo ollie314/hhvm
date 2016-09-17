@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,31 +15,28 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/ext/bz2/bz2-file.h"
+#include "hphp/runtime/base/array-init.h"
 
 namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-BZ2File::BZ2File(): m_bzFile(nullptr) {
-  m_innerFile = newres<PlainFile>();
+BZ2File::BZ2File(): m_bzFile(nullptr), m_innerFile(req::make<PlainFile>()) {
   m_innerFile->unregister();
-  m_isLocal = m_innerFile->m_isLocal;
+  setIsLocal(m_innerFile->isLocal());
 }
 
-BZ2File::BZ2File(PlainFile* innerFile): m_bzFile(nullptr) {
-  m_innerFile = innerFile;
-  m_isLocal = m_innerFile->m_isLocal;
+BZ2File::BZ2File(req::ptr<PlainFile>&& innerFile)
+: m_bzFile(nullptr), m_innerFile(std::move(innerFile)) {
+  setIsLocal(m_innerFile->isLocal());
 }
 
 BZ2File::~BZ2File() {
-  if (m_bzFile)
-    closeImpl();
+  closeImpl();
 }
 
 void BZ2File::sweep() {
-  if (m_bzFile) {
-    closeImpl();
-  }
+  closeImpl();
   File::sweep();
 }
 
@@ -96,7 +93,7 @@ int64_t BZ2File::readImpl(char * buf, int64_t length) {
    * the file - so, only set EOF after a failed read. This matches PHP5.
    */
   if (len == 0) {
-    m_eof = true;
+    setEof(true);
   }
   return len;
 }
@@ -107,20 +104,23 @@ int64_t BZ2File::writeImpl(const char * buf, int64_t length) {
 }
 
 bool BZ2File::closeImpl() {
-  assert(m_bzFile);
-  bool ret = true;
-  BZ2_bzclose(m_bzFile);
-  m_bzFile = nullptr;
-  m_closed = true;
-  m_innerFile->close();
+  if (!isClosed()) {
+    if (m_bzFile) {
+      BZ2_bzclose(m_bzFile);
+      m_bzFile = nullptr;
+    }
+    setIsClosed(true);
+    if (m_innerFile) {
+      m_innerFile->close();
+    }
+  }
   File::closeImpl();
-  m_eof = false;
-  return ret;
+  return true;
 }
 
 bool BZ2File::eof() {
   assert(m_bzFile);
-  return m_eof;
+  return getEof();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

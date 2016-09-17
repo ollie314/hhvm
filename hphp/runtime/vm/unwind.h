@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,40 +17,50 @@
 #define incl_HPHP_UNWIND_H_
 
 #include <stdexcept>
+#include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/base/object-data.h"
+#include "hphp/runtime/base/type-object.h"
+#include "hphp/runtime/vm/class.h"
+#include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/util/trace.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Enumerates actions that should be taken by the enterVM loop after
- * unwinding an exception.
+ * Unwind the PHP exception on the top of the fault stack.
  */
-enum class UnwindAction {
-  /*
-   * The exception was not handled in this nesting of the VM---it
-   * needs to be rethrown.
-   */
-  Propagate,
+void unwindPhp();
 
-  /*
-   * The exception was either handled, or a catch or fault handler was
-   * identified and the VM state has been prepared for entry to it.
-   */
-  ResumeVM,
-};
+/*
+ * Unwind the PHP exception.
+ */
+void unwindPhp(ObjectData* phpException);
+
+/*
+ * Unwind the C++ exception.
+ */
+void unwindCpp(Exception* cppException);
+
+/*
+ * Unwind the frame for a builtin.  Currently only used when switching modes
+ * for hphpd_break, fb_enable_code_coverage, and xdebug_start_code_coverage.
+ */
+void unwindBuiltinFrame();
 
 /*
  * The main entry point to the unwinder.
  *
- * When an exception propagates up to the top-level try/catch in
- * enterVM, it calls to this module to perform stack unwinding as
- * appropriate.  This function must be called from within the catch
- * handler (it rethrows the exception to determine what to do).
+ * Wraps action in try/catch and executes appropriate unwinding logic based
+ * on the type of thrown exception.
  *
- * The returned UnwindAction instructs enterVM on how to proceed.
+ * If the exception was not handled in this nesting of the VM, it will be
+ * rethrown. Otherwise, either a catch or fault handler was identified and
+ * the VM state has been prepared for entry to it, or end of execution was
+ * reached and vmpc() will be zero.
  */
-UnwindAction exception_handler() noexcept;
+template<class Action> void exception_handler(Action action);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -59,7 +69,7 @@ UnwindAction exception_handler() noexcept;
  * will reraise the current fault and resume propagating it.
  */
 struct VMPrepareUnwind : std::exception {
-  const char* what() const throw() { return "VMPrepareUnwind"; }
+  const char* what() const noexcept override { return "VMPrepareUnwind"; }
 };
 
 /*
@@ -68,15 +78,16 @@ struct VMPrepareUnwind : std::exception {
  * enable code coverage mode.
  */
 struct VMSwitchMode : std::exception {
-  const char* what() const throw() { return "VMSwitchMode"; }
+  const char* what() const noexcept override { return "VMSwitchMode"; }
 };
 
 /*
- * Thrown for stack overflow thrown from a prolog while
- * re-entering
+ * Thrown for stack overflow in a jitted prolog.
  */
-struct VMReenterStackOverflow : std::exception {
-  const char* what() const throw() { return "VMReenterStackOverflow"; }
+struct VMStackOverflow : std::exception {
+  const char* what() const noexcept override {
+    return "VMStackOverflow";
+  }
 };
 
 /*
@@ -84,11 +95,15 @@ struct VMReenterStackOverflow : std::exception {
  * the builtin function should be unwound before resuming the VM.
  */
 struct VMSwitchModeBuiltin : std::exception {
-  const char* what() const throw() { return "VMSwitchModeBuiltin"; }
+  const char* what() const noexcept override { return "VMSwitchModeBuiltin"; }
 };
 
 //////////////////////////////////////////////////////////////////////
 
 }
+
+#define incl_HPHP_VM_UNWIND_INL_H_
+#include "hphp/runtime/vm/unwind-inl.h"
+#undef incl_HPHP_VM_UNWIND_INL_H_
 
 #endif

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,11 +15,13 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/ext/ext_simplexml.h"
+#include "hphp/runtime/ext/simplexml/ext_simplexml.h"
 #include "hphp/runtime/ext/domdocument/ext_domdocument.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/libxml/ext_libxml.h"
@@ -44,7 +46,9 @@ const int64_t k_XSL_SECPREF_WRITE_FILE        = 4;
 const int64_t k_XSL_SECPREF_CREATE_DIRECTORY  = 8;
 const int64_t k_XSL_SECPREF_READ_NETWORK      = 16;
 const int64_t k_XSL_SECPREF_WRITE_NETWORK     = 32;
-const int64_t k_XSL_SECPREF_DEFAULT           = 44;
+const int64_t k_XSL_SECPREF_DEFAULT = k_XSL_SECPREF_WRITE_FILE |
+                                      k_XSL_SECPREF_CREATE_DIRECTORY |
+                                      k_XSL_SECPREF_WRITE_NETWORK;
 
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
@@ -53,66 +57,69 @@ static xmlChar *xslt_string_to_xpathexpr(const char *);
 static void xslt_ext_function_php(xmlXPathParserContextPtr, int, int);
 static void xslt_ext_function_string_php(xmlXPathParserContextPtr, int);
 static void xslt_ext_function_object_php(xmlXPathParserContextPtr, int);
-static void xslt_ext_error_handler(void *, const char *, ...)
-  ATTRIBUTE_PRINTF(2,3);
+static void xslt_ext_error_handler(void *,
+  ATTRIBUTE_PRINTF_STRING const char *, ...) ATTRIBUTE_PRINTF(2,3);
 
 ///////////////////////////////////////////////////////////////////////////////
 // NativeData
 
-const StaticString s_XSLTProcessorData("XSLTProcessorData");
+const StaticString
+  s_XSLTProcessorData("XSLTProcessorData"),
+  s_DOMDocument("DOMDocument"),
+  s_DOMElement("DOMElement"),
+  s_DOMAttr("DOMAttr"),
+  s_DOMText("DOMText"),
+  s_DOMNode("DOMNode");
 
-class XSLTProcessorData : public Sweepable {
-  public:
-    XSLTProcessorData() : m_stylesheet(nullptr), m_doc(nullptr),
-      m_secprefs(k_XSL_SECPREF_DEFAULT),
-      m_registerPhpFunctions(0) {
-      if (m_params.empty()) {
-        m_params = Array::Create();
-      }
-
-      if (m_registered_phpfunctions.empty()) {
-        m_registered_phpfunctions = Array::Create();
-      }
-    };
-
-    ~XSLTProcessorData() {
-      sweep();
+struct XSLTProcessorData {
+  XSLTProcessorData() : m_stylesheet(nullptr), m_doc(nullptr),
+  m_secprefs(k_XSL_SECPREF_DEFAULT),
+  m_registerPhpFunctions(0) {
+    if (m_params.empty()) {
+      m_params = Array::Create();
     }
 
-    void sweep() {
-      if (m_stylesheet) {
-        xsltFreeStylesheet(m_stylesheet);
-        m_stylesheet = nullptr;
-      }
-
-      if (m_doc) {
-        xmlFreeDoc(m_doc);
-        m_doc = nullptr;
-      }
+    if (m_registered_phpfunctions.empty()) {
+      m_registered_phpfunctions = Array::Create();
     }
+  };
 
-  public:
-    xsltStylesheetPtr m_stylesheet;
-    xmlDocPtr m_doc;
-    Array m_params;
-    int m_secprefs;
-    int m_registerPhpFunctions;
-    Array m_registered_phpfunctions;
-    String m_profile;
+  ~XSLTProcessorData() {
+    sweep();
+  }
 
-  public:
-    xmlDocPtr apply_stylesheet();
+  void sweep() {
+    if (m_stylesheet) {
+      xsltFreeStylesheet(m_stylesheet);
+      m_stylesheet = nullptr;
+    }
+  }
+
+  xmlDocPtr doc() { return m_doc ? m_doc->docp() : nullptr; }
+
+  xsltStylesheetPtr m_stylesheet;
+  XMLNode m_doc;
+  Array m_params;
+  int m_secprefs;
+  int m_registerPhpFunctions;
+  Array m_registered_phpfunctions;
+  String m_profile;
+
+  Array m_usedElements; // don't let DOMElements get free'd out from under us
+                        // while preparing to create a new document
+
+  xmlDocPtr apply_stylesheet();
 };
 
 xmlDocPtr XSLTProcessorData::apply_stylesheet() {
   SYNC_VM_REGS_SCOPED();
 
-  if (m_stylesheet == nullptr || m_doc == nullptr) {
+  if (m_stylesheet == nullptr || doc() == nullptr) {
     raise_error("Unable to apply stylesheet");
     return nullptr;
   }
 
-  xsltTransformContextPtr ctxt = xsltNewTransformContext (m_stylesheet, m_doc);
+  xsltTransformContextPtr ctxt = xsltNewTransformContext (m_stylesheet, doc());
   if (ctxt == nullptr) {
     raise_error("Unable to apply stylesheet");
     return nullptr;
@@ -208,12 +215,15 @@ xmlDocPtr XSLTProcessorData::apply_stylesheet() {
     profile = fopen(m_profile.data(), "w");
   }
 
+  assert(m_usedElements.empty());
   xmlDocPtr res = xsltApplyStylesheetUser(m_stylesheet,
-                                          m_doc,
+                                          doc(),
                                           nullptr,
                                           nullptr,
                                           profile,
                                           ctxt);
+  m_usedElements.clear(); // safe to clear used elements after we've forked
+                          // the document
 
   if (profile) {
     fclose(profile);
@@ -251,6 +261,14 @@ static xmlChar *xslt_string_to_xpathexpr(const char *str) {
   }
 
   return value;
+}
+
+static Object newNode(const String name, xmlNodePtr obj) {
+  auto const cls = Unit::lookupClass(name.get());
+  Object ret{cls};
+  auto retData = Native::data<DOMNode>(ret);
+  retData->setNode(obj);
+  return ret;
 }
 
 static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
@@ -296,6 +314,10 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
   for (int i = nargs - 2; i >= 0; i--) {
     Variant arg;
     obj = valuePop(ctxt);
+    if (obj == nullptr) {
+      args.prepend(init_null());
+      continue;
+    }
     switch (obj->type) {
     case XPATH_STRING:
       arg = String((char*)obj->stringval, CopyString);
@@ -319,22 +341,24 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
             xmlNodePtr node = obj->nodesetval->nodeTab[j];
 
             if (node->type == XML_ELEMENT_NODE) {
-              Object element = DOMElement::newInstance(
-                  Object(), xmlCopyNode(node, /*extended*/ 1));
+              Object element = newNode(s_DOMElement,
+                                       xmlCopyNode(node, /*extended*/ 1));
               arg.toArrRef().append(element);
             } else if (node->type == XML_ATTRIBUTE_NODE) {
-              Object attribute = DOMAttr::newInstance(
-                  Object(), (xmlNodePtr)xmlCopyProp(nullptr, (xmlAttrPtr)node));
+              Object attribute =
+                newNode(s_DOMAttr,
+                        (xmlNodePtr)xmlCopyProp(nullptr, (xmlAttrPtr)node));
               arg.toArrRef().append(attribute);
             } else if (node->type == XML_TEXT_NODE) {
-              Object text = DOMText::newInstance(
-                  Object(), (xmlNodePtr)xmlNewText(xmlNodeGetContent(node)));
+              Object text =
+                newNode(s_DOMText,
+                        (xmlNodePtr)xmlNewText(xmlNodeGetContent(node)));
               arg.toArrRef().append(text);
             } else {
               raise_warning("Unhandled node type '%d'", node->type);
               // Use a generic DOMNode as fallback for now.
-              Object nodeobj = DOMNode::newInstance(
-                  Object(), xmlCopyNode(node, /*extended*/ 1));
+              Object nodeobj = newNode(s_DOMNode,
+                                       xmlCopyNode(node, /*extended*/ 1));
               arg.toArrRef().append(nodeobj);
             }
           }
@@ -349,7 +373,7 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
   }
 
   obj = valuePop(ctxt);
-  if (obj->stringval == nullptr) {
+  if ((obj == nullptr) || (obj->stringval == nullptr)) {
     raise_warning("Handler name must be a string");
     xmlXPathFreeObject(obj);
     // Push an empty string to get an xslt result.
@@ -359,7 +383,7 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
   String handler((char*)obj->stringval, CopyString);
   xmlXPathFreeObject(obj);
 
-  if (!HHVM_FN(is_callable)(handler)) {
+  if (!is_callable(handler)) {
     raise_warning("Unable to call handler %s()", handler.data());
     // Push an empty string to get an xslt result.
     valuePush(ctxt, xmlXPathNewString((xmlChar*)""));
@@ -371,10 +395,11 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
   } else {
     Variant retval = vm_call_user_func(handler, args);
     if (retval.isObject() &&
-        retval.getObjectData()->instanceof(DOMNode::getClass())) {
+        retval.getObjectData()->instanceof(s_DOMNode)) {
       ObjectData *retval_data = retval.asCObjRef().get();
-      xmlNode *nodep = toDOMNode(retval_data)->m_node;
+      xmlNode* nodep = Native::data<DOMNode>(retval_data)->nodep();
       valuePush(ctxt, xmlXPathNewNodeSet(nodep));
+      intern->m_usedElements.prepend(retval);
     } else if (retval.is(KindOfBoolean)) {
       valuePush(ctxt, xmlXPathNewBoolean(retval.toBoolean()));
     } else if (retval.isObject()) {
@@ -445,18 +470,18 @@ static void HHVM_METHOD(XSLTProcessor, importStylesheet,
   auto data = Native::data<XSLTProcessorData>(this_);
   xmlDocPtr doc = nullptr;
 
-  if (stylesheet.instanceof(DOMDocument::getClass())) {
-    DOMDocument *domdoc = Native::data<DOMDocument>(stylesheet.get());
+  if (stylesheet.instanceof(s_DOMDocument)) {
+    auto domdoc = Native::data<DOMNode>(stylesheet);
     // This doc will be freed by xsltFreeStylesheet.
-    doc = xmlCopyDoc((xmlDocPtr)domdoc->m_node, /*recursive*/ 1);
+    doc = xmlCopyDoc((xmlDocPtr)domdoc->nodep(), /*recursive*/ 1);
     if (doc == nullptr) {
       raise_error("Unable to import stylesheet");
     }
-  } else if (stylesheet.instanceof(c_SimpleXMLElement::classof())) {
-    c_SimpleXMLElement *elem = stylesheet.getTyped<c_SimpleXMLElement>();
+  } else if (stylesheet.instanceof(SimpleXMLElement_classof())) {
+    auto ssNode = SimpleXMLElement_exportNode(stylesheet);
     // This doc will be freed by xsltFreeStylesheet.
     doc = xmlNewDoc((const xmlChar*)"1.0");
-    xmlNodePtr node = xmlCopyNode(elem->node, /*extended*/ 1);
+    xmlNodePtr node = xmlCopyNode(ssNode, /*extended*/ 1);
     if (doc == nullptr || node == nullptr) {
       raise_error("Unable to import stylesheet");
     }
@@ -577,6 +602,10 @@ static bool HHVM_METHOD(XSLTProcessor, setProfiling,
                         const String& filename) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
+  if (!FileUtil::checkPathAndWarn(filename, "XSLTProcessor::setProfiling", 1)) {
+    return false;
+  }
+
   if (filename.length() > 0) {
     String translated = File::TranslatePath(filename);
     Stream::Wrapper* w = Stream::getWrapperFromURI(translated);
@@ -594,16 +623,17 @@ static Variant HHVM_METHOD(XSLTProcessor, transformToDoc,
                            const Object& doc) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
-  if (doc.instanceof(DOMNode::getClass())) {
-    DOMNode *domnode = toDOMNode(doc.get());
-    data->m_doc = xmlCopyDoc((xmlDocPtr)domnode->m_node, /*recursive*/ 1);
+  if (doc.instanceof(s_DOMNode)) {
+    auto domnode = Native::data<DOMNode>(doc);
+    data->m_doc =
+      libxml_register_node(xmlCopyDoc((xmlDocPtr)domnode->nodep(),
+                                      /*recursive*/ 1));
 
-    ObjectData* ret = ObjectData::newInstance(DOMDocument::c_Class);
-    DOMDocument* doc_data = Native::data<DOMDocument>(ret);
-    doc_data->m_node = (xmlNodePtr)data->apply_stylesheet();
-    doc_data->m_owner = true;
+    auto ret = newDOMDocument(false /* construct */);
+    DOMNode* doc_data = Native::data<DOMNode>(ret);
+    doc_data->setNode((xmlNodePtr)data->apply_stylesheet());
 
-    return Object(ret);
+    return ret;
   }
 
   return false;
@@ -614,9 +644,15 @@ static Variant HHVM_METHOD(XSLTProcessor, transformToURI,
                            const String& uri) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
-  if (doc.instanceof(DOMDocument::getClass())) {
-    DOMDocument *domdoc = Native::data<DOMDocument>(doc.get());
-    data->m_doc = xmlCopyDoc ((xmlDocPtr)domdoc->m_node, /*recursive*/ 1);
+  if (!FileUtil::checkPathAndWarn(uri, "XSLTProcessor::transformToUri", 2)) {
+    return false;
+  }
+
+  if (doc.instanceof(s_DOMDocument)) {
+    auto domdoc = Native::data<DOMNode>(doc);
+    data->m_doc =
+      libxml_register_node(xmlCopyDoc ((xmlDocPtr)domdoc->nodep(),
+                                       /*recursive*/ 1));
 
     String translated = libxml_get_valid_file_path(uri);
     if (translated.empty()) {
@@ -649,9 +685,11 @@ static Variant HHVM_METHOD(XSLTProcessor, transformToXML,
                            const Object& doc) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
-  if (doc.instanceof(DOMDocument::getClass())) {
-    DOMDocument *domdoc = Native::data<DOMDocument>(doc.get());
-    data->m_doc = xmlCopyDoc ((xmlDocPtr)domdoc->m_node, /*recursive*/ 1);
+  if (doc.instanceof(s_DOMDocument)) {
+    auto domdoc = Native::data<DOMNode>(doc);
+    data->m_doc =
+      libxml_register_node(xmlCopyDoc ((xmlDocPtr)domdoc->nodep(),
+                                       /*recursive*/ 1));
 
     xmlDocPtr res = data->apply_stylesheet();
     if (res == nullptr) {
@@ -678,54 +716,22 @@ static Variant HHVM_METHOD(XSLTProcessor, transformToXML,
 ///////////////////////////////////////////////////////////////////////////////
 // extension
 
-const StaticString s_XSL_SECPREF_NONE("XSL_SECPREF_NONE");
-const StaticString s_XSL_SECPREF_READ_FILE("XSL_SECPREF_READ_FILE");
-const StaticString s_XSL_SECPREF_WRITE_FILE("XSL_SECPREF_WRITE_FILE");
-const StaticString
-  s_XSL_SECPREF_CREATE_DIRECTORY("XSL_SECPREF_CREATE_DIRECTORY");
-const StaticString s_XSL_SECPREF_READ_NETWORK("XSL_SECPREF_READ_NETWORK");
-const StaticString s_XSL_SECPREF_WRITE_NETWORK("XSL_SECPREF_WRITE_NETWORK");
-const StaticString s_XSL_SECPREF_DEFAULT("XSL_SECPREF_DEFAULT");
-
-const StaticString s_xslt_version("LIBXSLT_VERSION");
-const StaticString s_xslt_dotted_version("LIBXSLT_DOTTED_VERSION");
-const StaticString s_xslt_dotted_version_value(LIBXSLT_DOTTED_VERSION);
-
-class XSLExtension : public Extension {
-  public:
+struct XSLExtension final : Extension {
     XSLExtension() : Extension("xsl", "0.1") {};
 
-    virtual void moduleInit() {
+    void moduleInit() override {
       xsltSetGenericErrorFunc(nullptr, xslt_ext_error_handler);
       exsltRegisterAll();
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_NONE.get(), k_XSL_SECPREF_NONE
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_READ_FILE.get(), k_XSL_SECPREF_READ_FILE
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_WRITE_FILE.get(), k_XSL_SECPREF_WRITE_FILE
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_CREATE_DIRECTORY.get(), k_XSL_SECPREF_CREATE_DIRECTORY
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_READ_NETWORK.get(), k_XSL_SECPREF_READ_NETWORK
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_WRITE_NETWORK.get(), k_XSL_SECPREF_WRITE_NETWORK
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_DEFAULT.get(), k_XSL_SECPREF_DEFAULT
-      );
+      HHVM_RC_INT(XSL_SECPREF_NONE, k_XSL_SECPREF_NONE);
+      HHVM_RC_INT(XSL_SECPREF_READ_FILE, k_XSL_SECPREF_READ_FILE);
+      HHVM_RC_INT(XSL_SECPREF_WRITE_FILE, k_XSL_SECPREF_WRITE_FILE);
+      HHVM_RC_INT(XSL_SECPREF_CREATE_DIRECTORY, k_XSL_SECPREF_CREATE_DIRECTORY);
+      HHVM_RC_INT(XSL_SECPREF_READ_NETWORK, k_XSL_SECPREF_READ_NETWORK);
+      HHVM_RC_INT(XSL_SECPREF_WRITE_NETWORK, k_XSL_SECPREF_WRITE_NETWORK);
+      HHVM_RC_INT(XSL_SECPREF_DEFAULT, k_XSL_SECPREF_DEFAULT);
 
-      Native::registerConstant<KindOfInt64>(
-        s_xslt_version.get(), LIBXSLT_VERSION
-      );
-      Native::registerConstant<KindOfString>(
-        s_xslt_dotted_version.get(), s_xslt_dotted_version_value.get()
-      );
+      HHVM_RC_INT_SAME(LIBXSLT_VERSION);
+      HHVM_RC_STR_SAME(LIBXSLT_DOTTED_VERSION);
 
       HHVM_ME(XSLTProcessor, getParameter);
       HHVM_ME(XSLTProcessor, getSecurityPrefs);

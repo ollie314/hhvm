@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,24 +18,49 @@
 #ifndef incl_HPHP_EXT_ASIO_H_
 #define incl_HPHP_EXT_ASIO_H_
 
-#include "hphp/runtime/base/base-includes.h"
-#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
-#include "hphp/runtime/ext/asio/async_generator.h"
-#include "hphp/runtime/ext/asio/async_generator_wait_handle.h"
-#include "hphp/runtime/ext/asio/await_all_wait_handle.h"
-#include "hphp/runtime/ext/asio/blockable_wait_handle.h"
-#include "hphp/runtime/ext/asio/external_thread_event_wait_handle.h"
-#include "hphp/runtime/ext/asio/gen_array_wait_handle.h"
-#include "hphp/runtime/ext/asio/gen_map_wait_handle.h"
-#include "hphp/runtime/ext/asio/gen_vector_wait_handle.h"
-#include "hphp/runtime/ext/asio/reschedule_wait_handle.h"
-#include "hphp/runtime/ext/asio/sleep_wait_handle.h"
-#include "hphp/runtime/ext/asio/static_wait_handle.h"
-#include "hphp/runtime/ext/asio/waitable_wait_handle.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 
+struct AsioExtension final : Extension {
+  AsioExtension() : Extension("asio", "0.1") {}
+
+  void moduleInit() override {
+    initFunctions();
+
+    initWaitHandle();
+    initWaitableWaitHandle();
+    initResumableWaitHandle();
+    initAsyncGenerator();
+    initAwaitAllWaitHandle();
+    initConditionWaitHandle();
+    initSleepWaitHandle();
+    initRescheduleWaitHandle();
+    initExternalThreadEventWaitHandle();
+
+    loadSystemlib();
+
+    finishClasses();
+  }
+
+private:
+  void initFunctions();
+
+  void initWaitHandle();
+  void initWaitableWaitHandle();
+  void initResumableWaitHandle();
+  void initAsyncGenerator();
+  void initAwaitAllWaitHandle();
+  void initConditionWaitHandle();
+  void initSleepWaitHandle();
+  void initRescheduleWaitHandle();
+  void initExternalThreadEventWaitHandle();
+
+  void finishClasses();
+};
+
 Object HHVM_FUNCTION(asio_get_running);
+size_t asio_object_size(const ObjectData* obj);
 
 }
 

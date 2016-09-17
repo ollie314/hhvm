@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,25 +17,26 @@
 #ifndef incl_HPHP_EVAL_DEBUGGER_SERVER_H_
 #define incl_HPHP_EVAL_DEBUGGER_SERVER_H_
 
-#include "hphp/util/async-func.h"
 #include <vector>
+
 #include "hphp/runtime/base/socket.h"
+#include "hphp/util/async-func.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
-/**
+/*
  * Only needed for accepting remote debugger client's connection requests.
  */
-class DebuggerServer {
-public:
-  /**
+struct DebuggerServer {
+  /*
    * Start/stop for remote debugging.
    */
   static bool Start();
   static void Stop();
 
-public:
+  /////////////////////////////////////////////////////////////////////////////
+
   DebuggerServer();
   ~DebuggerServer();
 
@@ -48,9 +49,13 @@ public:
 private:
   static DebuggerServer s_debugger_server;
 
+  req::ptr<Socket> nthSocket(unsigned i) const {
+    return req::make<Socket>(m_socks[i]);
+  }
+
   AsyncFunc<DebuggerServer> m_serverThread;
   bool m_stopped;
-  std::vector<SmartPtr<Socket>> m_socks;
+  std::vector<std::shared_ptr<SocketData>> m_socks;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

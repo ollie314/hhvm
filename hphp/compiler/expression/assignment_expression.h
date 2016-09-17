@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,31 +25,31 @@ namespace HPHP {
 DECLARE_BOOST_TYPES(AssignmentExpression);
 struct TypedValue;
 
-class AssignmentExpression : public Expression, public IParseHandler {
-public:
+struct AssignmentExpression : Expression, IParseHandler {
   AssignmentExpression(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                        ExpressionPtr variable, ExpressionPtr value,
                        bool ref, bool rhsFirst = false);
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
+  ExpressionPtr preOptimize(AnalysisResultConstPtr ar) override;
 
   // implementing IParseHandler
-  virtual void onParseRecur(AnalysisResultConstPtr ar, ClassScopePtr scope);
+  void onParseRecur(AnalysisResultConstPtr ar, FileScopeRawPtr fs,
+                    ClassScopePtr scope) override;
 
-  virtual bool isRefable(bool checkError = false) const {
+  bool isRefable(bool checkError = false) const override {
     if (checkError) return true;
     return m_value->isRefable() &&
            (m_value->getContext() & Expression::RefValue);
   }
 
   ExpressionPtr getVariable() { return m_variable;}
-  ExpressionPtr getStoreVariable() const { return m_variable; }
+  ExpressionPtr getStoreVariable() const override { return m_variable; }
   ExpressionPtr getValue() { return m_value;}
   void setVariable(ExpressionPtr v) { m_variable = v; }
   void setValue(ExpressionPtr v) { m_value = v; }
   bool isRhsFirst() { return m_rhsFirst; }
-  int getLocalEffects() const;
+  int getLocalEffects() const override;
 
   // $GLOBALS[<literal-string>] = <scalar>;
   bool isSimpleGlobalAssign(StringData **name, TypedValue *tv) const;

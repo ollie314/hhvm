@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,7 @@
 #define incl_HPHP_ARRAY_H_
 
 #include "hphp/runtime/base/array-data.h"
-#include "hphp/runtime/base/smart-ptr.h"
+#include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/types.h"
 
 #include <algorithm>
@@ -27,8 +27,27 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-// forward declaration
-class ArrayIter;
+struct ArrayIter;
+struct VariableUnserializer;
+
+////////////////////////////////////////////////////////////////////////////////
+
+enum class AccessFlags {
+  None     = 0,
+  Error    = 1,
+  Key      = 2,
+  ErrorKey = Error | Key,
+};
+
+inline AccessFlags operator&(AccessFlags a, AccessFlags b) {
+  return static_cast<AccessFlags>(static_cast<int>(a) & static_cast<int>(b));
+}
+
+constexpr bool any(AccessFlags a) {
+  return a != AccessFlags::None;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 /*
  * Array type wrapping around ArrayData to implement reference
@@ -39,12 +58,22 @@ class ArrayIter;
  * type of ArrayData to accomplish the task. This "upgrade" is called
  * escalation.
  */
-class Array : protected SmartPtr<ArrayData> {
-  typedef SmartPtr<ArrayData> ArrayBase;
+struct Array {
+private:
+  using Ptr = req::ptr<ArrayData>;
+  using NoIncRef = Ptr::NoIncRef;
+  using NonNull = Ptr::NonNull;
 
-  explicit Array(ArrayData* ad, ArrayBase::NoIncRef)
-   : ArrayBase(ad, ArrayBase::NoIncRef{})
-  {}
+  using Flags = AccessFlags;
+
+  Ptr m_arr;
+
+  Array(ArrayData* ad, NoIncRef) : m_arr(ad, NoIncRef{}) {}
+
+public:
+  template<class F> void scan(F& mark) const {
+    mark(m_arr);
+  }
 
 public:
   /*
@@ -52,11 +81,23 @@ public:
    * different than those copying constructors that also take one value.
    */
   static Array Create() {
-    return Array(ArrayData::Create());
+    return Array(ArrayData::Create(), NoIncRef{});
+  }
+
+  static Array CreateVec() {
+    return Array(ArrayData::CreateVec(), NoIncRef{});
+  }
+
+  static Array CreateDict() {
+    return Array(ArrayData::CreateDict(), NoIncRef{});
+  }
+
+  static Array CreateKeyset() {
+    return Array(ArrayData::CreateKeyset(), NoIncRef{});
   }
 
   static Array Create(const Variant& value) {
-    return Array(ArrayData::Create(value));
+    return Array(ArrayData::Create(value), NoIncRef{});
   }
 
   static Array Create(const Variant& key, const Variant& value);
@@ -67,50 +108,60 @@ public:
 
   // Take ownership of this ArrayData.
   static ALWAYS_INLINE Array attach(ArrayData* ad) {
-    return Array(ad, ArrayBase::NoIncRef{});
+    return Array(ad, NoIncRef{});
   }
 
   // Transfer ownership of our reference to this ArrayData.
-  ArrayData* detach() {
-    ArrayData* ret = m_px;
-    m_px = nullptr;
-    return ret;
-  }
+  ArrayData* detach() { return m_arr.detach(); }
 
-  ArrayData* get() const { return m_px; }
-  void reset() { ArrayBase::reset(); }
+  ArrayData* get() const { return m_arr.get(); }
+  void reset(ArrayData* arr = nullptr) { m_arr.reset(arr); }
 
   // Deliberately doesn't throw_null_pointer_exception as a perf
   // optimization.
-  ArrayData* operator->() const {
-    return m_px;
-  }
+  ArrayData* operator->() const { return m_arr.get(); }
 
   void escalate();
+
+  #define COPY_BODY(meth, def)                                          \
+    if (!m_arr) return def;                                             \
+    auto new_arr = m_arr->meth;                                         \
+    return new_arr != m_arr ? Array{new_arr, NoIncRef{}} : Array{*this};
+
+  // Make a copy of this array. Like the underlying ArrayData::copy operation,
+  // the returned Array may point to the same underlying array as the original,
+  // or a new one.
+  Array copy() const { COPY_BODY(copy(), Array{}) }
+  Array toVec() const { COPY_BODY(toVec(true), CreateVec()) }
+  Array toDict() const { COPY_BODY(toDict(true), CreateDict()) }
+  Array toKeyset() const { COPY_BODY(toKeyset(true), CreateKeyset()) }
+  Array toPHPArray() const { COPY_BODY(toPHPArray(true), Array{}) }
+
+  #undef COPY_BODY
 
   /*
    * Constructors. Those that take "arr" or "var" are copy constructors, taking
    * array value from the parameter, and they are NOT constructing an array
    * with that single value (then one should use Array::Create() functions).
    */
-  explicit Array(ArrayData* data) : ArrayBase(data) { }
-  /* implicit */ Array(const Array& arr) : ArrayBase(arr.m_px) { }
+  explicit Array(ArrayData* data) : m_arr(data) { }
+  /* implicit */ Array(const Array& arr) : m_arr(arr.m_arr) { }
 
   /*
-   * Special constructor for use from ArrayInit that creates an Array
-   * without a null check.
+   * Special constructor for use from ArrayInit that creates an Array without a
+   * null check and without an inc-ref.
    */
   enum class ArrayInitCtor { Tag };
   explicit Array(ArrayData* ad, ArrayInitCtor)
-    : ArrayBase(ad, ArrayBase::NonNull::Tag)
+    : m_arr(ad, NoIncRef{})
   {}
 
   // Move ctor
-  Array(Array&& src) noexcept : ArrayBase(std::move(src)) { }
+  Array(Array&& src) noexcept : m_arr(std::move(src.m_arr)) { }
 
   // Move assign
   Array& operator=(Array&& src) {
-    ArrayBase::operator=(std::move(src));
+    m_arr = std::move(src.m_arr);
     return *this;
   }
 
@@ -118,34 +169,57 @@ public:
    * Informational
    */
   bool empty() const {
-    return m_px == nullptr || m_px->empty();
+    return !m_arr || m_arr->empty();
   }
   ssize_t size() const {
-    return m_px ? m_px->size() : 0;
+    return m_arr ? m_arr->size() : 0;
   }
   ssize_t length() const {
-    return m_px ? m_px->size() : 0;
+    return m_arr ? m_arr->size() : 0;
   }
   bool isNull() const {
-    return m_px == nullptr;
+    return !m_arr;
   }
   Array values() const;
+
+  bool isVecArray() const { return m_arr && m_arr->isVecArray(); }
+  bool isDict() const { return m_arr && m_arr->isDict(); }
+  bool isKeyset() const { return m_arr && m_arr->isKeyset(); }
+  bool isHackArray() const { return m_arr && m_arr->isHackArray(); }
+  bool isPHPArray() const { return !m_arr || m_arr->isPHPArray(); }
+
+  bool useWeakKeys() const {
+    // If array isn't set we may implicitly create a mixed array. We never
+    // implicitly create a dict array or vec.
+    return !m_arr || m_arr->useWeakKeys();
+  }
+
+  /*
+   * Converts k to a valid key for this array type
+   */
+  VarNR convertKey(const Variant& k) const;
 
   /*
    * Operators
    */
-  Array& operator =  (ArrayData* data);
-  Array& operator =  (const Array& v);
-  Array& operator =  (const Variant& v);
-  Array  operator +  (ArrayData* data) const;
-  Array  operator +  (const Array& v) const;
-  Array  operator +  (const Variant& v) const = delete;
-  Array& operator += (ArrayData* data);
-  Array& operator += (const Array& v);
-  Array& operator += (const Variant& v);
+  Array& operator=(ArrayData* data) {
+    m_arr = data;
+    return *this;
+  }
+  Array& operator=(const Array& arr) {
+    m_arr = arr.m_arr;
+    return *this;
+  }
+  Array& operator=(const Variant& v);
+  Array  operator+(ArrayData* data) const;
+  Array  operator+(const Array& v) const;
+  Array  operator+(const Variant& v) const = delete;
+  Array& operator+=(ArrayData* data);
+  Array& operator+=(const Array& v);
+  Array& operator+=(const Variant& v);
 
   // Move assignment
-  Array& operator =  (Variant&& v);
+  Array& operator=(Variant&& v);
 
   /*
    * Returns the entries that have keys and/or values that are not present in
@@ -198,22 +272,36 @@ public:
   /*
    * Sorting.
    */
-  static int SortRegularAscending(const Variant& v1, const Variant& v2, const void* data);
-  static int SortNumericAscending(const Variant& v1, const Variant& v2, const void* data);
-  static int SortStringAscending(const Variant& v1, const Variant& v2, const void* data);
-  static int SortStringAscendingCase(const Variant& v1, const Variant& v2, const void* data);
+  static int SortRegularAscending(const Variant& v1, const Variant& v2,
+                                  const void* data);
+  static int SortNumericAscending(const Variant& v1, const Variant& v2,
+                                  const void* data);
+  static int SortStringAscending(const Variant& v1, const Variant& v2,
+                                 const void* data);
+  static int SortStringAscendingCase(const Variant& v1, const Variant& v2,
+                                     const void* data);
   static int SortLocaleStringAscending(const Variant& v1, const Variant& v2,
                                        const void* data);
 
-  static int SortRegularDescending(const Variant& v1, const Variant& v2, const void* data);
-  static int SortNumericDescending(const Variant& v1, const Variant& v2, const void* data);
-  static int SortStringDescending(const Variant& v1, const Variant& v2, const void* data);
-  static int SortStringDescendingCase(const Variant& v1, const Variant& v2, const void* data);
+  static int SortRegularDescending(const Variant& v1, const Variant& v2,
+                                   const void* data);
+  static int SortNumericDescending(const Variant& v1, const Variant& v2,
+                                   const void* data);
+  static int SortStringDescending(const Variant& v1, const Variant& v2,
+                                  const void* data);
+  static int SortStringDescendingCase(const Variant& v1, const Variant& v2,
+                                      const void* data);
   static int SortLocaleStringDescending(const Variant& v1, const Variant& v2,
                                         const void* data);
 
-  static int SortNatural(const Variant& v1, const Variant& v2, const void* data);
-  static int SortNaturalCase(const Variant& v1, const Variant& v2, const void* data);
+  static int SortNaturalAscending(const Variant& v1, const Variant& v2,
+                                  const void* data);
+  static int SortNaturalDescending(const Variant& v1, const Variant& v2,
+                                   const void* data);
+  static int SortNaturalCaseAscending(const Variant& v1, const Variant& v2,
+                                      const void* data);
+  static int SortNaturalCaseDescending(const Variant& v1, const Variant& v2,
+                                       const void* data);
 
   void sort(PFUNC_CMP cmp_func, bool by_key, bool renumber,
             const void* data = nullptr);
@@ -239,12 +327,12 @@ public:
   /*
    * Type conversions
    */
-  bool    toBoolean() const { return  m_px && !m_px->empty(); }
-  char    toByte   () const { return (m_px && !m_px->empty()) ? 1 : 0; }
-  short   toInt16  () const { return (m_px && !m_px->empty()) ? 1 : 0; }
-  int     toInt32  () const { return (m_px && !m_px->empty()) ? 1 : 0; }
-  int64_t toInt64  () const { return (m_px && !m_px->empty()) ? 1 : 0; }
-  double  toDouble () const { return (m_px && !m_px->empty()) ? 1.0 : 0.0; }
+  bool    toBoolean() const { return  m_arr && !m_arr->empty(); }
+  char    toByte   () const { return (m_arr && !m_arr->empty()) ? 1 : 0; }
+  short   toInt16  () const { return (m_arr && !m_arr->empty()) ? 1 : 0; }
+  int     toInt32  () const { return (m_arr && !m_arr->empty()) ? 1 : 0; }
+  int64_t toInt64  () const { return (m_arr && !m_arr->empty()) ? 1 : 0; }
+  double  toDouble () const { return (m_arr && !m_arr->empty()) ? 1.0 : 0.0; }
   String  toString () const;
 
   /*
@@ -256,28 +344,30 @@ public:
   bool equal(const Object& v2) const;
   bool less (const Array& v2, bool flip = false) const;
   bool less (const Object& v2) const;
+
   bool less (const Variant& v2) const;
   bool more (const Array& v2, bool flip = true) const;
   bool more (const Object& v2) const;
   bool more (const Variant& v2) const;
+  int compare (const Array& v2, bool flip = false) const;
 
   /*
    * Offset
    */
-  Variant rvalAt(int     key, ACCESSPARAMS_DECL) const;
-  Variant rvalAt(int64_t key, ACCESSPARAMS_DECL) const;
-  Variant rvalAt(double  key, ACCESSPARAMS_DECL) const = delete;
-  Variant rvalAt(const String& key, ACCESSPARAMS_DECL) const;
-  Variant rvalAt(const Variant& key, ACCESSPARAMS_DECL) const;
+  Variant rvalAt(int     key, Flags = Flags::None) const;
+  Variant rvalAt(int64_t key, Flags = Flags::None) const;
+  Variant rvalAt(double  key, Flags = Flags::None) const = delete;
+  Variant rvalAt(const String& key, Flags = Flags::None) const;
+  Variant rvalAt(const Variant& key, Flags = Flags::None) const;
 
   /*
    * To get offset for temporary usage
    */
-  const Variant& rvalAtRef(int     key, ACCESSPARAMS_DECL) const;
-  const Variant& rvalAtRef(int64_t key, ACCESSPARAMS_DECL) const;
-  const Variant& rvalAtRef(double  key, ACCESSPARAMS_DECL) const = delete;
-  const Variant& rvalAtRef(const Variant& key, ACCESSPARAMS_DECL) const;
-  const Variant& rvalAtRef(const String& key, ACCESSPARAMS_DECL) const;
+  const Variant& rvalAtRef(int     key, Flags = Flags::None) const;
+  const Variant& rvalAtRef(int64_t key, Flags = Flags::None) const;
+  const Variant& rvalAtRef(double  key, Flags = Flags::None) const = delete;
+  const Variant& rvalAtRef(const Variant& key, Flags = Flags::None) const;
+  const Variant& rvalAtRef(const String& key, Flags = Flags::None) const;
 
   const Variant operator[](int     key) const;
   const Variant operator[](int64_t key) const;
@@ -301,15 +391,25 @@ public:
   /*
    * Get an lval reference to an element.
    */
-  Variant& lvalAt(int key, ACCESSPARAMS_DECL) {
+  Variant& lvalAt(int key, Flags flags = Flags::None) {
     return lvalAtImpl(key, flags);
   }
-  Variant& lvalAt(int64_t key, ACCESSPARAMS_DECL) {
+  Variant& lvalAt(int64_t key, Flags flags = Flags::None) {
     return lvalAtImpl(key, flags);
   }
-  Variant& lvalAt(double key, ACCESSPARAMS_DECL) = delete;
-  Variant& lvalAt(const String& key, ACCESSPARAMS_DECL);
-  Variant& lvalAt(const Variant& key, ACCESSPARAMS_DECL);
+  Variant& lvalAt(double key, Flags = Flags::None) = delete;
+  Variant& lvalAt(const String& key, Flags = Flags::None);
+  Variant& lvalAt(const Variant& key, Flags = Flags::None);
+
+  Variant& lvalAtRef(int key, Flags flags = Flags::None) {
+    return lvalAtRefImpl(key, flags);
+  }
+  Variant& lvalAtRef(int64_t key, Flags flags = Flags::None) {
+    return lvalAtRefImpl(key, flags);
+  }
+  Variant& lvalAtRef(double key, Flags = Flags::None) = delete;
+  Variant& lvalAtRef(const String& key, Flags = Flags::None);
+  Variant& lvalAtRef(const Variant& key, Flags = Flags::None);
 
   /*
    * Set an element to a value.
@@ -381,11 +481,6 @@ public:
   Variant dequeue();
   void prepend(const Variant& v);
 
-  /*
-   * Input/Output
-   */
-  void serialize(VariableSerializer* serializer, bool isObject = false) const;
-  void unserialize(VariableUnserializer* uns);
   void setEvalScalar() const;
 
  private:
@@ -401,24 +496,34 @@ public:
 
   template<typename T>
   bool existsImpl(const T& key) const {
-    if (m_px) return m_px->exists(key);
+    if (m_arr) return m_arr->exists(key);
     return false;
   }
 
   template<typename T>
   void removeImpl(const T& key) {
-    if (m_px) {
-      ArrayData* escalated = m_px->remove(key, (m_px->hasMultipleRefs()));
-      if (escalated != m_px) ArrayBase::operator=(escalated);
+    if (m_arr) {
+      ArrayData* escalated = m_arr->remove(key, m_arr->cowCheck());
+      if (escalated != m_arr) m_arr = Ptr::attach(escalated);
     }
   }
 
   template<typename T>
-  Variant& lvalAtImpl(const T& key, ACCESSPARAMS_DECL) {
-    if (!m_px) ArrayBase::operator=(ArrayData::Create());
+  Variant& lvalAtImpl(const T& key, Flags = Flags::None) {
+    if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
     Variant* ret = nullptr;
-    ArrayData* escalated = m_px->lval(key, ret, m_px->hasMultipleRefs());
-    if (escalated != m_px) ArrayBase::operator=(escalated);
+    ArrayData* escalated = m_arr->lval(key, ret, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
+    assert(ret);
+    return *ret;
+  }
+
+  template<typename T>
+  Variant& lvalAtRefImpl(const T& key, Flags = Flags::None) {
+    if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
+    Variant* ret = nullptr;
+    ArrayData* escalated = m_arr->lvalRef(key, ret, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
     assert(ret);
     return *ret;
   }
@@ -436,6 +541,12 @@ struct ArrNR {
 
   ArrNR(const ArrNR& a) {
     m_px = a.m_px;
+  }
+
+  ~ArrNR() {
+    if (debug) {
+      m_px = reinterpret_cast<ArrayData*>(0xdeadbeeffaceb004);
+    }
   }
 
   operator const Array&() const { return asArray(); }
@@ -467,12 +578,14 @@ private:
  * sweep time we don't run these destructors.
  */
 struct ArrayNoDtor {
+  /* implicit */ ArrayNoDtor(ArrayData* table) { new (&m_arr) Array(table); }
   ArrayNoDtor() { new (&m_arr) Array(); }
   ArrayNoDtor(ArrayNoDtor&& o) noexcept {
     new (&m_arr) Array(std::move(o.m_arr));
   }
   ~ArrayNoDtor() {}
   Array& arr() { return m_arr; }
+  const Array& arr() const { return m_arr; }
   void destroy() { m_arr.~Array(); }
 private:
   union { Array m_arr; };
@@ -487,4 +600,4 @@ ALWAYS_INLINE Array empty_array() {
 ///////////////////////////////////////////////////////////////////////////////
 }
 
-#endif // incl_HPHP_ARRAY_H_
+#endif

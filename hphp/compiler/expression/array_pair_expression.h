@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,25 +24,22 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(ArrayPairExpression);
 
-class ArrayPairExpression : public Expression {
-public:
+struct ArrayPairExpression : Expression {
   ArrayPairExpression(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                       ExpressionPtr name, ExpressionPtr value, bool ref,
                       bool collection = false);
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  virtual bool containsDynamicConstant(AnalysisResultPtr ar) const;
-  virtual bool isScalar() const;
+  bool containsDynamicConstant(AnalysisResultPtr ar) const override;
+  bool isScalar() const override;
 
   ExpressionPtr getName() { return m_name;}
   ExpressionPtr getValue() { return m_value;}
 
-  virtual int getLocalEffects() const { return NoEffect; }
+  int getLocalEffects() const override { return NoEffect; }
   bool isScalarArrayPair() const;
 
   bool isRef() const { return m_ref; }
-
-  bool canonCompare(ExpressionPtr e) const;
 private:
   ExpressionPtr m_name;
   ExpressionPtr m_value;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,6 +22,8 @@
 #include "hphp/runtime/vm/type-alias.h"
 
 #include "hphp/util/portability.h"
+#include "hphp/util/low-ptr.h"
+#include "hphp/util/alloc.h"
 
 #include <folly/AtomicHashMap.h>
 
@@ -31,9 +33,8 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Class;
-class Func;
-class String;
+struct Func;
+struct String;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -77,28 +78,29 @@ struct NamedEntity {
   typedef folly::AtomicHashMap<const StringData*,
                                NamedEntity,
                                string_data_hash,
-                               ahm_string_data_isame> Map;
+                               ahm_string_data_isame,
+                               LowAllocator<char>> Map;
 
   /////////////////////////////////////////////////////////////////////////////
   // Constructors.
 
   explicit NamedEntity()
-    : m_cachedClass(RDS::kInvalidHandle)
-    , m_cachedFunc(RDS::kInvalidHandle)
-    , m_cachedTypeAlias(RDS::kInvalidHandle)
+    : m_cachedClass(rds::kInvalidHandle)
+    , m_cachedFunc(rds::kInvalidHandle)
+    , m_cachedTypeAlias(rds::kInvalidHandle)
   {}
 
-  NamedEntity(NamedEntity&& ne);
+  NamedEntity(NamedEntity&& ne) noexcept;
 
 
   /////////////////////////////////////////////////////////////////////////////
   // Func cache.
 
   /*
-   * Get the RDS::Handle that caches this Func*, creating a (non-persistent)
+   * Get the rds::Handle that caches this Func*, creating a (non-persistent)
    * one if it doesn't exist yet.
    */
-  RDS::Handle getFuncHandle() const;
+  rds::Handle getFuncHandle() const;
 
   /*
    * Set and get the cached Func*.
@@ -111,10 +113,10 @@ struct NamedEntity {
   // Class cache.
 
   /*
-   * Get the RDS::Handle that caches this Class*, creating a (non-persistent)
+   * Get the rds::Handle that caches this Class*, creating a (non-persistent)
    * one if it doesn't exist yet.
    */
-  RDS::Handle getClassHandle() const;
+  rds::Handle getClassHandle() const;
 
   /*
    * Set and get the cached Class*.
@@ -172,40 +174,43 @@ struct NamedEntity {
                           String* normalizedStr = nullptr) FLATTEN;
 
   /*
-   * The global NamedEntity table.
-   *
-   * TODO(#4717225) Get rid of this.
+   * Visitors that traverse the named entity table
    */
-  static Map* table();
+  template<class Fn> static void foreach_class(Fn fn);
+  template<class Fn> static void foreach_cached_class(Fn fn);
+  template<class Fn> static void foreach_cached_func(Fn fn);
 
   /*
    * Size of the global NamedEntity table.
    */
   static size_t tableSize();
 
+private:
+  template<class Fn> static void foreach_name(Fn);
+  static Map* table();
 
   /////////////////////////////////////////////////////////////////////////////
   // Data members.
 
 public:
-  mutable RDS::Link<Class*> m_cachedClass;
-  mutable RDS::Link<Func*> m_cachedFunc;
-  mutable RDS::Link<TypeAliasReq> m_cachedTypeAlias;
+  mutable rds::Link<LowPtr<Class>> m_cachedClass;
+  mutable rds::Link<LowPtr<Func>> m_cachedFunc;
+  mutable rds::Link<TypeAliasReq> m_cachedTypeAlias;
 
 private:
-  std::atomic<Class*> m_clsList{nullptr};
+  AtomicLowPtr<Class, std::memory_order_acquire,
+               std::memory_order_release> m_clsList{nullptr};
 };
 
 /*
  * Litstr and NamedEntity pair.
  */
-using NamedEntityPair = std::pair<const StringData*, const NamedEntity*>;
+using NamedEntityPair = std::pair<LowStringPtr,LowPtr<const NamedEntity>>;
 
-///////////////////////////////////////////////////////////////////////////////
 }
 
 #define incl_HPHP_VM_NAMED_ENTITY_INL_H_
 #include "hphp/runtime/vm/named-entity-inl.h"
 #undef incl_HPHP_VM_NAMED_ENTITY_INL_H_
 
-#endif // incl_HPHP_VM_NAMED_ENTITY_INL_H_
+#endif

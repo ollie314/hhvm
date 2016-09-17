@@ -38,13 +38,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#ifdef PHP_WIN32
-# include <io.h>
-# define O_RDONLY _O_RDONLY
-# include "win32/param.h"
-# include "win32/winutil.h"
-# include "win32/fnmatch.h"
-#else
+#ifndef PHP_WIN32
 # if HAVE_SYS_PARAM_H
 #  include <sys/param.h>
 # endif
@@ -75,23 +69,15 @@
 # endif
 #endif
 
-#ifdef HAVE_SYS_TIME_H
-# include <sys/time.h>
-#endif
+#include <folly/portability/SysFile.h>
+#include <folly/portability/SysTime.h>
+#include <folly/portability/SysMman.h>
 
 #include "fsock.h"
 #include "fopen_wrappers.h"
 
-#ifdef HAVE_SYS_FILE_H
-# include <sys/file.h>
-#endif
-
 #if MISSING_FCLOSE_DECL
 extern int fclose(FILE *);
-#endif
-
-#ifdef HAVE_SYS_MMAN_H
-# include <sys/mman.h>
 #endif
 
 #include "zend_API.h"

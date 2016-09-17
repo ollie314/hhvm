@@ -29,7 +29,7 @@
 # constructors and overriding any methods you need to get your particular
 # framework to run.
 ---
-# Unless otherwise specfied, "branch" will be the latest stable release
+# Unless otherwise specified, "branch" will be the latest stable release
 # of a framework
   assetic:
     url: https://github.com/fredemmott/assetic.git
@@ -52,8 +52,8 @@
   # Stable (2.x) doesn't use phpunit, so targetting the next major release
   cakephp3:
     url: https://github.com/cakephp/cakephp.git
-    branch: "3.0.0-alpha2"
-    commit: 9054d6414a1d767b4742728319447f625b2e31fb
+    branch: "3.0.5"
+    commit: d853d756efa39bad2f744c0110f8626e7b619590
     install_root: cakephp3
     test_root: cakephp3
   codeigniter:
@@ -71,6 +71,9 @@
       # Assumes that calculating the current time in seconds twice will give
       # the same result. Not true if you're unlucky.
       - codeigniter/tests/codeigniter/helpers/date_helper_test.php
+      # Flakey test case. Already made a PR
+      # at https://github.com/bcit-ci/CodeIgniter/pull/3399.
+      - codeigniter/tests/codeigniter/libraries/Session_test.php
   composer:
     url: https://github.com/composer/composer.git
     # master is the only available branch
@@ -94,6 +97,14 @@
       - doctrine2/tests/Doctrine/Tests/ORM/Cache/FileLockRegionTest.php
       - doctrine2/tests/Doctrine/Tests/ORM/Mapping/Symfony/XmlDriverTest.php
       - doctrine2/tests/Doctrine/Tests/ORM/Mapping/Symfony/YamlDriverTest.php
+    flakey:
+      - doctrine2/tests/Doctrine/Tests/ORM/Functional/IdentityMapTest.php
+      - doctrine2/tests/Doctrine/Tests/ORM/Tools/Export/YamlClassMetadataExporterTest.php
+      - doctrine2/tests/Doctrine/Tests/ORM/Tools/Export/XmlClassMetadataExporterTest.php
+      - doctrine2/tests/Doctrine/Tests/ORM/Tools/Export/PhpClassMetadataExporterTest.php
+      - doctrine2/tests/Doctrine/Tests/ORM/Tools/Export/AbstractClassMetadataExporterTest.php
+      - doctrine2/tests/Doctrine/Tests/ORM/Tools/Export/AnnotationClassMetadataExporterTest.php
+      - doctrine2/tests/Doctrine/Tests/ORM/Tools/Export/ClassMetadataExporterTest.php
   drupal:
     url: https://github.com/drupal/drupal.git
     branch: 8.0-alpha13
@@ -105,12 +116,6 @@
       - drupal/core/tests/Drupal/Tests/Component/PhpStorage/MTimeProtectedFileStorageTest.php
       # Depends on previous
       - drupal/core/tests/Drupal/Tests/Component/PhpStorage/MTimeProtectedFastFileStorageTest.php
-  ezpublish-kernel:
-    url: https://github.com/ezsystems/ezpublish-kernel.git
-    branch: v2014.07.0
-    commit: b7f0a2fd5750bbc11ce5bd6eb6c92d3180834463
-    install_root: ezpublish-kernel
-    test_root: ezpublish-kernel
   facebookphpsdk:
     # v3.2.3 from facebook/facebook-php-sdk and
     # https://github.com/facebook/facebook-php-sdk/pull/184
@@ -172,157 +177,21 @@
     commit: d97cf3ce890fe80f247fc08594a1c8a1029fc7ed
     install_root: json_schema
     test_root: json_schema
-  joomla:
-    url: https://github.com/joomla/joomla-framework.git
-    branch: 1.1.0
-    commit: f8a2343d3147f595d43e735b89b11c277520f141
-    install_root: joomla-framework
-    test_root: joomla-framework
-    clowns:
-      # These are subtests which need their own composer set and aren't run
-      # by their travis setup
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleAuthOauth2Test.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataAdsenseTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataCalendarTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataPicasaAlbumTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataPicasaPhotoTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataPicasaTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataPlusActivitiesTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataPlusCommentsTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataPlusPeopleTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleDataPlusTest.php
-      - joomla-framework/src/Joomla/Google/Tests/JGoogleTest.php
-      # Intermittently hang:
-      - joomla-framework/src/Joomla/Form/Tests/JFormFieldTest.php
-      - joomla-framework/src/Joomla/Form/Tests/JFormHelperTest.php
-      - joomla-framework/src/Joomla/Form/Tests/JFormRuleTest.php
-      - joomla-framework/src/Joomla/Form/Tests/JFormTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldCheckboxTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldCheckboxesTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldDatabaseConnectionTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldEmailTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldFileListTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldFileTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldFolderListTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldGroupedListTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldHiddenTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldImageListTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldLanguageTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldListTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldPasswordTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldRadioTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldSpacerTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldTelTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldTextTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldTextareaTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldTimezoneTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldUrlTest.php
-      - joomla-framework/src/Joomla/Form/Tests/fields/JFormFieldIntegerTest.php
-      - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleBooleanTest.php
-      - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleColorTest.php
-      - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleEmailTest.php
-      - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleEqualsTest.php
-      - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleOptionsTest.php
-      - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleTelTest.php
-      - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleUrlTest.php
-    flakey:
-      # Uses fixed location on filesystem (__DIR__) - can't be run in parallel
-      - joomla-framework/src/Joomla/Archive/Tests/Bzip2Test.php
-      - joomla-framework/src/Joomla/Archive/Tests/GzipTest.php
-      - joomla-framework/src/Joomla/Archive/Tests/ArchiveTest.php
-      - joomla-framework/src/Joomla/Filesystem/Tests/JFileTest.php
-      - joomla-framework/src/Joomla/Log/Tests/Logger/FormattedtextTest.php
-      - joomla-framework/src/Joomla/Log/Tests/Logger/W3cTest.php
-      # Assumes that getting the current time twice in a row will get
-      # the same result
-      - joomla-framework/src/Joomla/Log/Tests/LogEntryTest.php
-  joomlacms:
-    url: https://github.com/joomla/joomla-cms.git
-    branch: "3.4-dev"
-    commit: 7689d922ca373989e7328f510e94aa2fc541e272
-    install_root: joomla-cms
-    test_root: joomla-cms
-    test_find_mode: token
-    clowns:
-      - joomla-cms/tests/unit/suites/libraries/cms/toolbar/button/JToolbarButtonHelpTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/twitter/JTwitterTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/cache/storage/JCacheStorageMainTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/google/JGoogleDataPicasaAlbumTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/google/JGoogleDataPicasaPhotoTest.php
-      # Intermittently hang:
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldCaptchaTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldChromestyleTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldContentlanguageTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldEditorTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldHeadertagTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldHelpsiteTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldMediaTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldMenuTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldMenuitemTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldModuleorderTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldModulepositionTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldModuletagTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldTemplatestyleTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldUserTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/form/rule/JFormRuleCaptchaTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/JFormFieldTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/JFormRuleTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/JFormTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/field/JFormFieldCategoryTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/field/JFormFieldComponentLayoutTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/field/JFormFieldModuleLayoutTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldAccessLevelTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldCacheHandlerTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldCalendarTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldCheckboxTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldCheckboxesTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldColorTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldComboTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldDatabaseConnectionTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldEmailTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldFileListTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldFileTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldFolderListTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldGroupedListTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldHiddenTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldImageListTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldLanguageTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldListTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldNumberTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldPasswordTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldPluginsTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldRadioTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldRulesTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldSQLTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldSessionHandlerTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldSpacerTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldTelTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldTextTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldTextareaTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldTimezoneTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldUrlTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldUsergroupTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/fields/JFormFieldIntegerTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleBooleanTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleColorTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleEmailTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleEqualsTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleOptionsTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleRulesTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleTelTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleUrlTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/form/rule/JFormRuleUsernameTest.php
   klein:
     url: https://github.com/chriso/klein.php.git
-    branch: v2.0.2
-    commit: 6e1f228ce82333b437402dafad049713eb3eeac6
+    branch: master
+    commit: 2ec9a802632da1f92cf3f47cbc4020e2df2a432d
     install_root: klein
     test_root: klein
     test_find_mode: token
+    blacklist:
+      # KleinTest::testWithUsingFileInclude fails in sandcastle
+      # but we can't reproduce this.
+      - klein/tests/Klein/Tests/KleinTest.php
   kohana:
     url: https://github.com/kohana/kohana.git
-    branch: v3.3.2
-    commit: 9830a4313cf2d5b288614869cd2f551aa4fcd7a2
+    branch: v3.3.4
+    commit: 363c59ee298e1f5abe797e5efdf1c44431800a78
     install_root: kohana
     test_root: kohana
     test_find_mode: token
@@ -337,16 +206,12 @@
       # (eg :00.999 => :01.000), these tests fail.
       - laravel/tests/Database/DatabaseEloquentRelationTest.php
       - laravel/tests/Database/DatabaseEloquentModelTest.php
+      # Depends on google.com
+      - laravel/tests/Validation/ValidationValidatorTest.php
   lessphp:
-    # Until pull request for phpunit.xml is accepted. The original repository
-    # is commented out below.
-    url: https://github.com/cgcai/lessphp
-    # url: https://github.com/leafo/lessphp.git
-    branch: master
-    # Version 0.4.0 (Forked) The original v0.4.0 commit is commented out
-    # below.
-    commit: 119d94329581e6d6f41627f22faf0cee0b21eb0f
-    # commit: 51f3f06f0fe78a722dabfd14578444bdd078d9de
+    url: https://github.com/leafo/lessphp.git
+    branch: v0.4.0
+    commit: 51f3f06f0fe78a722dabfd14578444bdd078d9de
     install_root: lessphp
     test_root: lessphp
   magento2:
@@ -373,6 +238,10 @@
       # starting with '0x', and gmp is available, it will error out saying it's
       # an invalid conversion. Also true on php5.
       - mediawiki-core/tests/phpunit/includes/GlobalFunctions/wfBaseConvertTest.php
+      # tests a directory listing in a predefined, written-to location
+      - mediawiki-core/tests/phpunit/includes/filebackend/FileBackendTest.php
+      # Works with one internal build system, but not all of them.
+      - mediawiki-core/tests/phpunit/includes/utils/ZipDirectoryReaderTest.php
   jshrink:
     url: https://github.com/tedivm/JShrink.git
     branch: master
@@ -381,8 +250,8 @@
     test_root: jshrink
   mockery:
     url: https://github.com/padraic/mockery.git
-    branch: "0.9.2"
-    commit: 95a4855380dc70176c51807c678fb3bd6198529a
+    branch: "0.9.3"
+    commit: 686f85fa5b3b079cc0157d7cd3e9adb97f0b41e1
     install_root: mockery
     test_root: mockery
   monolog:
@@ -391,6 +260,9 @@
     commit: 6225b22de9dcf36546be3a0b2fa8e3d986153f57
     install_root: monolog
     test_root: monolog
+    flakey:
+      # writes to a fixed location
+      - monolog/tests/Monolog/Handler/RotatingFileHandlerTest.php
   mustache:
     url: https://github.com/bobthecow/mustache.php.git
     branch: v2.5.1
@@ -406,83 +278,6 @@
     commit: 8d94afe0b39e29f2a84bf9ce7e06088d5b93bb5b
     install_root: paris
     test_root: paris
-  pear:
-    url: https://github.com/pear/pear-core.git
-    # master is the best branch for pear
-    branch: master
-    commit: def22219cfd80fab6f8f8c982fcabbbe9fb41917
-    install_root: pear-core
-    test_root: pear-core
-    test_file_regex: /.*(\.phpt)$/
-    test_name_regex: /[\-_a-zA-Z0-9\.\/]*\.phpt/
-    pull_requests:
-      - pull_dir: pear-core
-        pull_repo: https://github.com/pear/Console_Getopt
-        git_commit: trunk
-        type: submodulemove
-        move_from_dir: pear-core/Console_Getopt
-        dir_to_move: pear-core/Console_Getopt/Console
-      - pull_dir: pear-core
-        pull_repo: https://github.com/pear/XML_Util
-        git_commit: trunk
-        type: submodulemove
-        move_from_dir: pear-core/XML_Util
-        dir_to_move: pear-core/XML_Util/XML
-      - pull_dir: pear-core
-        pull_repo: https://github.com/pear/Archive_Tar
-        git_commit: master
-        type: submodulemove
-        move_from_dir: pear-core/Archive_Tar
-        dir_to_move: pear-core/Archive_Tar/Archive
-      - pull_dir: pear-core
-        pull_repo: https://github.com/pear/Structures_Graph
-        git_commit: trunk
-        type: submodulemove
-        move_from_dir: pear-core/Structures_Graph
-        dir_to_move: pear-core/Structures_Graph/Structures
-    clowns:
-      - pear-core/tests/PEAR_Command/test_registerCommands_standard.phpt
-      - pear-core/tests/PEAR_Command_Config/config-create/test.phpt
-      - pear-core/tests/PEAR_Command_Config/config-create/test_windows.phpt
-      - pear-core/tests/PEAR_Command_Config/config-help/test.phpt
-      - pear-core/tests/PEAR_Command_Config/config-show/test.phpt
-      - pear-core/tests/PEAR_Command_Install/upgrade/test_bug17986.phpt
-      - pear-core/tests/PEAR_Command_Package/convert/test_fail.phpt
-      - pear-core/tests/PEAR_Config/test_getGroupKeys.phpt
-      - pear-core/tests/PEAR_Config/test_getKeys.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_abstractpackage_channelneedsupdating.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_abstractpackage_rest.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_alreadyinstalled.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_complexabstractpackage.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_complexabstractpackage_alphapostfix.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_complexlocalpackage.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_complexlocalpackage_onlyreqdeps.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_complexlocalpackage_optional.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_complexlocaltgz.phpt
-      - pear-core/tests/PEAR_Downloader/test_download_complexremotetgz.phpt
-      - pear-core/tests/PEAR_Downloader/test_upgrade_pear_to_pecl.phpt
-      - pear-core/tests/PEAR_Downloader_Package/test_initialize_abstractpackage_discover.phpt
-      - pear-core/tests/PEAR_Downloader_Package/test_initialize_downloadurl.phpt
-      - pear-core/tests/PEAR_Downloader_Package/test_initialize_invalidabstractpackage5.phpt
-      - pear-core/tests/PEAR_Downloader_Package/test_initialize_invalidabstractpackage6.phpt
-      - pear-core/tests/PEAR_Downloader_Package/test_initialize_invalidabstractpackage_discover.phpt
-      - pear-core/tests/PEAR_Downloader_Package/test_initialize_invaliddownloadurl.phpt
-      - pear-core/tests/PEAR_Downloader_Package/test_mergeDependencies_basic_required_uri.phpt
-      - pear-core/tests/PEAR_Installer/test_install_complexlocalpackage.phpt
-      - pear-core/tests/PEAR_Installer/test_install_complexlocalpackage2.phpt
-      - pear-core/tests/PEAR_Installer/test_install_complexlocalpackage2_force.phpt
-      - pear-core/tests/PEAR_Installer/test_install_complexlocalpackage2_ignore-errors.phpt
-      - pear-core/tests/PEAR_Installer/test_install_complexlocalpackage2_ignore-errorssoft.phpt
-      - pear-core/tests/PEAR_Installer/test_upgrade_complexlocalpackage2.phpt
-      - pear-core/tests/PEAR_Installer_Role/test_getInstallableRoles.phpt
-      - pear-core/tests/PEAR_Installer_Role/test_getValidRoles.phpt
-      - pear-core/tests/PEAR_PackageFile_v2_Validator/test_extbinrelease.phpt
-      - pear-core/tests/PEAR_PackageFile_v2_Validator/test_extsrcrelease.phpt
-      - pear-core/tests/PEAR_PackageFile_v2_Validator/test_phprelease.phpt
-      - pear-core/tests/PEAR_RunTest/bug16057.phpt
-      - pear-core/tests/System/find_test.phpt
-      - pear-core/tests/System/test_which.phpt
-      - pear-core/tests/PEAR_PackageFile_v2_Validator/test_contents.phpt
   pdepend:
     url: https://github.com/pdepend/pdepend.git
     branch: release-1.1.x
@@ -523,6 +318,10 @@
       - phpbb3/tests/lock/flock_test.php
       # race condition - https://github.com/phpbb/phpbb/pull/3006
       - phpbb3/tests/wrapper/gmgetdate_test.php
+      # This flakey test is caused by assuming time functions always return the
+      # same value. Made PR https://github.com/phpbb/phpbb/pull/3222 to fix.
+      - phpbb3/tests/passwords/manager_test.php
+      - phpbb3/tests/random/gen_rand_string_test.php
   phpmyadmin:
     url: https://github.com/phpmyadmin/phpmyadmin.git
     # Stable is RELEASE_4_1_9 but we have many pull requests in master
@@ -542,6 +341,10 @@
     commit: 58db726aa45fe26bca93f692cb3d77e9a46b7830
     install_root: phpunit
     test_root: phpunit
+    blacklist:
+      # Breaks because of the weird way xdebug is enabled under hhvm, just
+      # blacklist for now to stop sandcastle errors.
+      - phpunit/tests/Framework/Constraint/ExceptionMessageTest.php
   phpunit-mock-objects:
     url: https://github.com/sebastianbergmann/phpunit-mock-objects.git
     branch: "2.2.0"
@@ -570,6 +373,8 @@
     commit: 006a9573cee3d30a721f137facd5467f4e63bed8
     install_root: ratchet
     test_root: ratchet
+    flakey:
+      - ratchet/tests/unit/Server/IoServerTest.php
   reactphp:
     url: https://github.com/reactphp/react.git
     branch: v0.4.1
@@ -598,6 +403,15 @@
     commit: 340e658aec0b51df58cab4605578acf4c90c479c
     install_root: slim
     test_root: slim
+  smarty:
+    url: https://github.com/smarty-php/smarty-dev
+    branch: master
+    commit: 03da4843d0fce83bcd192e02fc1ed55a19c4ec70
+    install_root: smarty
+    test_root: smarty/smarty-phpunit
+    # overridden explicitly in class_overrides
+    config_file: smarty/smarty-phpunit/phpunit.xml.dist
+    test_find_mode: token
   stash:
     url: https://github.com/tedious/Stash.git
     branch: master
@@ -627,19 +441,51 @@
     clowns:
 	  # Dependent on system language settings.
       - twig/test/Twig/Tests/CompilerTest.php
+    flakey:
+      # last data set intermittently fails, spent too long trying to get debug
+      # # data out of it and getting nowhere
+      - twig/test/Twig/Tests/IntegrationTest.php
+  typo3:
+    url: git://github.com/TYPO3/TYPO3.CMS.git
+    branch: TYPO3_6-2
+    commit: 32462f96f9fd5441db92b082abc39b403e366616
+    install_root: typo3
+    test_root: typo3/typo3/sysext/core/Build
+    config_file: typo3/typo3/sysext/core/Build/UnitTests.xml
+    bootstrap_file: typo3/typo3/sysext/core/Build/UnitTestsBootstrap.php
+    blacklist:
+      # they make test runner FATAL
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/AlphabeticValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/AlphanumericValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/BetweenValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/DateValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/DigitValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/EmailValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/EqualsValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/FileAllowedTypesValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/FileMaximumSizeValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/FileMinimumSizeValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/FloatValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/GreaterThanValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/Helper.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/InArrayValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/IntegerValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/IpValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/LengthValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/LessThanValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/RegExpValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/RequiredValidatorTest.php
+      - typo3/typo3/sysext/form/Tests/Unit/Validation/UriValidatorTest.php
   vfsstream:
-    # We're using Graham's fork to unskip a couple of tests
-    # The latest stable is v1.3.0 - the fork is slightly ahead
-    url: https://github.com/GrahamCampbell/vfsStream.git
-    branch: hhvm
-    commit: 00f21956ccf6cdff6201f28e598ff3ab5ccbd3c6
+    # It's slightly ahead of stable release v1.4.0 to include a commit which
+    # unskips a couple of tests on HHVM
+    url: https://github.com/mikey179/vfsStream.git
+    branch: master
+    commit: 2d5131709917b80a315a83c08a56516d867ba59f
     install_root: vfsstream
     test_root: vfsstream
     config_file: vfsstream/phpunit.xml.dist
     test_find_mode: token
-    blacklist:
-      # Intermittently hangs, takes > 24h
-      - vfsstream/src/test/php/org/bovigo/vfs/vfsStreamWrapperWithoutRootTestCase.php
   yii:
     url: https://github.com/yiisoft/yii.git
     branch: master
@@ -659,19 +505,6 @@
       - yii/tests/framework/caching/CFileCacheTest.php
       - yii/tests/framework/caching/CDbCacheTest.php
       - yii/tests/framework/caching/CDirectoryCacheDependencyTest.php
-  zf2:
-    url: https://github.com/zendframework/zf2.git
-    branch: release-2.3.2
-    commit: 0b74b66dc07ff88140287bdf67d230c1bd32ee0c
-    install_root: zf2
-    test_root: zf2/tests
-    test_find_mode: token
-    flakey:
-      - zf2/tests/ZendTest/Authentication/Adapter/Http/AuthTest.php
-    blacklist:
-      - zf2/tests/ZendTest/Code/Generator/ParameterGeneratorTest.php
-      - zf2/tests/ZendTest/Code/Generator/PropertyGeneratorTest.php
-      - zf2/tests/ZendTest/Code/Generator/ValueGeneratorTest.php
   html5php:
     url: https://github.com/Masterminds/html5-php.git
     branch: "2.0.0"
@@ -685,3 +518,13 @@
     install_root: twital
     test_root: twital
     test_find_mode: token
+  silex:
+    # There are currently some broken tests and warnings caused by
+    # vendors deprecating some classes. An issue has been opened in github
+    # at https://github.com/silexphp/Silex/issues/1085 and is currently
+    # waiting for a decision on what the proper fix should be
+    url: https://github.com/silexphp/Silex.git
+    branch: "v1.2.2"
+    commit: 8c5e86eb97f3eee633729b22e950082fb5591328
+    install_root: silex
+    test_root: silex

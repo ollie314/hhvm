@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -10,11 +10,9 @@
 
 module M = Map_ast
 module CE = Common_exns
-module List = List_ext
+module List = Core_list
 open Ast
-open Utils
 open Ast_ext
-
 
 let map program =
   let errors = ref [] in
@@ -24,13 +22,14 @@ let map program =
     () in
 
   let detect_invalid_attributes p attributes =
-    if (SMap.mem "__Memoize" attributes)
+    if List.exists ~f:(fun { ua_name; _ } -> "__Memoize" = snd ua_name) attributes
     then unsupported (p, "__Memoize is currently not supported.")
     else () in
 
   let detect_invalid_fun_kind p = function
-    | FSync -> ()
-    | _ -> unsupported (p, "async is currently not supported.") in
+    | FSync | FGenerator -> ()
+    | FAsync | FAsyncGenerator ->
+      unsupported (p, "async is currently not supported.") in
 
   let detect_invalid_fun {f_user_attributes; f_fun_kind; f_name = (p, _); _} =
     detect_invalid_attributes p f_user_attributes;
@@ -46,7 +45,8 @@ let map program =
     | (Some "\\HH\\Pair", _) ->
         unsupported (p, "Invalid initialization of Pair")
     | (Some "\\HH\\Map", _) | (Some "\\HH\\ImmMap", _) ->
-        List.iter begin function
+        (** TODO: task 10395133. support dict *)
+        List.iter ~f:begin function
           | AFkvalue _ -> ()
           | AFvalue (p, _) ->
               unsupported (p, "Invalid Initialization of " ^ name)
@@ -64,15 +64,15 @@ let map program =
     | _ -> () in
 
   let detect_invalid_class_var = function
-    | ((p, _), Some (_, Collection _)) ->
+    | (_, (p, _), Some (_, Collection _)) ->
         let m = "Collection initializers in instance variables are currently" ^
           " not supported." in
         unsupported (p, m)
     | _ -> () in
 
   let detect_invalid_class_elt = function
-    | ClassVars (kinds, _, class_vars) when not (List.mem Static kinds) ->
-        List.iter detect_invalid_class_var class_vars;
+    | ClassVars (kinds, _, class_vars) when not (List.mem kinds Static) ->
+        List.iter ~f:detect_invalid_class_var class_vars;
         ()
     | _ -> () in
 
@@ -99,6 +99,6 @@ let map program =
     M.k_expr = (fun (k, _) e -> detect_invalid_expr e; k e);
   } in
   ignore (mapper program);
-  if List.not_empty !errors
+  if not (List.is_empty !errors)
   then raise (CE.CompoundError !errors);
   program (* this mapper does no mapping *)

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,13 +15,15 @@
 */
 #include "hphp/runtime/base/timestamp.h"
 
-#include <sys/time.h>
+#include <folly/portability/SysTime.h>
+
 extern "C" {
 #include <timelib.h>
 }
 
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/datetime.h"
+#include "hphp/runtime/base/resource-data.h"
 #include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/base/type-string.h"
 
@@ -72,12 +74,12 @@ String TimeStamp::CurrentMicroTime() {
 
 int64_t TimeStamp::Get(bool &error, int hou, int min, int sec, int mon, int day,
                    int yea, bool gmt) {
-  DateTime dt(Current());
+  auto dt = req::make<DateTime>(Current());
   if (gmt) {
-    dt.setTimezone(SmartResource<TimeZone>(newres<TimeZone>("UTC")));
+    dt->setTimezone(req::make<TimeZone>("UTC"));
   }
-  dt.set(hou, min, sec, mon, day, yea);
-  return dt.toTimeStamp(error);
+  dt->set(hou, min, sec, mon, day, yea);
+  return dt->toTimeStamp(error);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

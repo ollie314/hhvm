@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,9 @@
 #ifndef incl_HPHP_RUNTIME_BASE_TV_ARITH_H_
 #define incl_HPHP_RUNTIME_BASE_TV_ARITH_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/tv-helpers.h"
+#include "hphp/runtime/base/type-variant.h"
+#include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
 
@@ -72,7 +74,8 @@ Cell cellPow(Cell, Cell);
  * PHP operators &, |, and ^.
  *
  * These operators return a KindOfInt64, unless both arguments are
- * KindOfString, in which case they return a KindOfString.
+ * KindOfString, in which case they return a KindOfString that the caller owns
+ * a reference to.
  */
 Cell cellBitAnd(Cell, Cell);
 Cell cellBitOr(Cell, Cell);
@@ -160,6 +163,18 @@ void cellBitXorEq(Cell& c1, Cell);
  */
 void cellShlEq(Cell& c1, Cell);
 void cellShrEq(Cell& c1, Cell);
+
+/*
+ * PHP operator .=.
+ *
+ * Mutates the first argument in place, by concatenating the second argument
+ * onto its end.
+ *
+ * Post: lhs.m_type == KindOfString
+ */
+inline void cellConcatEq(Cell& lhs, Cell rhs) {
+  concat_assign(tvAsVariant(&lhs), cellAsCVarRef(rhs).toString());
+}
 
 //////////////////////////////////////////////////////////////////////
 

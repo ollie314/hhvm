@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -16,35 +16,15 @@
 */
 
 #include "hphp/runtime/base/zend-printf.h"
-#include "hphp/runtime/base/zend-strtod.h"
-#include "hphp/runtime/base/zend-string.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/type-conversions.h"
-#include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/array-iterator.h"
-#include <math.h>
 
-#if defined(__APPLE__)
-#ifndef isnan
-#define isnan(x)  \
-  ( sizeof (x) == sizeof(float )  ? __inline_isnanf((float)(x)) \
-  : sizeof (x) == sizeof(double)  ? __inline_isnand((double)(x))  \
-  : __inline_isnanl ((long double)(x)))
-#endif
-
-#ifndef isinf
-#define isinf(x)  \
-  ( sizeof (x) == sizeof(float )  ? __inline_isinff((float)(x)) \
-  : sizeof (x) == sizeof(double)  ? __inline_isinfd((double)(x))  \
-  : __inline_isinfl ((long double)(x)))
-#endif
-#endif
-
-#ifdef __CYGWIN__
 #include <cmath>
-#define isinf std::isinf
-#define isnan std::isnan
-#endif
+
+#include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/zend-strtod.h"
 
 namespace HPHP {
 
@@ -170,7 +150,7 @@ static char * __cvt(double value, int ndigit, int *decpt, int *sign,
   if (value == 0.0) {
     *decpt = 1 - fmode; /* 1 for 'e', 0 for 'f' */
     *sign = 0;
-    if ((rve = s = (char *)smart_malloc(ndigit?siz:2)) == nullptr) {
+    if ((rve = s = (char *)req::malloc_noptrs(ndigit?siz:2)) == nullptr) {
       return(nullptr);
     }
     *rve++ = '0';
@@ -191,7 +171,7 @@ static char * __cvt(double value, int ndigit, int *decpt, int *sign,
     if (pad && fmode) {
       siz += *decpt;
     }
-    if ((s = (char *)smart_malloc(siz+1)) == nullptr) {
+    if ((s = (char *)req::malloc_noptrs(siz+1)) == nullptr) {
       zend_freedtoa(p);
       return(nullptr);
     }
@@ -487,7 +467,7 @@ char * php_conv_fp(register char format, register double num,
     *len = strlen(p);
     memcpy(buf, p, *len + 1);
     *is_negative = 0;
-    smart_free(p_orig);
+    req::free(p_orig);
     return (buf);
   }
   if (format == 'F') {
@@ -551,7 +531,7 @@ char * php_conv_fp(register char format, register double num,
     }
   }
   *len = s - buf;
-  smart_free(p_orig);
+  req::free(p_orig);
   return (buf);
 }
 
@@ -691,26 +671,36 @@ inline static void appenddouble(StringBuffer *buffer,
     precision = MAX_FLOAT_PRECISION;
   }
 
-  if (isnan(number)) {
+  if (std::isnan(number)) {
     is_negative = (number<0);
     appendstring(buffer, "NaN", 3, 0, padding,
                  alignment, 3, is_negative, 0, always_sign);
     return;
   }
 
-  if (isinf(number)) {
+  if (std::isinf(number)) {
     is_negative = (number<0);
     appendstring(buffer, "INF", 3, 0, padding,
                  alignment, 3, is_negative, 0, always_sign);
     return;
   }
 
+#if defined(HAVE_LOCALE_H)
+  struct lconv *lconv;
+  lconv = localeconv();
+# define APPENDDOUBLE_LCONV_DECIMAL_POINT (*lconv->decimal_point)
+#else
+# define APPENDDOUBLE_LCONV_DECIMAL_POINT '.'
+#endif
+
   switch (fmt) {
   case 'e':
   case 'E':
   case 'f':
   case 'F':
-    s = php_conv_fp((fmt == 'f')?'F':fmt, number, 0, precision, '.',
+    s = php_conv_fp((fmt == 'f')?'F':fmt,
+                    number, 0, precision,
+                    (fmt == 'f')?APPENDDOUBLE_LCONV_DECIMAL_POINT:'.',
                     &is_negative, &num_buf[1], &s_len);
     if (is_negative) {
       num_buf[0] = '-';
@@ -730,7 +720,10 @@ inline static void appenddouble(StringBuffer *buffer,
     /*
      * * We use &num_buf[ 1 ], so that we have room for the sign
      */
-    s = php_gcvt(number, precision, '.', (fmt == 'G')?'E':'e', &num_buf[1]);
+    s = php_gcvt(number, precision,
+                 APPENDDOUBLE_LCONV_DECIMAL_POINT,
+                 (fmt == 'G')?'E':'e',
+                 &num_buf[1]);
     is_negative = 0;
     if (*s == '-') {
       is_negative = 1;
@@ -1392,10 +1385,10 @@ static int xbuf_format_converter(char **outbuf, const char *fmt, va_list ap)
               goto fmt_error;
           }
 
-          if (isnan(fp_num)) {
+          if (std::isnan(fp_num)) {
             s = const_cast<char*>("nan");
             s_len = 3;
-          } else if (isinf(fp_num)) {
+          } else if (std::isinf(fp_num)) {
             s = const_cast<char*>("inf");
             s_len = 3;
           } else {
@@ -1433,11 +1426,11 @@ static int xbuf_format_converter(char **outbuf, const char *fmt, va_list ap)
               goto fmt_error;
           }
 
-          if (isnan(fp_num)) {
+          if (std::isnan(fp_num)) {
              s = const_cast<char*>("NAN");
              s_len = 3;
              break;
-           } else if (isinf(fp_num)) {
+           } else if (std::isinf(fp_num)) {
              if (fp_num > 0) {
                s = const_cast<char*>("INF");
                s_len = 3;

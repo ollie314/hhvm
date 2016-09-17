@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,15 @@
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+struct StringData;
+struct ArrayData;
+
+namespace TypeStructure {
+ArrayData* resolve(const StringData* aliasName, const ArrayData* arr);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // Static constructors.
 
 inline TypeAliasReq TypeAliasReq::Invalid() {
@@ -29,31 +38,27 @@ inline TypeAliasReq TypeAliasReq::Invalid() {
 }
 
 inline TypeAliasReq TypeAliasReq::From(const TypeAlias& alias) {
+  assert(alias.type != AnnotType::Object);
+
   TypeAliasReq req;
-
-  if (alias.any) {
-    req.any  = true;
-    req.name = alias.name;
-  } else {
-    assert(alias.kind != KindOfObject);
-
-    req.kind     = alias.kind;
-    req.nullable = alias.nullable;
-    req.name     = alias.name;
-  }
+  req.name = alias.name;
+  req.type = alias.type;
+  req.nullable = alias.nullable;
+  req.typeStructure = Array(alias.typeStructure);
+  req.userAttrs = alias.userAttrs;
   return req;
 }
 
 inline TypeAliasReq TypeAliasReq::From(TypeAliasReq req,
                                        const TypeAlias& alias) {
+  assert(alias.type == AnnotType::Object);
   if (req.invalid) {
-    // Do nothing.
-  } else if (req.any) {
-    req.name = alias.name;
-  } else {
-    req.nullable |= alias.nullable;
-    req.name = alias.name;
+    return req; // Do nothing.
   }
+  req.name = alias.name;
+  req.nullable |= alias.nullable;
+  req.typeStructure = Array(alias.typeStructure);
+  req.userAttrs = alias.userAttrs;
   return req;
 }
 
@@ -62,10 +67,8 @@ inline TypeAliasReq TypeAliasReq::From(TypeAliasReq req,
 
 inline bool TypeAliasReq::same(const TypeAliasReq& req) const {
   return (invalid && req.invalid) ||
-         (any && req.any) ||
-         (kind     == req.kind &&
-          nullable == req.nullable &&
-          klass    == req.klass);
+         (type == AnnotType::Mixed && req.type == AnnotType::Mixed) ||
+         (type == req.type && nullable == req.nullable && klass == req.klass);
 }
 
 inline bool operator==(const TypeAliasReq& l,

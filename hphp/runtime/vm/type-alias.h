@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,15 +17,21 @@
 #ifndef incl_HPHP_TYPE_ALIAS_H_
 #define incl_HPHP_TYPE_ALIAS_H_
 
-#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/annot-type.h"
+#include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/datatype.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/typed-value.h"
+#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/user-attributes.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct Class;
 struct StringData;
+struct ArrayData;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -33,7 +39,7 @@ struct StringData;
  * This is the runtime representation of a type alias.  Type aliases are only
  * allowed when HipHop extensions are enabled.
  *
- * The m_kind field is KindOfObject whenever the type alias is basically just a
+ * The `type' field is Object whenever the type alias is basically just a
  * name.  At runtime we still might resolve this name to another type alias,
  * becoming a type alias for KindOfArray or something in that request.
  *
@@ -42,20 +48,43 @@ struct StringData;
 struct TypeAlias {
   LowStringPtr name;
   LowStringPtr value;
-  DataType     kind;
-  bool         any;       // overrides `kind' for mixed aliases
-  bool         nullable;  // null is allowed; for ?Foo aliases
-  Attr         attrs;
+  Attr attrs;
+  AnnotType type;
+  bool nullable;  // null is allowed; for ?Foo aliases
+  UserAttributeMap userAttrs;
+  Array typeStructure{Array::Create()};
 
-  template<class SerDe> void serde(SerDe& sd) {
+  template<class SerDe>
+  typename std::enable_if<!SerDe::deserializing>::type
+  serde(SerDe& sd) {
     sd(name)
       (value)
-      (kind)
-      (any)
+      (type)
       (nullable)
+      (userAttrs)
       (attrs)
       ;
+    TypedValue tv = make_tv<KindOfArray>(typeStructure.get());
+    sd(tv);
   }
+
+  template<class SerDe>
+  typename std::enable_if<SerDe::deserializing>::type
+  serde(SerDe& sd) {
+    sd(name)
+      (value)
+      (type)
+      (nullable)
+      (userAttrs)
+      (attrs)
+      ;
+
+    TypedValue tv;
+    sd(tv);
+    assert(isArrayType(tv.m_type));
+    typeStructure = tv.m_data.parr;
+  }
+
 };
 
 
@@ -86,18 +115,18 @@ struct TypeAliasReq {
   /////////////////////////////////////////////////////////////////////////////
   // Data members.
 
-  // The alised type.
-  DataType kind{KindOfUninit};
-  // Overrides `kind' if the alias is invalid (e.g., for a nonexistent class).
+  // The aliased type.
+  AnnotType type{AnnotType::Uninit};
+  // Overrides `type' if the alias is invalid (e.g., for a nonexistent class).
   bool invalid{false};
-  // Overrides `kind' for "HH\\mixed".
-  bool any{false};
   // For option types, like ?Foo.
   bool nullable{false};
-  // Aliased Class; nullptr if kind != KindOfObject.
-  LowClassPtr klass{nullptr};
+  // Aliased Class; nullptr if type != Object.
+  LowPtr<Class> klass{nullptr};
   // Needed for error messages; nullptr if not defined.
   LowStringPtr name{nullptr};
+  Array typeStructure{Array::Create()};
+  UserAttributeMap userAttrs;
 };
 
 bool operator==(const TypeAliasReq& l, const TypeAliasReq& r);

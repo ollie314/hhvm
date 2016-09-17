@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,28 +15,39 @@
 */
 
 #include "hphp/runtime/vm/event-hook.h"
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/vm/func.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/complex-types.h"
+
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/intercept.h"
+#include "hphp/runtime/base/surprise-flags.h"
+
+#include "hphp/runtime/ext/asio/asio-session.h"
+#include "hphp/runtime/ext/hotprofiler/ext_hotprofiler.h"
+#include "hphp/runtime/ext/intervaltimer/ext_intervaltimer.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/ext/ext_hotprofiler.h"
-#include "hphp/runtime/vm/runtime.h"
-#include "hphp/runtime/vm/vm-regs.h"
-#include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/ext/asio/asio_session.h"
 #include "hphp/runtime/ext/xenon/ext_xenon.h"
 
-namespace HPHP {
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/func.h"
 
-static StaticString s_args("args");
-static StaticString s_enter("enter");
-static StaticString s_exit("exit");
-static StaticString s_exception("exception");
-static StaticString s_name("name");
-static StaticString s_return("return");
+#include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/vm/vm-regs.h"
+
+namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
+
+const StaticString
+  s_args("args"),
+  s_frame_ptr("frame_ptr"),
+  s_parent_frame_ptr("parent_frame_ptr"),
+  s_this_ptr("this_ptr"),
+  s_enter("enter"),
+  s_exit("exit"),
+  s_suspend("suspend"),
+  s_resume("resume"),
+  s_exception("exception"),
+  s_name("name"),
+  s_return("return");
 
 // implemented in runtime/ext/ext_hotprofiler.cpp
 extern void begin_profiler_frame(Profiler *p,
@@ -46,48 +57,38 @@ extern void end_profiler_frame(Profiler *p,
                                const char *symbol);
 
 void EventHook::Enable() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.setEventHookFlag();
+  setSurpriseFlag(EventHookFlag);
 }
 
 void EventHook::Disable() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.clearEventHookFlag();
+  clearSurpriseFlag(EventHookFlag);
 }
 
 void EventHook::EnableAsync() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.setAsyncEventHookFlag();
+  setSurpriseFlag(AsyncEventHookFlag);
 }
 
 void EventHook::DisableAsync() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.clearAsyncEventHookFlag();
+  clearSurpriseFlag(AsyncEventHookFlag);
 }
 
 void EventHook::EnableDebug() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.setDebuggerHookFlag();
+  setSurpriseFlag(DebuggerHookFlag);
 }
 
 void EventHook::DisableDebug() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.clearDebuggerHookFlag();
+  clearSurpriseFlag(DebuggerHookFlag);
 }
 
 void EventHook::EnableIntercept() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.setInterceptFlag();
+  setSurpriseFlag(InterceptFlag);
 }
 
 void EventHook::DisableIntercept() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.clearInterceptFlag();
+  clearSurpriseFlag(InterceptFlag);
 }
 
-ssize_t EventHook::CheckSurprise() {
-  ThreadInfo* info = ThreadInfo::s_threadInfo.getNoCheck();
-  return check_request_surprise(info);
-}
-
-ssize_t EventHook::GetConditionFlags() {
-  return RDS::header()->conditionFlags.load();
-}
-
-class ExecutingSetprofileCallbackGuard {
-public:
+struct ExecutingSetprofileCallbackGuard {
   ExecutingSetprofileCallbackGuard() {
     g_context->m_executingSetprofileCallback = true;
   }
@@ -96,6 +97,19 @@ public:
     g_context->m_executingSetprofileCallback = false;
   }
 };
+
+void EventHook::DoMemoryThresholdCallback() {
+  clearSurpriseFlag(MemThresholdFlag);
+  if (!g_context->m_memThresholdCallback.isNull()) {
+    VMRegAnchor _;
+    try {
+      vm_call_user_func(g_context->m_memThresholdCallback, empty_array());
+    } catch (Object& ex) {
+      raise_error("Uncaught exception escaping mem Threshold callback: %s",
+                  ex.toString().data());
+    }
+  }
+}
 
 namespace {
 
@@ -108,43 +122,85 @@ bool shouldRunUserProfiler(const Func* func) {
   }
   // Don't profile 86ctor, since its an implementation detail,
   // and we dont guarantee to call it
-  if (func->cls() && func == func->cls()->getCtor() &&
+  if ((g_context->m_setprofileFlags & EventHook::ProfileConstructors) == 0 &&
+      func->cls() && func == func->cls()->getCtor() &&
       Func::isSpecial(func->name())) {
     return false;
   }
   return true;
 }
 
-void runUserProfilerOnFunctionEnter(const ActRec* ar) {
+ALWAYS_INLINE
+ActRec* getParentFrame(const ActRec* ar) {
+  ActRec* ret = g_context->getPrevVMState(ar);
+  while (ret != nullptr && ret->skipFrame()) {
+    ret = g_context->getPrevVMState(ret);
+  }
+  return ret;
+}
+
+void addFramePointers(const ActRec* ar, Array& frameinfo, bool isEnter) {
+  if ((g_context->m_setprofileFlags & EventHook::ProfileFramePointers) == 0) {
+    return;
+  }
+
+  if (isEnter) {
+    auto this_ptr = ar->func()->cls() && ar->hasThis() ?
+      intptr_t(ar->getThis()) : 0;
+    frameinfo.set(s_this_ptr, Variant(this_ptr));
+  }
+
+  frameinfo.set(s_frame_ptr, Variant(intptr_t(ar)));
+  ActRec* parent_ar = getParentFrame(ar);
+  if (parent_ar != nullptr) {
+    frameinfo.set(s_parent_frame_ptr, Variant(intptr_t(parent_ar)));
+  }
+}
+
+inline bool isResumeAware() {
+  return (g_context->m_setprofileFlags & EventHook::ProfileResumeAware) != 0;
+}
+
+void runUserProfilerOnFunctionEnter(const ActRec* ar, bool isResume) {
+  if ((g_context->m_setprofileFlags & EventHook::ProfileEnters) == 0) {
+    return;
+  }
+
   VMRegAnchor _;
   ExecutingSetprofileCallbackGuard guard;
 
   Array params;
-  params.append(s_enter);
+  params.append((isResume && isResumeAware()) ? s_resume : s_enter);
   params.append(VarNR(ar->func()->fullName()));
 
   Array frameinfo;
   frameinfo.set(s_args, hhvm_get_frame_args(ar, 0));
+  addFramePointers(ar, frameinfo, true);
   params.append(frameinfo);
 
   vm_call_user_func(g_context->m_setprofileCallback, params);
 }
 
 void runUserProfilerOnFunctionExit(const ActRec* ar, const TypedValue* retval,
-                                   ObjectData* exception) {
+                                   ObjectData* exception, bool isSuspend) {
+  if ((g_context->m_setprofileFlags & EventHook::ProfileExits) == 0) {
+    return;
+  }
+
   VMRegAnchor _;
   ExecutingSetprofileCallbackGuard guard;
 
   Array params;
-  params.append(s_exit);
+  params.append((isSuspend && isResumeAware()) ? s_suspend : s_exit);
   params.append(VarNR(ar->func()->fullName()));
 
   Array frameinfo;
   if (retval) {
     frameinfo.set(s_return, tvAsCVarRef(retval));
   } else if (exception) {
-    frameinfo.set(s_exception, exception);
+    frameinfo.set(s_exception, Variant{exception});
   }
+  addFramePointers(ar, frameinfo, false);
   params.append(frameinfo);
 
   vm_call_user_func(g_context->m_setprofileCallback, params);
@@ -217,14 +273,17 @@ bool EventHook::RunInterceptHandler(ActRec* ar) {
   PC savePc = vmpc();
 
   Variant doneFlag = true;
-  Variant called_on;
+  Variant called_on = [&] {
+    if (func->cls()) {
+      if (ar->hasThis()) {
+        return Variant(ar->getThis());
+      }
+      // For static methods, give handler the name of called class
+      return Variant{ar->getClass()->name(), Variant::PersistentStrInit{}};
+    }
+    return init_null();
+  }();
 
-  if (ar->hasThis()) {
-    called_on = Variant(ar->getThis());
-  } else if (ar->hasClass()) {
-    // For static methods, give handler the name of called class
-    called_on = Variant(const_cast<StringData*>(ar->getClass()->name()));
-  }
   Variant intArgs =
     PackedArrayInit(5)
       .append(VarNR(ar->func()->fullName()))
@@ -237,9 +296,10 @@ bool EventHook::RunInterceptHandler(ActRec* ar) {
   Variant ret = vm_call_user_func(h->asCArrRef()[0], intArgs);
   if (doneFlag.toBoolean()) {
     Offset pcOff;
-    ActRec* outer = g_context->getPrevVMStateUNSAFE(ar, &pcOff);
+    ActRec* outer = g_context->getPrevVMState(ar, &pcOff);
 
-    frame_free_locals_inl_no_hook<true>(ar, ar->func()->numLocals());
+    ar->setLocalsDecRefd();
+    frame_free_locals_no_hook(ar);
     Stack& stack = vmStack();
     stack.top() = (Cell*)(ar + 1);
     cellDup(*ret.asCell(), *stack.allocTV());
@@ -281,18 +341,14 @@ const char* EventHook::GetFunctionNameForProfiler(const Func* func,
   return name;
 }
 
-void EventHook::onFunctionEnter(const ActRec* ar, int funcType, ssize_t flags) {
-  // Xenon
-  if (flags & RequestInjectionData::XenonSignalFlag) {
-    Xenon::getInstance().log(Xenon::EnterSample);
-  }
-
+void EventHook::onFunctionEnter(const ActRec* ar, int funcType,
+                                ssize_t flags, bool isResume) {
   // User profiler
-  if (flags & RequestInjectionData::EventHookFlag) {
+  if (flags & EventHookFlag) {
     if (shouldRunUserProfiler(ar->func())) {
-      runUserProfilerOnFunctionEnter(ar);
+      runUserProfilerOnFunctionEnter(ar, isResume);
     }
-    Profiler* profiler = ThreadInfo::s_threadInfo->m_profiler;
+    auto profiler = ThreadInfo::s_threadInfo->m_profiler;
     if (profiler != nullptr &&
         !(profiler->shouldSkipBuiltins() && ar->func()->isBuiltin())) {
       begin_profiler_frame(profiler,
@@ -301,28 +357,47 @@ void EventHook::onFunctionEnter(const ActRec* ar, int funcType, ssize_t flags) {
   }
 
   // Debugger hook
-  if (flags & RequestInjectionData::DebuggerHookFlag) {
+  if (flags & DebuggerHookFlag) {
     DEBUGGER_ATTACHED_ONLY(phpDebuggerFuncEntryHook(ar));
   }
 }
 
 void EventHook::onFunctionExit(const ActRec* ar, const TypedValue* retval,
-                               const Fault* fault, ssize_t flags) {
+                               bool unwind, ObjectData* phpException,
+                               size_t flags, bool isSuspend) {
   // Xenon
-  if (flags & RequestInjectionData::XenonSignalFlag) {
+  if (flags & XenonSignalFlag) {
     Xenon::getInstance().log(Xenon::ExitSample);
   }
+
+  // Run callbacks only if it's safe to do so, i.e., not when
+  // there's a pending exception or we're unwinding from a C++ exception.
+  if (ThreadInfo::s_threadInfo->m_pendingException == nullptr
+      && (!unwind || phpException)) {
+
+    // Memory Threhsold
+    if (flags & MemThresholdFlag) {
+      DoMemoryThresholdCallback();
+    }
+
+    // Interval timer
+    if (flags & IntervalTimerFlag) {
+      IntervalTimer::RunCallbacks(IntervalTimer::ExitSample);
+    }
+  }
+
 
   // Inlined calls normally skip the function enter and exit events. If we
   // side exit in an inlined callee, we short-circuit here in order to skip
   // exit events that could unbalance the call stack.
-  if ((jit::TCA) ar->m_savedRip == jit::mcg->tx().uniqueStubs.retInlHelper) {
+  if (RuntimeOption::EvalJit &&
+      ((jit::TCA) ar->m_savedRip == jit::tc::ustubs().retInlHelper)) {
     return;
   }
 
   // User profiler
-  if (flags & RequestInjectionData::EventHookFlag) {
-    Profiler* profiler = ThreadInfo::s_threadInfo->m_profiler;
+  if (flags & EventHookFlag) {
+    auto profiler = ThreadInfo::s_threadInfo->m_profiler;
     if (profiler != nullptr &&
         !(profiler->shouldSkipBuiltins() && ar->func()->isBuiltin())) {
       // NB: we don't have a function type flag to match what we got in
@@ -337,10 +412,10 @@ void EventHook::onFunctionExit(const ActRec* ar, const TypedValue* retval,
       if (ThreadInfo::s_threadInfo->m_pendingException != nullptr) {
         // Avoid running PHP code when exception from destructor is pending.
         // TODO(#2329497) will not happen once CheckSurprise is used
-      } else if (!fault) {
-        runUserProfilerOnFunctionExit(ar, retval, nullptr);
-      } else if (fault->m_faultType == Fault::Type::UserException) {
-        runUserProfilerOnFunctionExit(ar, retval, fault->m_userException);
+      } else if (!unwind) {
+        runUserProfilerOnFunctionExit(ar, retval, nullptr, isSuspend);
+      } else if (phpException) {
+        runUserProfilerOnFunctionExit(ar, retval, phpException, isSuspend);
       } else {
         // Avoid running PHP code when unwinding C++ exception.
       }
@@ -348,76 +423,176 @@ void EventHook::onFunctionExit(const ActRec* ar, const TypedValue* retval,
   }
 
   // Debugger hook
-  if (flags & RequestInjectionData::DebuggerHookFlag) {
+  if (flags & DebuggerHookFlag) {
     DEBUGGER_ATTACHED_ONLY(phpDebuggerFuncExitHook(ar));
   }
 }
 
 bool EventHook::onFunctionCall(const ActRec* ar, int funcType) {
-  ssize_t flags = CheckSurprise();
-  if (flags & RequestInjectionData::InterceptFlag &&
+  auto const flags = handle_request_surprise();
+  if (flags & InterceptFlag &&
       !RunInterceptHandler(const_cast<ActRec*>(ar))) {
     return false;
   }
-  onFunctionEnter(ar, funcType, flags);
+
+  // Xenon
+  if (flags & XenonSignalFlag) {
+    Xenon::getInstance().log(Xenon::EnterSample);
+  }
+
+  // Memory Threhsold
+  if (flags & MemThresholdFlag) {
+    DoMemoryThresholdCallback();
+  }
+
+  if (flags & IntervalTimerFlag) {
+    IntervalTimer::RunCallbacks(IntervalTimer::EnterSample);
+  }
+
+  onFunctionEnter(ar, funcType, flags, false);
   return true;
 }
 
-void EventHook::onFunctionResume(const ActRec* ar) {
-  ssize_t flags = CheckSurprise();
-  onFunctionEnter(ar, EventHook::NormalFunc, flags);
+void EventHook::onFunctionResumeAwait(const ActRec* ar) {
+  auto const flags = handle_request_surprise();
+
+  // Xenon
+  if (flags & XenonSignalFlag) {
+    Xenon::getInstance().log(Xenon::ResumeAwaitSample);
+  }
+
+  // Memory Threhsold
+  if (flags & MemThresholdFlag) {
+    DoMemoryThresholdCallback();
+  }
+
+  if (flags & IntervalTimerFlag) {
+    IntervalTimer::RunCallbacks(IntervalTimer::ResumeAwaitSample);
+  }
+
+  onFunctionEnter(ar, EventHook::NormalFunc, flags, true);
 }
 
-void EventHook::onFunctionSuspend(const ActRec* ar, bool suspendingResumed) {
-  // TODO(#2329497) can't CheckSurprise() yet, unwinder frees suspended locals
-  ssize_t flags = GetConditionFlags();
-  onFunctionExit(ar, nullptr, nullptr, flags);
+void EventHook::onFunctionResumeYield(const ActRec* ar) {
+  auto const flags = handle_request_surprise();
 
-  // Async profiler
-  if ((flags & RequestInjectionData::AsyncEventHookFlag) &&
-      ar->func()->isAsyncFunction()) {
-    assert(ar->resumed());
-    auto afwh = frame_afwh(ar);
-    auto session = AsioSession::Get();
-    // Blocking await @ eager execution => AsyncFunctionWaitHandle created.
-    if (!suspendingResumed && session->hasOnResumableCreateCallback()) {
-      session->onResumableCreate(afwh, afwh->getChild());
-    }
-    // Blocking await @ resumed execution => AsyncFunctionWaitHandle awaiting.
-    if (suspendingResumed && session->hasOnResumableAwaitCallback()) {
-      session->onResumableAwait(afwh, afwh->getChild());
+  // Xenon
+  if (flags & XenonSignalFlag) {
+    Xenon::getInstance().log(Xenon::EnterSample);
+  }
+
+  // Memory Threhsold
+  if (flags & MemThresholdFlag) {
+    DoMemoryThresholdCallback();
+  }
+
+  if (flags & IntervalTimerFlag) {
+    IntervalTimer::RunCallbacks(IntervalTimer::EnterSample);
+  }
+
+  onFunctionEnter(ar, EventHook::NormalFunc, flags, true);
+}
+
+// Child is the AFWH we're going to block on, nullptr iff this is a suspending
+// generator.
+void EventHook::onFunctionSuspendR(ActRec* suspending, ObjectData* child) {
+  auto const flags = handle_request_surprise();
+  onFunctionExit(suspending, nullptr, false, nullptr, flags, true);
+
+  if ((flags & AsyncEventHookFlag) &&
+      suspending->func()->isAsyncFunction()) {
+    assert(child != nullptr);  // This isn't a generator
+    assert(child->instanceof(c_WaitableWaitHandle::classof()));
+    assert(suspending->resumed());
+    auto const afwh = frame_afwh(suspending);
+    auto const session = AsioSession::Get();
+    if (session->hasOnResumableAwait()) {
+      session->onResumableAwait(
+        afwh,
+        static_cast<c_WaitableWaitHandle*>(child)
+      );
     }
   }
 }
 
-void EventHook::onFunctionReturn(ActRec* ar, const TypedValue& retval) {
-  // Null out $this for the exiting function, it has been decref'd so it's
-  // garbage.
-  ar->setThisOrClassAllowNull(nullptr);
+void EventHook::onFunctionSuspendE(ActRec* suspending,
+                                   const ActRec* resumableAR) {
+  // When we're suspending an eagerly executing resumable, we've already
+  // teleported the ActRec from suspending over to resumableAR, so we need to
+  // make sure the unwinder knows not to touch the locals, $this, or
+  // VarEnv/ExtraArgs.
+  suspending->setLocalsDecRefd();
+  suspending->trashThis();
+  suspending->trashVarEnv();
 
-  // The locals are already gone. Mark them as decref'd so that if this hook
-  // fails and unwinder kicks in, it won't try to decref them again.
+  try {
+    auto const flags = handle_request_surprise();
+    onFunctionExit(resumableAR, nullptr, false, nullptr, flags, true);
+
+    if ((flags & AsyncEventHookFlag) &&
+        resumableAR->func()->isAsyncFunction()) {
+      assert(resumableAR->resumed());
+      auto const afwh = frame_afwh(resumableAR);
+      auto const session = AsioSession::Get();
+      if (session->hasOnResumableCreate()) {
+        session->onResumableCreate(afwh, afwh->getChild());
+      }
+    }
+  } catch (...) {
+    auto const resumableObj = [&]() -> ObjectData* {
+      if (resumableAR->func()->isAsyncFunction()) {
+        return frame_afwh(resumableAR);
+      }
+      assert(resumableAR->func()->isGenerator());
+      return !resumableAR->func()->isAsync()
+        ? frame_generator(resumableAR)->toObject()
+        : frame_async_generator(resumableAR)->toObject();
+    }();
+    decRefObj(resumableObj);
+    throw;
+  }
+}
+
+void EventHook::onFunctionReturn(ActRec* ar, TypedValue retval) {
+  // The locals are already gone. Tell everyone
   ar->setLocalsDecRefd();
+  ar->trashThis();
+  ar->trashVarEnv();
 
-  ssize_t flags = CheckSurprise();
-  onFunctionExit(ar, &retval, nullptr, flags);
+  try {
+    auto const flags = handle_request_surprise();
+    onFunctionExit(ar, &retval, false, nullptr, flags, false);
 
-  // Async profiler
-  if ((flags & RequestInjectionData::AsyncEventHookFlag) &&
-      ar->func()->isAsyncFunction() && ar->resumed()) {
-    auto session = AsioSession::Get();
-    // Return @ resumed execution => AsyncFunctionWaitHandle succeeded.
-    if (session->hasOnResumableSuccessCallback()) {
-      auto afwh = frame_afwh(ar);
-      session->onResumableSuccess(afwh, cellAsCVarRef(retval));
+    // Async profiler
+    if ((flags & AsyncEventHookFlag) &&
+        ar->func()->isAsyncFunction() && ar->resumed()) {
+      auto session = AsioSession::Get();
+      // Return @ resumed execution => AsyncFunctionWaitHandle succeeded.
+      if (session->hasOnResumableSuccess()) {
+        auto afwh = frame_afwh(ar);
+        session->onResumableSuccess(afwh, cellAsCVarRef(retval));
+      }
     }
+  } catch (...) {
+    /*
+     * We're responsible for freeing the return value if we exit with an
+     * exception.  See irgen-ret.
+     */
+    tvRefcountedDecRef(retval);
+    throw;
   }
 }
 
-void EventHook::onFunctionUnwind(const ActRec* ar, const Fault& fault) {
-  // TODO(#2329497) can't CheckSurprise() yet, unwinder unable to replace fault
-  ssize_t flags = GetConditionFlags();
-  onFunctionExit(ar, nullptr, &fault, flags);
+void EventHook::onFunctionUnwind(ActRec* ar, ObjectData* phpException) {
+  // The locals are already gone. Tell everyone
+  ar->setLocalsDecRefd();
+  ar->trashThis();
+  ar->trashVarEnv();
+
+  // TODO(#2329497) can't handle_request_surprise() yet, unwinder unable to
+  // replace fault
+  auto const flags = stackLimitAndSurprise().load() & kSurpriseFlagMask;
+  onFunctionExit(ar, nullptr, true, phpException, flags, false);
 }
 
 } // namespace HPHP

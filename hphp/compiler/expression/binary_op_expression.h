@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,23 +24,21 @@ namespace HPHP {
 
 DECLARE_BOOST_TYPES(BinaryOpExpression);
 
-class BinaryOpExpression : public Expression {
-public:
+struct BinaryOpExpression : Expression {
   BinaryOpExpression(EXPRESSION_CONSTRUCTOR_PARAMETERS,
                      ExpressionPtr exp1, ExpressionPtr exp2, int op);
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
-  virtual bool isTemporary() const;
-  virtual int getLocalEffects() const;
-  virtual bool isLiteralString() const;
-  virtual std::string getLiteralString() const;
-  virtual bool containsDynamicConstant(AnalysisResultPtr ar) const;
+  ExpressionPtr preOptimize(AnalysisResultConstPtr ar) override;
+  int getLocalEffects() const override;
+  bool isLiteralString() const override;
+  std::string getLiteralString() const override;
+  bool containsDynamicConstant(AnalysisResultPtr ar) const override;
 
-  virtual bool isRefable(bool checkError = false) const;
+  bool isRefable(bool checkError = false) const override;
   bool isShortCircuitOperator() const;
   bool isLogicalOrOperator() const;
-  ExpressionPtr getStoreVariable() const { return m_exp1;}
+  ExpressionPtr getStoreVariable() const override { return m_exp1;}
   ExpressionPtr getExp1() { return m_exp1;}
   ExpressionPtr getExp2() { return m_exp2;}
   int getOp() const { return m_op;}
@@ -48,18 +46,13 @@ public:
   ExpressionPtr foldConst(AnalysisResultConstPtr ar);
   ExpressionPtr foldRightAssoc(AnalysisResultConstPtr ar);
 
-  virtual ExpressionPtr unneededHelper();
-  virtual bool canonCompare(ExpressionPtr e) const;
+  ExpressionPtr unneededHelper() override;
 
-  static int getConcatList(ExpressionPtrVec &ev, ExpressionPtr exp,
+  static int getConcatList(std::vector<ExpressionPtr>& ev, ExpressionPtr exp,
                            bool &hasVoid);
   bool isAssignmentOp() const { return m_assign; }
 
 private:
-  void optimizeTypes(AnalysisResultConstPtr ar);
-  ExpressionPtr simplifyLogical(AnalysisResultConstPtr ar);
-  ExpressionPtr simplifyArithmetic(AnalysisResultConstPtr ar);
-  bool isOpEqual();
   ExpressionPtr m_exp1;
   ExpressionPtr m_exp2;
   int m_op;

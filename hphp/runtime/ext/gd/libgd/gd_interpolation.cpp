@@ -77,6 +77,10 @@ using std::abs;
 
 #define CLAMP(x, low, high)  (((x) > (high)) ? (high) : (((x) < (low)) ? (low) : (x)))
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 /* only used here, let do a generic fixed point integers later if required by other
    part of GD */
 typedef long gdFixed;
@@ -820,6 +824,9 @@ static inline LineContribType *_gdContributionsCalc(unsigned int line_size, unsi
 
     windows_size = 2 * (int)ceil(width_d) + 1;
     res = _gdContributionsAlloc(line_size, windows_size);
+    if (res == NULL) {
+      return NULL;
+    }
 
     for (u = 0; u < line_size; u++) {
         const double dCenter = (double)u / scale_d;
@@ -829,9 +836,6 @@ static inline LineContribType *_gdContributionsCalc(unsigned int line_size, unsi
         double dTotalWeight = 0.0;
 		int iSrc;
 
-        res->ContribRow[u].Left = iLeft;
-        res->ContribRow[u].Right = iRight;
-
         /* Cut edge points to fit in filter window in case of spill-off */
         if (iRight - iLeft + 1 > windows_size)  {
             if (iLeft < ((int)src_size - 1 / 2))  {
@@ -840,6 +844,9 @@ static inline LineContribType *_gdContributionsCalc(unsigned int line_size, unsi
                 iRight--;
             }
         }
+
+        res->ContribRow[u].Left = iLeft;
+        res->ContribRow[u].Right = iRight;
 
         for (iSrc = iLeft; iSrc <= iRight; iSrc++) {
             dTotalWeight += (res->ContribRow[u].Weights[iSrc-iLeft] =  scale_f_d * (*pFilter)(scale_f_d * (dCenter - (double)iSrc)));
@@ -943,7 +950,10 @@ static inline void _gdScaleVert (const gdImagePtr pSrc, const unsigned int src_w
 	}
 
 	contrib = _gdContributionsCalc(dst_height, src_height, (double)(dst_height) / (double)(src_height), pSrc->interpolation);
-	/* scale each column */
+	if (contrib == NULL) {
+		return;
+	}
+  /* scale each column */
 	for (u = 0; u < dst_width - 1; u++) {
 		_gdScaleCol(pSrc, src_width, pDst, dst_width, dst_height, u, contrib);
 	}
@@ -955,6 +965,15 @@ gdImagePtr gdImageScaleTwoPass(const gdImagePtr src, const unsigned int src_widt
 	gdImagePtr tmp_im;
 	gdImagePtr dst;
 
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
+	}
+
+	/* Convert to truecolor if it isn't; this code requires it. */
+	if (!src->trueColor) {
+		gdImagePaletteToTrueColor(src);
+	}
+
 	tmp_im = gdImageCreateTrueColor(new_width, src_height);
 	if (tmp_im == NULL) {
 		return NULL;
@@ -964,12 +983,12 @@ gdImagePtr gdImageScaleTwoPass(const gdImagePtr src, const unsigned int src_widt
 
 	dst = gdImageCreateTrueColor(new_width, new_height);
 	if (dst == NULL) {
-		gdFree(tmp_im);
+		gdImageDestroy(tmp_im);
 		return NULL;
 	}
 	gdImageSetInterpolationMethod(dst, src->interpolation_id);
 	_gdScaleVert(tmp_im, new_width, src_height, dst, new_width, new_height);
-	gdFree(tmp_im);
+	gdImageDestroy(tmp_im);
 
 	return dst;
 }
@@ -977,6 +996,14 @@ gdImagePtr gdImageScaleTwoPass(const gdImagePtr src, const unsigned int src_widt
 gdImagePtr Scale(const gdImagePtr src, const unsigned int src_width, const unsigned int src_height, const gdImagePtr dst, const unsigned int new_width, const unsigned int new_height)
 {
 	gdImagePtr tmp_im;
+
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
+	}
+
+	if (!src->trueColor) {
+		gdImagePaletteToTrueColor(src);
+	}
 
 	tmp_im = gdImageCreateTrueColor(new_width, src_height);
 	if (tmp_im == NULL) {
@@ -1010,6 +1037,10 @@ gdImagePtr gdImageScaleNearestNeighbour(gdImagePtr im, const unsigned int width,
 	unsigned long  dst_offset_x;
 	unsigned long  dst_offset_y = 0;
 	unsigned int i;
+
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
+	}
 
 	dst_img = gdImageCreateTrueColor(new_width, new_height);
 
@@ -1063,6 +1094,10 @@ static gdImagePtr gdImageScaleBilinearPalette(gdImagePtr im, const unsigned int 
 	long i;
 	gdImagePtr new_img;
 	const int transparent = im->transparent;
+
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
+	}
 
 	new_img = gdImageCreateTrueColor(new_width, new_height);
 	if (new_img == NULL) {
@@ -1154,6 +1189,10 @@ static gdImagePtr gdImageScaleBilinearTC(gdImagePtr im, const unsigned int new_w
 	int dst_offset_v = 0;
 	long i;
 	gdImagePtr new_img;
+
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
+	}
 
 	new_img = gdImageCreateTrueColor(new_width, new_height);
 	if (!new_img) {
@@ -1252,6 +1291,10 @@ gdImagePtr gdImageScaleBicubicFixed(gdImagePtr src, const unsigned int width, co
 	unsigned int dst_offset_x;
 	unsigned int dst_offset_y = 0;
 	long i;
+
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
+	}
 
 	/* impact perf a bit, but not that much. Implementation for palette
 	   images can be done at a later point.
@@ -1475,7 +1518,11 @@ gdImagePtr gdImageScale(const gdImagePtr src, const unsigned int new_width, cons
 	gdImagePtr im_scaled = NULL;
 
 	if (src == NULL || src->interpolation_id < 0 || src->interpolation_id > GD_METHOD_COUNT) {
-		return 0;
+		return NULL;
+	}
+
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
 	}
 
 	switch (src->interpolation_id) {
@@ -1520,6 +1567,10 @@ gdImagePtr gdImageRotateNearestNeighbour(gdImagePtr src, const float degrees, co
 	unsigned int dst_offset_y = 0;
 	unsigned int i;
 	gdImagePtr dst;
+
+	if (new_width == 0 || new_height == 0) {
+		return NULL;
+	}
 
 	dst = gdImageCreateTrueColor(new_width, new_height);
 	if (!dst) {
@@ -2005,7 +2056,7 @@ gdImagePtr gdImageRotateInterpolated(const gdImagePtr src, const float angle, in
 	   images can be done at a later point.
 	*/
 	if (src->trueColor == 0) {
-		if (bgcolor >= 0) {
+		if (bgcolor < gdMaxColors) {
 			bgcolor =  gdTrueColorAlpha(src->red[bgcolor], src->green[bgcolor], src->blue[bgcolor], src->alpha[bgcolor]);
 		}
 		gdImagePaletteToTrueColor(src);

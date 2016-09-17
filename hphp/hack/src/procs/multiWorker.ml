@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,10 +8,16 @@
  *
  *)
 
-type 'a nextlist = 
-  unit -> 'a list
+open Core
 
-let single_threaded_call job merge neutral next =
+type 'a bucket =
+  | Job of 'a list
+  | Wait
+
+type 'a nextlist_dynamic =
+  unit -> 'a bucket
+
+let single_threaded_call_dynamic job merge neutral next =
   let x = ref (next()) in
   let acc = ref neutral in
   (* This is a just a sanity check that the job is serializable and so
@@ -19,79 +25,75 @@ let single_threaded_call job merge neutral next =
    * mode.
    *)
   let _ = Marshal.to_string job [Marshal.Closures] in
-  while !x != [] do
-    acc := job !acc !x;
-    x := next()
+  while !x <> Job [] do
+    match !x with
+    | Wait ->
+        (* this state should never be reached in single threaded mode, since
+           there is no hope for ever getting out of this state *)
+        failwith "stuck!"
+    | Job l ->
+        let res = job neutral l in
+        acc := merge !acc res;
+        x := next()
   done;
   !acc
 
-let call workers ~job ~merge ~neutral ~next =
+let multi_threaded_call_dynamic
+  (type a) (type b)
+  workers (job: b -> a list -> b)
+  (merge: b -> b -> b)
+  (neutral: b)
+  (next: a nextlist_dynamic) =
+  let rec dispatch workers handles acc =
+    (* 'worker' represents available workers. *)
+    (* 'handles' represents pendings jobs. *)
+    (* 'acc' are the accumulated results. *)
+    match workers with
+    | [] when handles = [] -> acc
+    | [] ->
+        (* No worker available: wait for some workers to finish. *)
+        collect [] handles acc
+    | worker :: workers ->
+        (* At least one worker is available... *)
+        match next () with
+        | Wait -> collect (worker :: workers) handles acc
+        | Job [] ->
+            (* ... but no more job to be distributed, let's collect results. *)
+            dispatch [] handles acc
+        | Job bucket ->
+            (* ... send a job to the worker.*)
+            let handle =
+              Worker.call worker
+                (fun xl -> job neutral xl)
+                bucket in
+            dispatch workers (handle :: handles) acc
+  and collect workers handles acc =
+    let { Worker.readys; waiters } = Worker.select handles in
+    let workers = List.map ~f:Worker.get_worker readys @ workers in
+    (* Collect the results. *)
+    let acc =
+      List.fold_left
+        ~f:(fun acc h -> merge (Worker.get_result h) acc)
+        ~init:acc
+        readys in
+    (* And continue.. *)
+    dispatch workers waiters acc in
+  dispatch workers [] neutral
+
+let call_dynamic workers ~job ~merge ~neutral ~next =
   match workers with
-  | None -> single_threaded_call job merge neutral next
-  | Some workers ->
-      let acc = ref neutral in
-      let procs = ref workers in
-      let busy = ref 0 in
-      try
-        while true do
-          List.iter begin fun proc ->
-            let bucket = next () in
-            if bucket = [] then raise Exit;
-            incr busy;
-            ignore (Worker.call proc 
-                      begin fun xl ->
-                        job neutral xl
-                      end
-                      bucket
-                   );
-          end !procs;
-          let ready_procs = Worker.select workers in
-          List.iter begin fun proc ->
-            let res = Worker.get_result proc (Obj.magic 0) in
-            decr busy;
-            acc := merge res !acc;
-          end ready_procs;
-          procs := ready_procs;
-        done;
-        assert false
-      with Exit ->
-        while !busy > 0 do
-          List.iter begin fun proc ->
-            let res = Worker.get_result proc (Obj.magic 0) in
-            decr busy;
-            acc := merge res !acc;
-          end (Worker.select workers);
-        done;
-        !acc
+  | None -> single_threaded_call_dynamic job merge neutral next
+  | Some workers -> multi_threaded_call_dynamic workers job merge neutral next
 
-module type Proc = sig
-  type env
-  type input
-  type output
+(* special case of call_dynamic with no waiting, useful for static worklists *)
+type 'a nextlist =
+  unit -> 'a list
 
-  val neutral: output
-  val job: env -> output -> input list -> output
-  val merge: output -> output -> output
-  val make_next: input list -> (unit -> input list)
-end
+let call workers ~job ~merge ~neutral ~next =
+  let next = fun () -> Job (next ()) in
+  call_dynamic workers ~job ~merge ~neutral ~next
 
-module type S = sig
-  type env
-  type input
-  type output
-
-  val run: Worker.t list option -> env -> input list -> output
-end
-
-module Make = functor(Proc: Proc) -> struct
-  type env = Proc.env
-  type input = Proc.input
-  type output = Proc.output
-
-  let run workers env input_list =
-    let job = Proc.job env in
-    let merge = Proc.merge in
-    let neutral = Proc.neutral in
-    let next = Proc.make_next input_list in
-    call workers ~job ~merge ~neutral ~next
-end
+let next ?max_size workers =
+  Bucket.make
+    ~num_workers: (match workers with Some w -> List.length w | None -> 1)
+    ?max_size

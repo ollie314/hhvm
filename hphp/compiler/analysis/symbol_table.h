@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,9 +30,9 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class BlockScope;
-class CodeGenerator;
-class Variant;
+struct BlockScope;
+struct CodeGenerator;
+struct Variant;
 DECLARE_BOOST_TYPES(Construct);
 DECLARE_EXTENDED_BOOST_TYPES(Type);
 DECLARE_BOOST_TYPES(AnalysisResult);
@@ -46,31 +46,21 @@ DECLARE_BOOST_TYPES(BlockScope);
 typedef std::set<std::string> SymbolSet;
 typedef std::map<std::string, std::set<std::string> > Type2SymbolSetMap;
 
-class Symbol;
+struct Symbol;
 typedef hphp_string_map<Symbol*> StringToSymbolMap;
 typedef std::vector<Symbol*>     SymbolVec;
 
-class Symbol {
-public:
+struct Symbol {
   Symbol() : m_hash(0), m_parameter(-1) { m_flags_val = 0; }
 
   void import(BlockScopeRawPtr scope, const Symbol &src_sym);
 
-  void beginLocal(BlockScopeRawPtr scope);
-  void endLocal  (BlockScopeRawPtr scope);
-  void resetLocal(BlockScopeRawPtr scope);
-
   void setName(const std::string &name) {
     m_name = name;
-    m_hash = (unsigned int) hash_string_inline(m_name.c_str(), m_name.size());
+    m_hash = (unsigned int) hash_string_unsafe(m_name.c_str(), m_name.size());
   }
   const std::string &getName() const { return m_name; }
   unsigned int getHash() const { return m_hash; }
-
-  TypePtr getType() const { return m_coerced; }
-  TypePtr getFinalType() const;
-  TypePtr setType(AnalysisResultConstPtr ar, BlockScopeRawPtr scope,
-                  TypePtr type, bool coerced);
 
   bool isPresent() const { return m_flags.m_declaration_set; }
   bool checkDefined();
@@ -116,7 +106,6 @@ public:
   bool isSuperGlobal() const { return m_flags.m_superGlobal; }
   bool isOverride() const { return m_flags.m_override; }
   bool isIndirectAltered() const { return m_flags.m_indirectAltered; }
-  bool isReferenced() const { return !m_flags.m_notReferenced; }
   bool isHidden() const { return m_flags.m_hidden; }
   bool isClosureVar() const { return m_flags.m_closureVar; }
   bool isRefClosureVar() const { return m_flags.m_refClosureVar; }
@@ -141,7 +130,6 @@ public:
   void setSuperGlobal() { m_flags.m_superGlobal = true; }
   void setOverride() { m_flags.m_override = true; }
   void setIndirectAltered() { m_flags.m_indirectAltered = true; }
-  void setReferenced() { m_flags.m_notReferenced = false; }
   void setHidden() { m_flags.m_hidden = true; }
   void setClosureVar() { m_flags.m_closureVar = true; }
   void setRefClosureVar() { m_flags.m_refClosureVar = true; }
@@ -154,7 +142,6 @@ public:
   void clearGlobal() { m_flags.m_global = false; }
   void clearUsed() { m_flags.m_used = false; }
   void clearNeeded() { m_flags.m_needed = false; }
-  void clearReferenced() { m_flags.m_notReferenced = true; }
   void clearReseated() { m_flags.m_reseated = false; }
   void clearRefClosureVar() { m_flags.m_refClosureVar = false; }
 
@@ -219,7 +206,6 @@ private:
       unsigned m_superGlobal : 1;
       unsigned m_override : 1;
       unsigned m_indirectAltered : 1;
-      unsigned m_notReferenced : 1;
       unsigned m_hidden : 1;
       unsigned m_closureVar : 1;
       unsigned m_refClosureVar : 1;
@@ -233,25 +219,17 @@ private:
 
   };
   static_assert(
-    sizeof(m_flags_val) == sizeof(m_flags),
+    sizeof(decltype(m_flags_val)) == sizeof(decltype(m_flags)),
     "m_flags_val must cover all the flags");
 
   ConstructPtr        m_declaration;
   ConstructPtr        m_value;
-  TypePtr             m_coerced;
-  TypePtr             m_prevCoerced;
 
   int                 m_parameter;
   ConstructPtr        m_initVal;
-
-  void triggerUpdates(BlockScopeRawPtr scope) const;
-
-  static TypePtr CoerceTo(AnalysisResultConstPtr ar,
-                          TypePtr &curType, TypePtr type);
 };
 
-class SymParamWrapper : public JSON::DocTarget::ISerializable {
-public:
+struct SymParamWrapper : JSON::DocTarget::ISerializable {
   explicit SymParamWrapper(const Symbol* sym) : m_sym(sym) {
     assert(sym);
   }
@@ -262,8 +240,7 @@ private:
   const Symbol *m_sym;
 };
 
-class SymClassVarWrapper : public JSON::DocTarget::ISerializable {
-public:
+struct SymClassVarWrapper : JSON::DocTarget::ISerializable {
   explicit SymClassVarWrapper(const Symbol* sym) : m_sym(sym) {
     assert(sym);
   }
@@ -277,25 +254,18 @@ private:
 /**
  * Base class of VariableTable and ConstantTable.
  */
-class SymbolTable : public std::enable_shared_from_this<SymbolTable>,
-                    public JSON::CodeError::ISerializable {
-public:
-  static Mutex AllSymbolTablesMutex;
-  static SymbolTablePtrList AllSymbolTables; // for stats purpose
-  static void Purge();
-  static void CountTypes(std::map<std::string, int> &counts);
+struct SymbolTable : std::enable_shared_from_this<SymbolTable>,
+                     JSON::CodeError::ISerializable {
   BlockScope *getScopePtr() const { return &m_blockScope; }
   BlockScopeRawPtr getBlockScope() const {
     return BlockScopeRawPtr(&m_blockScope);
   }
 public:
-  SymbolTable(BlockScope &blockScope, bool isConst);
-  SymbolTable();
+  SymbolTable& operator=(const SymbolTable&) = delete;
+  SymbolTable(const SymbolTable&) = delete;
+  explicit SymbolTable(BlockScope &blockScope);
+  SymbolTable() = delete;
   virtual ~SymbolTable();
-
-  void beginLocal();
-  void endLocal();
-  void resetLocal();
 
   /**
    * Import system symbols into this.
@@ -331,35 +301,16 @@ public:
   virtual void serialize(JSON::CodeError::OutputStream &out) const;
 
   /**
-   * Find a symbol's inferred type.
-   */
-  TypePtr getType(const std::string &name) const;
-  TypePtr getFinalType(const std::string &name) const;
-
-  /**
    * Find declaration construct.
    */
   bool isExplicitlyDeclared(const std::string &name) const;
   ConstructPtr getDeclaration(const std::string &name) const;
   ConstructPtr getValue(const std::string &name) const;
 
-  /**
-   * How big of a hash table for generate C++ switch statements.
-   */
-  int getJumpTableSize() const {
-    return folly::nextPowTwo(m_symbolVec.size() * 2);
-  }
-
   void canonicalizeSymbolOrder();
   void getSymbols(std::vector<Symbol*> &syms, bool filterHidden = false) const;
   void getSymbols(std::vector<std::string> &syms) const;
   const std::vector<Symbol*> &getSymbols() const { return m_symbolVec; }
-  void getCoerced(StringToTypePtrMap &coerced) const;
-
-  virtual TypePtr setType(AnalysisResultConstPtr ar, const std::string &name,
-                          TypePtr type, bool coerced);
-  virtual TypePtr setType(AnalysisResultConstPtr ar, Symbol *sym,
-                          TypePtr type, bool coerced);
   Symbol *getSymbol(const std::string &name);
   const Symbol *getSymbol(const std::string &name) const;
 
@@ -376,11 +327,8 @@ protected:
 
   std::vector<Symbol*>  m_symbolVec; // in declaration order
   StringToSymbolMap     m_symbolMap;
-
-  void countTypes(std::map<std::string, int> &counts);
 private:
   const Symbol* getSymbolImpl(const std::string &name) const;
-  bool m_const;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -28,7 +28,7 @@ if (LIBDL_INCLUDE_DIRS)
 endif()
 
 # boost checks
-find_package(Boost 1.49.0 COMPONENTS system program_options filesystem REQUIRED)
+find_package(Boost 1.51.0 COMPONENTS system program_options filesystem context REQUIRED)
 include_directories(${Boost_INCLUDE_DIRS})
 link_directories(${Boost_LIBRARY_DIRS})
 add_definitions("-DHAVE_BOOST1_49")
@@ -42,6 +42,9 @@ endif()
 
 # google-glog
 find_package(Glog REQUIRED)
+if (LIBGLOG_STATIC)
+  add_definitions("-DGOOGLE_GLOG_DLL_DECL=")
+endif()
 include_directories(${LIBGLOG_INCLUDE_DIR})
 
 # inotify checks
@@ -50,33 +53,29 @@ if (LIBINOTIFY_INCLUDE_DIR)
   include_directories(${LIBINOTIFY_INCLUDE_DIR})
 endif()
 
-# iconv checks
-find_package(Libiconv REQUIRED)
-include_directories(${LIBICONV_INCLUDE_DIR})
-if (LIBICONV_CONST)
-  message(STATUS "Using const for input to iconv() call")
-  add_definitions("-DICONV_CONST=const")
+# mysql checks - if we're using async mysql, we use webscalesqlclient from
+# third-party/ instead
+if (ENABLE_ASYNC_MYSQL)
+  include_directories(
+    ${TP_DIR}/re2/src/
+    ${TP_DIR}/squangle/src/
+    ${TP_DIR}/webscalesqlclient/src/include/
+  )
+  set(MYSQL_CLIENT_LIB_DIR ${TP_DIR}/webscalesqlclient/src/)
+  set(MYSQL_CLIENT_LIBS
+    ${MYSQL_CLIENT_LIB_DIR}/libmysql/libwebscalesqlclient_r.a
+  )
+else()
+  find_package(MySQL REQUIRED)
+  link_directories(${MYSQL_LIB_DIR})
+  include_directories(${MYSQL_INCLUDE_DIR})
 endif()
-
-# mysql checks
-find_package(MySQL REQUIRED)
-include_directories(${MYSQL_INCLUDE_DIR})
-link_directories(${MYSQL_LIB_DIR})
 MYSQL_SOCKET_SEARCH()
 if (MYSQL_UNIX_SOCK_ADDR)
   add_definitions(-DPHP_MYSQL_UNIX_SOCK_ADDR="${MYSQL_UNIX_SOCK_ADDR}")
-endif()
-
-# libmemcached checks
-find_package(Libmemcached REQUIRED)
-if (LIBMEMCACHED_VERSION VERSION_LESS "0.39")
-  unset(LIBMEMCACHED_INCLUDE_DIR CACHE)
-  unset(LIBMEMCACHED_LIBRARY CACHE)
-  unset(LIBMEMCACHED_VERSION CACHE)
-  message(FATAL_ERROR "libmemcache is too old, found ${LIBMEMCACHED_VERSION} and we need 0.39")
+else ()
+  message(FATAL_ERROR "Could not find MySQL socket path - if you install a MySQL server, this should be automatically detected. Alternatively, specify -DMYSQL_UNIX_SOCK_ADDR=/path/to/mysql.socket ; if you don't care about unix socket support for MySQL, specify -DMYSQL_UNIX_SOCK_ADDR=/dev/null")
 endif ()
-include_directories(${LIBMEMCACHED_INCLUDE_DIR})
-link_directories(${LIBMEMCACHED_LIBRARY_DIRS})
 
 # pcre checks
 find_package(PCRE)
@@ -94,12 +93,6 @@ if(HAVE_CUSTOM_LIBEVENT)
 endif()
 set(CMAKE_REQUIRED_LIBRARIES)
 
-find_package(LibUODBC)
-if (LIBUODBC_INCLUDE_DIRS)
-  include_directories(${LIBUODBC_INCLUDE_DIRS})
-  add_definitions("-DHAVE_UODBC")
-endif ()
-
 # libXed
 find_package(LibXed)
 if (LibXed_INCLUDE_DIR AND LibXed_LIBRARY)
@@ -110,6 +103,9 @@ endif()
 # CURL checks
 find_package(CURL REQUIRED)
 include_directories(${CURL_INCLUDE_DIR})
+if (CURL_STATIC)
+  add_definitions("-DCURL_STATICLIB")
+endif()
 
 set(CMAKE_REQUIRED_LIBRARIES "${CURL_LIBRARIES}")
 CHECK_FUNCTION_EXISTS("curl_multi_select" HAVE_CURL_MULTI_SELECT)
@@ -127,13 +123,6 @@ find_package(LibXml2 REQUIRED)
 include_directories(${LIBXML2_INCLUDE_DIR})
 add_definitions(${LIBXML2_DEFINITIONS})
 
-find_package(LibXslt REQUIRED)
-include_directories(${LIBXSLT_INCLUDE_DIR})
-add_definitions(${LIBXSLT_DEFINITIONS})
-
-find_package(EXPAT REQUIRED)
-include_directories(${EXPAT_INCLUDE_DIRS})
-
 # libsqlite3
 find_package(LibSQLite)
 if (LIBSQLITE_INCLUDE_DIR)
@@ -150,6 +139,12 @@ endif ()
 find_package(LZ4)
 if (LZ4_INCLUDE_DIR)
   include_directories(${LZ4_INCLUDE_DIR})
+endif()
+
+# fastlz
+find_package(FastLZ)
+if (FASTLZ_INCLUDE_DIR)
+  include_directories(${FASTLZ_INCLUDE_DIR})
 endif()
 
 # libzip
@@ -179,6 +174,10 @@ if (ICU_FOUND)
     message(FATAL_ERROR "ICU is too old, found ${ICU_VERSION} and we need 4.2")
   endif ()
   include_directories(${ICU_INCLUDE_DIRS})
+  if (ICU_STATIC)
+    add_definitions("-DU_EXPORT=")
+    add_definitions("-DU_IMPORT=")
+  endif()
 endif (ICU_FOUND)
 
 # jemalloc/tmalloc and profiler
@@ -266,6 +265,11 @@ if (GOOGLE_CPU_PROFILER_ENABLED)
   add_definitions(-DGOOGLE_CPU_PROFILER=1)
 endif()
 
+# HHProf
+if (JEMALLOC_ENABLED AND ENABLE_HHPROF)
+  add_definitions(-DENABLE_HHPROF=1)
+endif()
+
 # tbb libs
 find_package(TBB REQUIRED)
 if (${TBB_INTERFACE_VERSION} LESS 5005)
@@ -277,15 +281,12 @@ endif()
 include_directories(${TBB_INCLUDE_DIRS})
 link_directories(${TBB_LIBRARY_DIRS})
 
-# mcrypt libs
-find_package(Mcrypt REQUIRED)
-include_directories(${Mcrypt_INCLUDE_DIR})
-
 # OpenSSL libs
 find_package(OpenSSL REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
-# reSSL explicitly refuses to support RAND_egd()
+# LibreSSL explicitly refuses to support RAND_egd()
+SET(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
 SET(CMAKE_REQUIRED_LIBRARIES ${OPENSSL_LIBRARIES})
 INCLUDE(CheckCXXSourceCompiles)
 CHECK_CXX_SOURCE_COMPILES("#include <openssl/rand.h>
@@ -295,27 +296,27 @@ int main() {
 if (NOT OPENSSL_HAVE_RAND_EGD)
   add_definitions("-DOPENSSL_NO_RAND_EGD")
 endif()
+SET(CMAKE_REQUIRED_INCLUDES)
+SET(CMAKE_REQUIRED_LIBRARIES)
 
 
 # ZLIB
 find_package(ZLIB REQUIRED)
 include_directories(${ZLIB_INCLUDE_DIR})
 
-find_package(BZip2 REQUIRED)
-include_directories(${BZIP2_INCLUDE_DIR})
-add_definitions(${BZIP2_DEFINITIONS})
-
 # oniguruma
 find_package(ONIGURUMA REQUIRED)
 include_directories(${ONIGURUMA_INCLUDE_DIRS})
-
-# LDAP
-find_package(Ldap REQUIRED)
-include_directories(${LDAP_INCLUDE_DIR})
+if (ONIGURUMA_STATIC)
+  add_definitions("-DONIG_EXTERN=extern")
+endif()
 
 # libpthreads
 find_package(PThread REQUIRED)
 include_directories(${LIBPTHREAD_INCLUDE_DIRS})
+if (LIBPTHREAD_STATIC)
+  add_definitions("-DPTW32_STATIC_LIB")
+endif()
 
 # Either Readline or Editline (for hphpd)
 find_package(Readline)
@@ -324,37 +325,30 @@ if (EDITLINE_INCLUDE_DIRS)
   add_definitions("-DUSE_EDITLINE")
   include_directories(${EDITLINE_INCLUDE_DIRS})
 elseif (READLINE_INCLUDE_DIR)
+  if (READLINE_STATIC)
+    add_definitions("-DREADLINE_STATIC")
+  endif()
   include_directories(${READLINE_INCLUDE_DIR})
 else()
   message(FATAL_ERROR "Could not find Readline or Editline")
 endif()
 
-find_package(LibDwarf REQUIRED)
-include_directories(${LIBDWARF_INCLUDE_DIRS})
-if (LIBDWARF_CONST_NAME)
-  add_definitions("-DLIBDWARF_CONST_NAME")
-endif()
-if (LIBDWARF_USE_INIT_C)
-  add_definitions("-DLIBDWARF_USE_INIT_C")
-endif()
+if (NOT WINDOWS)
+  find_package(LibDwarf REQUIRED)
+  include_directories(${LIBDWARF_INCLUDE_DIRS})
+  if (LIBDWARF_CONST_NAME)
+    add_definitions("-DLIBDWARF_CONST_NAME")
+  endif()
+  if (LIBDWARF_USE_INIT_C)
+    add_definitions("-DLIBDWARF_USE_INIT_C")
+  endif()
 
-find_package(LibElf REQUIRED)
-include_directories(${LIBELF_INCLUDE_DIRS})
-if (ELF_GETSHDRSTRNDX)
-  add_definitions("-DHAVE_ELF_GETSHDRSTRNDX")
+  find_package(LibElf REQUIRED)
+  include_directories(${LIBELF_INCLUDE_DIRS})
+  if (ELF_GETSHDRSTRNDX)
+    add_definitions("-DHAVE_ELF_GETSHDRSTRNDX")
+  endif()
 endif()
-
-find_package(Libpam)
-if (PAM_INCLUDE_PATH)
-  include_directories(${PAM_INCLUDE_PATH})
-endif()
-
-# LLVM. Disabled in OSS for now: t5056266
-# find_package(LLVM)
-# if (LIBLLVM_INCLUDE_DIR)
-#   include_directories(LIBLLVM_INCLUDE_DIR)
-#   add_definitions("-DUSE_LLVM")
-# endif()
 
 FIND_LIBRARY(CRYPT_LIB NAMES xcrypt crypt crypto)
 if (LINUX OR FREEBSD)
@@ -374,17 +368,6 @@ if (LINUX OR APPLE)
   FIND_LIBRARY (RESOLV_LIB resolv)
 endif()
 
-FIND_LIBRARY (BFD_LIB libbfd.a)
-FIND_LIBRARY (LIBIBERTY_LIB iberty)
-
-if (NOT BFD_LIB)
-  message(FATAL_ERROR "You need to install binutils")
-endif()
-
-if (NOT LIBIBERTY_LIB)
-  message(FATAL_ERROR "You need to install libiberty (usually bundled with binutils)")
-endif()
-
 if (FREEBSD)
   FIND_LIBRARY (EXECINFO_LIB execinfo)
   if (NOT EXECINFO_LIB)
@@ -393,11 +376,15 @@ if (FREEBSD)
 endif()
 
 if (APPLE)
-  find_library(LIBINTL_LIBRARIES NAMES intl libintl)
-  if (LIBINTL_INCLUDE_DIR)
-    include_directories(${LIBINTL_INCLUDE_DIR})
-  endif()
   find_library(KERBEROS_LIB NAMES gssapi_krb5)
+
+  # This is required by Homebrew's libc. See
+  # https://github.com/facebook/hhvm/pull/5728#issuecomment-124290712
+  # for more info.
+  find_package(Libpam)
+  if (PAM_INCLUDE_PATH)
+    include_directories(${PAM_INCLUDE_PATH})
+  endif()
 endif()
 
 #find_package(BISON REQUIRED)
@@ -410,6 +397,31 @@ endif()
 include_directories(${HPHP_HOME}/hphp)
 
 macro(hphp_link target)
+  # oniguruma must remain first for OS X to work -- see below for a somewhat
+  # dogscience explanation. If you deeply understand this, feel free to fix
+  # properly; in particular, two-level namespaces on OS X should allow us to
+  # say *which* copy of the disputed functions we want, but I don' t know
+  # how to get that to work.
+  #
+  # oniguruma has some of its own implementations of POSIX regex functions,
+  # like regcomp() an regexec(). We use onig everywhere, for both its own
+  # sepcial functions and for the POSIX replacements. This means that the
+  # linker needs to pick the implementions of the POSIX regex functions from
+  # onig, not libc.
+  #
+  # On Linux, that works out fine, since the linker sees onig on the link
+  # line before (implicitly) libc. However, on OS X, despide the manpage for
+  # ld claiming otherwise about indirect dylib dependencies, as soon as we
+  # include one of the libs here that pull in libSystem.B, the linker will
+  # pick the implementations of those functions from libc, not from onig.
+  # And since we've included the onig headers, which have very slightly
+  # different definintions for some of the key data structures, things go
+  # quite awry -- this manifests as infinite loops or crashes when calling
+  # the PHP split() function.
+  #
+  # So make sure to link onig first, so its implementations are picked.
+  target_link_libraries(${target} ${ONIGURUMA_LIBRARIES})
+
   if (LIBDL_LIBRARIES)
     target_link_libraries(${target} ${LIBDL_LIBRARIES})
   endif ()
@@ -430,6 +442,9 @@ macro(hphp_link target)
 
   target_link_libraries(${target} ${Boost_LIBRARIES})
   target_link_libraries(${target} ${MYSQL_CLIENT_LIBS})
+  if (ENABLE_ASYNC_MYSQL)
+    target_link_libraries(${target} squangle)
+  endif()
   target_link_libraries(${target} ${PCRE_LIBRARY})
   target_link_libraries(${target} ${ICU_DATA_LIBRARIES} ${ICU_I18N_LIBRARIES} ${ICU_LIBRARIES})
   target_link_libraries(${target} ${LIBEVENT_LIB})
@@ -445,10 +460,6 @@ macro(hphp_link target)
 
   if (LIBINOTIFY_LIBRARY)
     target_link_libraries(${target} ${LIBINOTIFY_LIBRARY})
-  endif()
-
-  if (LIBICONV_LIBRARY)
-    target_link_libraries(${target} ${LIBICONV_LIBRARY})
   endif()
 
   if (LINUX)
@@ -467,37 +478,27 @@ macro(hphp_link target)
   if (APPLE)
     target_link_libraries(${target} ${LIBINTL_LIBRARIES})
     target_link_libraries(${target} ${KERBEROS_LIB})
+
+    if (PAM_LIBRARY)
+      target_link_libraries(${target} ${PAM_LIBRARY})
+    endif()
   endif()
 
-  target_link_libraries(${target} ${BFD_LIB})
-  target_link_libraries(${target} ${LIBIBERTY_LIB})
-
-  if (${LIBPTHREAD_LIBRARIES})
+  if (LIBPTHREAD_LIBRARIES)
     target_link_libraries(${target} ${LIBPTHREAD_LIBRARIES})
   endif()
 
   target_link_libraries(${target} ${TBB_LIBRARIES})
   target_link_libraries(${target} ${OPENSSL_LIBRARIES})
   target_link_libraries(${target} ${ZLIB_LIBRARIES})
-  target_link_libraries(${target} ${BZIP2_LIBRARIES})
 
   target_link_libraries(${target} ${LIBXML2_LIBRARIES})
-  target_link_libraries(${target} ${LIBXSLT_LIBRARIES})
-  target_link_libraries(${target} ${LIBXSLT_EXSLT_LIBRARIES})
-  target_link_libraries(${target} ${EXPAT_LIBRARY})
-  target_link_libraries(${target} ${ONIGURUMA_LIBRARIES})
-  target_link_libraries(${target} ${Mcrypt_LIB})
 
-  if (LIBUODBC_LIBRARIES)
-    target_link_libraries(${target} ${LIBUODBC_LIBRARIES})
-  endif()
-
-  target_link_libraries(${target} ${LDAP_LIBRARIES})
   target_link_libraries(${target} ${LBER_LIBRARIES})
 
-  target_link_libraries(${target} ${LIBMEMCACHED_LIBRARIES})
-
-  target_link_libraries(${target} ${CRYPT_LIB})
+  if (CRYPT_LIB)
+    target_link_libraries(${target} ${CRYPT_LIB})
+  endif()
 
   if (LINUX OR FREEBSD)
     target_link_libraries(${target} ${RT_LIB})
@@ -533,11 +534,25 @@ macro(hphp_link target)
     target_link_libraries(${target} pcre)
   endif()
 
-  target_link_libraries(${target} fastlz)
+  if (LIBFASTLZ_LIBRARY)
+    target_link_libraries(${target} ${LIBFASTLZ_LIBRARY})
+  else()
+    target_link_libraries(${target} fastlz)
+  endif()
+
   target_link_libraries(${target} timelib)
   target_link_libraries(${target} folly)
+  target_link_libraries(${target} wangle)
+  target_link_libraries(${target} brotli_enc)
+  target_link_libraries(${target} brotli_dec)
 
-  target_link_libraries(${target} afdt)
+  if (ENABLE_MCROUTER)
+    target_link_libraries(${target} mcrouter)
+  endif()
+
+  if (NOT MSVC)
+    target_link_libraries(${target} afdt)
+  endif()
   target_link_libraries(${target} mbfl)
 
   if (EDITLINE_LIBRARIES)
@@ -546,18 +561,16 @@ macro(hphp_link target)
     target_link_libraries(${target} ${READLINE_LIBRARY})
   endif()
 
-  if (PAM_LIBRARY)
-    target_link_libraries(${target} ${PAM_LIBRARY})
-  endif()
-
-  target_link_libraries(${target} ${LIBDWARF_LIBRARIES})
-  target_link_libraries(${target} ${LIBELF_LIBRARIES})
-
-  if (LIBLLVM_LIBRARY)
-    target_link_libraries(${target} ${LIBLLVM_LIBRARY})
+  if (NOT WINDOWS)
+    target_link_libraries(${target} ${LIBDWARF_LIBRARIES})
+    target_link_libraries(${target} ${LIBELF_LIBRARIES})
   endif()
 
   if (LINUX)
     target_link_libraries(${target} -Wl,--wrap=pthread_create -Wl,--wrap=pthread_exit -Wl,--wrap=pthread_join)
+  endif()
+
+  if (MSVC)
+    target_link_libraries(${target} dbghelp.lib dnsapi.lib)
   endif()
 endmacro()

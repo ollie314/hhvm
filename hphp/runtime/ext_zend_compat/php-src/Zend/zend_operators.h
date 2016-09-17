@@ -464,25 +464,36 @@ inline const TypedValue& zval_follow_ref(const zval &z) {
  * certain uses Z_ARRVAL so that we can make a copy of the array when
  * appropriate so that PHP5 extensions work correctly.
  */
-class ZArrVal {
+struct ZArrVal {
 private:
   TypedValue* m_tv;
 public:
   explicit ZArrVal(TypedValue* tv) : m_tv(tv) {}
   void cowCheck() {
-    ArrayData * ad = m_tv->m_data.parr;
-    if (ad->isStatic() || ad->hasMultipleRefs()) {
-      ad = ad->copy();
-      ad->incRefCount();
-      // copy() causes an array to be unproxied, so we normally need
-      // to reproxy it
-      if (!ad->isProxyArray()) {
-        ad = ProxyArray::Make(ad);
-        ad->incRefCount();
-      }
-      m_tv->m_data.parr->decRefCount();
-      m_tv->m_data.parr = ad;
+    auto ad = m_tv->m_data.parr;
+    if (ad->cowCheck()) {
+      forceAsProxyArray();
     }
+  }
+  inline void forceAsProxyArray () {
+    ArrayData * ad = m_tv->m_data.parr;
+    if (ad->isEmptyArray()) {
+      assert(!"can't forceAsProxyArray an empty array");
+    } else {
+      auto tmp = ad->copy();
+      assert(tmp != ad);
+      ad = tmp;
+    }
+
+    // copy() causes an array to be unproxied, so we normally need
+    // to reproxy it
+    if (!ad->isProxyArray()) {
+      ad = ProxyArray::Make(ad);
+      assert(ad->hasExactlyOneRef());
+    }
+    m_tv->m_data.parr->decRefCount();
+    m_tv->m_data.parr = ad;
+    m_tv->m_type = KindOfArray;
   }
   /* implicit */ operator HashTable*() {
     cowCheck();
@@ -503,6 +514,7 @@ public:
   }
   ZArrVal& operator=(HashTable* a) {
     m_tv->m_data.parr = a;
+	m_tv->m_type = KindOfArray;
     return *this;
   }
 private:
@@ -517,6 +529,8 @@ inline ZArrVal zval_get_arrval(const zval &z) {
   return ZArrVal(const_cast<zval*>(&z)->tv());
 }
 
+inline zend_object_handlers* zobj_ht_unsupported() { not_reached(); }
+
 }
 
 #define Z_LVAL(zval)        (HPHP::zval_follow_ref(zval).m_data.num)
@@ -526,8 +540,8 @@ inline ZArrVal zval_get_arrval(const zval &z) {
 #define Z_STRLEN(zval)      (HPHP::zval_follow_ref(zval).m_data.pstr->size())
 #define Z_ARRVAL(zval)      (HPHP::zval_get_arrval(zval))
 #define Z_OBJVAL(zval)      (HPHP::zval_follow_ref(zval).m_data.pobj)
-#define Z_OBJ_HANDLE(zval)  (Z_OBJVAL(zval)->o_getId())
-#define Z_OBJ_HT(zval)      (bad_value<zend_object_handlers*>())
+#define Z_OBJ_HANDLE(zval)  (Z_OBJVAL(zval)->getId())
+#define Z_OBJ_HT(zval)      (HPHP::zobj_ht_unsupported())
 #define Z_OBJCE(zval)       (zend_get_class_entry(&(zval) TSRMLS_CC))
 
 // TODO: this is a memory leak, since the caller doesn't know it owns the
@@ -539,7 +553,7 @@ inline ZArrVal zval_get_arrval(const zval &z) {
 // etc. will work, and which is the preferred method for updating properties in
 // Zend anyway.
 #define Z_OBJPROP(zval) \
-  ((HashTable*)HPHP::ProxyArray::Make(Z_OBJVAL((zval))->o_toArray().detach()))
+  ((HashTable*)HPHP::ProxyArray::Make(Z_OBJVAL((zval))->toArray().detach()))
 
 #define Z_OBJ_HANDLER(zval, hf)  (Z_OBJ_HT((zval))->hf)
 #define Z_RESVAL(zval)      (zval_get_resource_id(zval))

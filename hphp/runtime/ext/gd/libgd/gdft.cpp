@@ -12,21 +12,7 @@
 #include "gd.h"
 #include "gdhelpers.h"
 
-#ifndef MSWIN32
-#include <unistd.h>
-#else
-#include <io.h>
-#ifndef R_OK
-# define R_OK 04			/* Needed in Windows */
-#endif
-#endif
-
-#ifdef WIN32
-#define access _access
-#ifndef R_OK
-#define R_OK 2
-#endif
-#endif
+#include <folly/portability/Unistd.h>
 
 /* number of antialised colors for indexed bitmaps */
 /* overwrite Windows GDI define in case of windows build */
@@ -216,7 +202,6 @@ static gdCache_head_t *fontCache = NULL;
 static FT_Library library;
 
 #define Tcl_UniChar int
-#define TCL_UTF_MAX 3
 static int gdTcl_UtfToUniChar (char *str, Tcl_UniChar * chPtr)
 /* str is the UTF8 next character pointer */
 /* chPtr is the int for the result */
@@ -314,30 +299,6 @@ static int gdTcl_UtfToUniChar (char *str, Tcl_UniChar * chPtr)
 		*chPtr = (Tcl_UniChar) byte;
 		return 1;
 	}
-#if TCL_UTF_MAX > 3
-	else {
-		int ch, total, trail;
-
-		total = totalBytes[byte];
-		trail = total - 1;
-
-		if (trail > 0) {
-			ch = byte & (0x3F >> trail);
-			do {
-				str++;
-				if ((*str & 0xC0) != 0x80) {
-					*chPtr = byte;
-					return 1;
-				}
-				ch <<= 6;
-				ch |= (*str & 0x3F);
-				trail--;
-			} while (trail > 0);
-			*chPtr = ch;
-			return total;
-		}
-	}
-#endif
 
 	*chPtr = (Tcl_UniChar) byte;
 	return 1;
@@ -381,7 +342,7 @@ static void *fontFetch (char **error, void *key)
 	int font_found = 0;
 	unsigned short platform, encoding;
 	char *fontsearchpath, *fontlist;
-	char fullname[MAXPATHLEN], cur_dir[MAXPATHLEN];
+	char fullname[PATH_MAX], cur_dir[PATH_MAX];
 	char *name, *path=NULL, *dir;
 	char *strtok_ptr;
 	FT_Error err;
@@ -410,11 +371,7 @@ static void *fontFetch (char **error, void *key)
 		path = gdEstrdup (fontsearchpath);
 
 		/* if name is an absolute filename then test directly */
-#ifdef NETWARE
-		if (*name == '/' || (name[0] != 0 && strstr(name, ":/"))) {
-#else
 		if (*name == '/' || (name[0] != 0 && name[1] == ':' && (name[2] == '/' || name[2] == '\\'))) {
-#endif
 			snprintf(fullname, sizeof(fullname) - 1, "%s", name);
 			if (access(fullname, R_OK) == 0) {
 				font_found++;
@@ -424,12 +381,7 @@ static void *fontFetch (char **error, void *key)
 		for (dir = gd_strtok_r (path, PATHSEPARATOR, &strtok_ptr_path); dir;
 		     dir = gd_strtok_r (0, PATHSEPARATOR, &strtok_ptr_path)) {
 			if (!strcmp(dir, ".")) {
-				TSRMLS_FETCH();
-#if HAVE_GETCWD
-				dir = VCWD_GETCWD(cur_dir, MAXPATHLEN);
-#elif HAVE_GETWD
-				dir = VCWD_GETWD(cur_dir);
-#endif
+				dir = getcwd(cur_dir, PATH_MAX);
 				if (!dir) {
 					continue;
 				}

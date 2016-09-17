@@ -1,10 +1,7 @@
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/runtime-error.h"
 
 #include <fribidi/fribidi.h>
-
-#define emalloc HPHP::smart_malloc
-#define efree HPHP::smart_free
 
 namespace HPHP {
 
@@ -78,7 +75,10 @@ static Variant HHVM_FUNCTION(
   }
 
   // Convert input string to internal Unicode
-  logical_ustr = (FriBidiChar*) emalloc(sizeof(FriBidiChar) * logical_str_len);
+  logical_ustr =
+    (FriBidiChar*) req::malloc_noptrs(sizeof(FriBidiChar) * logical_str_len);
+  SCOPE_EXIT { req::free(logical_ustr); };
+
   ustr_len = fribidi_charset_to_unicode(
     (FriBidiCharSet)charset,
     logical_str.c_str(),
@@ -88,29 +88,27 @@ static Variant HHVM_FUNCTION(
 
   // Visualize the Unicode string
   base_direction = direction;
-  visual_ustr = (FriBidiChar*) emalloc(sizeof(FriBidiChar) * ustr_len);
+  visual_ustr =
+    (FriBidiChar*) req::malloc_noptrs(sizeof(FriBidiChar) * ustr_len);
+  SCOPE_EXIT { req::free(visual_ustr); };
   status = fribidi_log2vis(
     logical_ustr, ustr_len, &base_direction,
     visual_ustr, nullptr, nullptr, nullptr);
-  efree(logical_ustr);
 
   // Return false if FriBidi failed
   if (status == 0) {
-    efree(visual_ustr);
     return false;
   }
 
   // Convert back from internal Unicode to original character set
   visual_str_len = 4 * ustr_len;
-  visual_str = (char *) emalloc(sizeof(char) * visual_str_len);
+  visual_str = (char *) req::malloc_noptrs(sizeof(char) * visual_str_len);
+  SCOPE_EXIT { req::free(visual_str); };
+
   visual_str_len = fribidi_unicode_to_charset(
     (FriBidiCharSet)charset, visual_ustr, ustr_len, visual_str);
-  efree(visual_ustr);
 
-  String result(visual_str, visual_str_len, CopyString);
-  efree(visual_str);
-
-  return result;
+  return String(visual_str, visual_str_len, CopyString);
 }
 
 static Array HHVM_FUNCTION(
@@ -143,20 +141,22 @@ static Array HHVM_FUNCTION(
 ) {
   Array result;
 
-  result.add(FRIBIDI_CHAR_SET_UTF8, s_FRIBIDI_CHARSET_UTF8.get());
-  result.add(FRIBIDI_CHAR_SET_ISO8859_6, s_FRIBIDI_CHARSET_8859_6.get());
-  result.add(FRIBIDI_CHAR_SET_ISO8859_8, s_FRIBIDI_CHARSET_8859_8.get());
-  result.add(FRIBIDI_CHAR_SET_CP1255, s_FRIBIDI_CHARSET_CP1255.get());
-  result.add(FRIBIDI_CHAR_SET_CP1256, s_FRIBIDI_CHARSET_CP1256.get());
-  result.add(FRIBIDI_CHAR_SET_CAP_RTL, s_FRIBIDI_CHARSET_CAP_RTL.get());
+  result.add(FRIBIDI_CHAR_SET_UTF8, Variant{s_FRIBIDI_CHARSET_UTF8.get()});
+  result.add(FRIBIDI_CHAR_SET_ISO8859_6,
+             Variant{s_FRIBIDI_CHARSET_8859_6.get()});
+  result.add(FRIBIDI_CHAR_SET_ISO8859_8,
+             Variant{s_FRIBIDI_CHARSET_8859_8.get()});
+  result.add(FRIBIDI_CHAR_SET_CP1255, Variant{s_FRIBIDI_CHARSET_CP1255.get()});
+  result.add(FRIBIDI_CHAR_SET_CP1256, Variant{s_FRIBIDI_CHARSET_CP1256.get()});
+  result.add(FRIBIDI_CHAR_SET_CAP_RTL,
+             Variant{s_FRIBIDI_CHARSET_CAP_RTL.get()});
 
   return result;
 }
 
-class FribidiExtension : public Extension {
-public:
+struct FribidiExtension final : Extension {
   FribidiExtension() : Extension("fribidi") {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     // Charsets
     Native::registerConstant<KindOfInt64>(
       s_FRIBIDI_CHARSET_UTF8.get(),

@@ -20,13 +20,7 @@
 # include <tsrm_config.h>
 #endif
 
-#ifdef TSRM_WIN32
-#  ifdef TSRM_EXPORTS
-#    define TSRM_API __declspec(dllexport)
-#  else
-#    define TSRM_API __declspec(dllimport)
-#  endif
-#elif defined(__GNUC__) && __GNUC__ >= 4
+#if defined(__GNUC__) && __GNUC__ >= 4
 #  define TSRM_API __attribute__ ((__visibility__("default")))
 #else
 #  define TSRM_API
@@ -49,6 +43,7 @@ typedef unsigned long tsrm_uintptr_t;
 # endif
 # include <windows.h>
 # include <shellapi.h>
+# include <pthread.h>
 #elif defined(GNUPTH)
 # include <pth.h>
 #elif defined(PTHREADS)
@@ -56,7 +51,7 @@ typedef unsigned long tsrm_uintptr_t;
 #elif defined(TSRM_ST)
 # include <st.h>
 #elif defined(BETHREADS)
-#include <kernel/OS.h> 
+#include <kernel/OS.h>
 #include <TLS.h>
 #endif
 
@@ -64,8 +59,8 @@ typedef int ts_rsrc_id;
 
 /* Define THREAD_T and MUTEX_T */
 #ifdef TSRM_WIN32
-# define THREAD_T DWORD
-# define MUTEX_T CRITICAL_SECTION *
+# define THREAD_T pthread_t
+# define MUTEX_T pthread_mutex_t *
 #elif defined(GNUPTH)
 # define THREAD_T pth_t
 # define MUTEX_T pth_mutex_t *
@@ -87,7 +82,7 @@ typedef struct {
   sem_id sem;
   int32 ben;
 } beos_ben;
-# define MUTEX_T beos_ben * 
+# define MUTEX_T beos_ben *
 #endif
 
 #ifdef HAVE_SIGNAL_H
@@ -127,26 +122,27 @@ TSRM_API ts_rsrc_id ts_allocate_id(ts_rsrc_id *rsrc_id, size_t size, ts_allocate
 #endif
 
 #include "hphp/util/thread-local.h"
-namespace HPHP {
-  typedef std::vector<void*> TSRMStorageVector;
-  extern DECLARE_THREAD_LOCAL(TSRMStorageVector, tsrm_thread_resources);
-  void * ts_init_resource(int id);
+#include "hphp/runtime/base/imarker.h"
 
-  static inline void * ts_resource_from_vector(const TSRMStorageVector & vec, ts_rsrc_id id) {
-    void * ret;
-    assert(id != 0);
-    if (TSRM_UNEXPECTED(vec.size() <= TSRM_UNSHUFFLE_RSRC_ID(id))) {
-      return ts_init_resource(id);
-    } else {
-      ret = vec[TSRM_UNSHUFFLE_RSRC_ID(id)];
-      if (TSRM_UNEXPECTED(ret == nullptr)) {
-        return ts_init_resource(id);
-      } else {
-        return ret;
-      }
-    }
+namespace HPHP {
+using TSRMStorageVector = std::vector<void*>;
+extern DECLARE_THREAD_LOCAL(TSRMStorageVector, tsrm_thread_resources);
+void * ts_init_resource(int id);
+void ts_scan_resources(IMarker&);
+
+static inline
+void* ts_resource_from_vector(const TSRMStorageVector & vec, ts_rsrc_id id) {
+  assert(id != 0);
+  if (TSRM_UNEXPECTED(vec.size() <= TSRM_UNSHUFFLE_RSRC_ID(id))) {
+    return ts_init_resource(id);
   }
+  void* ret = vec[TSRM_UNSHUFFLE_RSRC_ID(id)];
+  if (TSRM_UNEXPECTED(ret == nullptr)) {
+    return ts_init_resource(id);
+  }
+  return ret;
 }
+} // HPHP
 
 static inline void *ts_resource_ex(ts_rsrc_id id, THREAD_T *th_id) {
   assert(th_id == NULL); // unimplemented

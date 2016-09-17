@@ -16,23 +16,32 @@
 
 #include "hphp/runtime/vm/jit/vasm-print.h"
 
+#include <type_traits>
+
 #include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/vm/jit/print.h"
-#include "hphp/runtime/vm/jit/vasm-x64.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/vasm.h"
+#include "hphp/runtime/vm/jit/vasm-instr.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/vasm-unit.h"
+#include "hphp/runtime/vm/jit/vasm-visit.h"
+
 #include "hphp/util/abi-cxx.h"
+#include "hphp/util/arch.h"
 #include "hphp/util/ringbuffer.h"
 #include "hphp/util/stack-trace.h"
 
 TRACE_SET_MOD(vasm);
 
 namespace HPHP { namespace jit {
-using namespace x64;
+
+///////////////////////////////////////////////////////////////////////////////
+
 using Trace::RingBufferType;
 using Trace::ringbufferName;
 
 const char* area_names[] = { "main", "cold", "frozen" };
+
 namespace {
 
 const char* vixl_ccs[] = {
@@ -40,46 +49,70 @@ const char* vixl_ccs[] = {
   "hi", "ls", "ge", "lt", "gt", "le", "al", "nv"
 };
 
-// Visitor class to format the operands of a Vinstr. There are
-// imm() overloaded methods for each type of operand used by any Vinstr.
-// If we are missing an overload, the templated catch-all prints "?".
+// Visitor class to format the operands of a Vinstr.  There are imm()
+// overloaded methods for each type of operand used by any Vinstr.  If you add
+// new imm types, you must add a printer for it here.
 struct FormatVisitor {
   FormatVisitor(const Vunit& unit, std::ostringstream& str)
     : unit(unit), str(str)
   {}
-  template<class T> void imm(T imm) {
-    str << sep() << "?";
+
+  template<class T>
+  typename std::enable_if<
+    std::is_integral<T>::value && !std::is_same<T,bool>::value
+  >::type imm(T t) {
+    str << sep() << t;
   }
-  void imm(ConditionCode cc) { str << sep() << cc_names[cc]; }
-  void imm(vixl::Condition cc) { str << sep() << vixl_ccs[cc]; }
-  void imm(uint8_t i) { imm(int(i)); }
-  void imm(uint16_t i) { imm(int(i)); }
-  void imm(int i) { str << sep() << i; }
-  void imm(bool b) { str << sep() << (b ? 'T' : 'F'); }
-  void imm(Immed s) { str << sep() << s.l(); }
-  void imm(Immed64 s) {
+
+  template<class T>
+  typename std::enable_if<
+    std::is_same<T,bool>::value
+  >::type imm(T b) { str << sep() << (b ? 'T' : 'F'); }
+
+  template<class T>
+  typename std::enable_if<
+    std::is_same<T,Immed>::value
+  >::type imm(T s) { str << sep() << s.l(); }
+
+  template<class T>
+  typename std::enable_if<
+    std::is_same<T,Immed64>::value
+  >::type imm(T s) {
     str << sep();
     if (s.fits(sz::byte)) str << s.l();
     else str << folly::format("0x{:08x}", s.q());
   }
+
+  void imm(FPInvOffset off) { str << sep() << off.offset; }
+  void imm(ConditionCode cc) { str << sep() << cc_names[cc]; }
+  void imm(vixl::Condition cc) { str << sep() << vixl_ccs[cc]; }
   void imm(TCA addr) {
     str << sep() << getNativeFunctionName(addr);
   }
   void imm(TCA* addr) {
     str << sep() << folly::format("{}", addr);
   }
-  void imm(Vpoint p) { str << sep() << '@' << (size_t)p; }
-  void imm(const CppCall& cppcall) {
-    switch (cppcall.kind()) {
+  template<typename T>
+  void imm(VdataPtr<T> ptr) {
+    str << folly::format("{}{}{}",
+                         sep(), ptr.getRaw(), ptr.bound() ? "" : "(unbound)");
+  }
+  void imm(const CallSpec& call) {
+    switch (call.kind()) {
     default:
       str << sep() << "<unknown>";
       break;
-    case CppCall::Kind::Direct:
-      return imm((TCA)cppcall.address());
-    case CppCall::Kind::Virtual:
-      str << sep() << folly::format("<virtual at 0x{:08x}>",
-                                    cppcall.vtableOffset());
+    case CallSpec::Kind::Direct:
+    case CallSpec::Kind::Smashable:
+      return imm((TCA)call.address());
+    case CallSpec::Kind::ArrayVirt:
+      str << sep() << folly::format("ArrayVirt({})", call.arrayTable());
       break;
+    case CallSpec::Kind::Destructor:
+      str << sep() << folly::format("destructor({})", show(call.reg()));
+      break;
+    case CallSpec::Kind::Stub:
+      return imm(call.stubAddr());
     }
   }
   void imm(RingBufferType t) { str << sep() << ringbufferName(t); }
@@ -92,14 +125,14 @@ struct FormatVisitor {
   void imm(const Func* func) {
     str << sep();
     if (func) {
-      str << folly::format("{}(id {:#x})", func->fullName()->data(),
+      str << folly::format("{}(id {:#x})", func->fullName(),
                            func->getFuncId());
     } else {
       str << "nullptr";
     }
   }
   void imm(ServiceRequest req) {
-    str << sep() << serviceReqName(req);
+    str << sep() << svcreq::to_name(req);
   }
   void imm(TransFlags f) {
     if (f.noinlineSingleton) str << sep() << "noinlineSingleton";
@@ -109,6 +142,18 @@ struct FormatVisitor {
   }
   void imm(RIPRelativeRef r) {
     str << sep() << folly::format("ip[{:#x}]", r.r.disp);
+  }
+  void imm(RoundDirection rd) {
+    str << sep() << show(rd);
+  }
+
+  void imm(RegSet x) { print(x); }
+  void imm(ComparisonPred x) {
+    str << sep();
+    switch (x) {
+    case ComparisonPred::eq_ord:   str << "eq_ord"; break;
+    case ComparisonPred::ne_unord: str << "ne_unord"; break;
+    }
   }
 
   template<class R> void across(R r) { print(r); }
@@ -153,11 +198,16 @@ struct FormatVisitor {
   }
 
   void print(RegSet regs) {
-    regs.forEach([&](Vreg r) { print(r); });
+    str << sep() << show(regs);
   }
 
   void print(Vreg r) {
     str << sep() << show(r);
+
+    auto it = unit.regToConst.find(r);
+    if (it != unit.regToConst.end()) {
+      str << '(' << show(it->second) << ')';
+    }
   }
 
   const char* sep() { return comma ? ", " : (comma = true, ""); }
@@ -173,7 +223,7 @@ std::string show(Vreg r) {
   if (!r.isValid()) return "%?";
   std::ostringstream str;
   if (r.isPhys()) {
-    mcg->backEnd().streamPhysReg(str, r);
+    str << show(r.physReg());
   } else {
     str << "%" << size_t(r);
   }
@@ -181,28 +231,79 @@ std::string show(Vreg r) {
 }
 
 std::string show(Vptr p) {
-  // [%fs + %base + disp + %index * scale]
-  std::string str = "[";
-  auto prefix = false;
-  if (p.seg == Vptr::FS) {
-    str += "%fs";
-    prefix = true;
+  std::string str;
+  switch(arch()) {
+    case Arch::X64:
+    case Arch::ARM: {
+      // [%fs + %base + disp + %index * scale]
+      str = "[";
+      auto prefix = false;
+      if (p.seg == Vptr::FS) {
+        str += "%fs";
+        prefix = true;
+      }
+      if (p.seg == Vptr::GS) {
+        str += "%gs";
+        prefix = true;
+      }
+      if (p.base.isValid()) {
+        folly::toAppend(prefix ? " + " : "", show(p.base), &str);
+        prefix = true;
+      }
+      if (p.disp) {
+        folly::format(&str, "{}{:#x}",
+                      prefix ? p.disp < 0 ? " - " : " + " : "",
+                      prefix ? std::abs(p.disp) : p.disp);
+        prefix = true;
+      }
+      if (p.index.isValid()) {
+        folly::toAppend(prefix ? " + " : "", show(p.index), &str);
+        if (p.scale != 1) folly::toAppend(" * ", p.scale, &str);
+      }
+      str += ']';
+      return str;
+    }
+    case Arch::PPC64: {
+      auto prefix = false;
+      if (p.disp) {
+        folly::format(&str, "{}{:#x}",
+                      p.disp < 0 ? "-" : "+",
+                      std::abs(p.disp));
+        prefix = true;
+      }
+
+      if (p.base.isValid()) {
+        folly::toAppend(prefix ? "(" : "", show(p.base), &str);
+        if (prefix == true) {
+          folly::toAppend(")", &str);
+        }
+        prefix = true;
+      }
+      if (p.index.isValid()) {
+        folly::toAppend(prefix ? "," : "", show(p.index), &str);
+      }
+      return str;
+    }
   }
-  if (p.base.isValid()) {
-    folly::toAppend(prefix ? " + " : "", show(p.base), &str);
-    prefix = true;
+  not_reached();
+}
+
+std::string show(Vconst c) {
+  auto str = folly::to<std::string>(c.val);
+  switch (c.kind) {
+    case Vconst::Quad:
+      str += 'q';
+      break;
+    case Vconst::Long:
+      str += 'l';
+      break;
+    case Vconst::Byte:
+      str += 'b';
+      break;
+    case Vconst::Double:
+      str += 'd';
+      break;
   }
-  if (p.disp) {
-    folly::format(&str, "{}{:#x}",
-                  prefix ? p.disp < 0 ? " - " : " + " : "",
-                  prefix ? std::abs(p.disp) : p.disp);
-    prefix = true;
-  }
-  if (p.index.isValid()) {
-    folly::toAppend(prefix ? " + " : "", show(p.index), &str);
-    if (p.scale != 1) folly::toAppend(" * ", p.scale, &str);
-  }
-  str += ']';
   return str;
 }
 
@@ -226,22 +327,35 @@ std::string show(const Vunit& unit, const Vinstr& inst) {
 }
 
 void printBlock(std::ostream& out, const Vunit& unit,
-                const PredVector& preds, Vlabel b) {
+                const PredVector& preds, Vlabel b,
+                const IRInstruction*& origin) {
   auto& block = unit.blocks[b];
   out << '\n' << color(ANSI_COLOR_MAGENTA);
-  out << folly::format(" B{: <11} {}", size_t(b),
-           area_names[int(block.area)]);
+  out << folly::format(" B{: <6} {}", size_t(b),
+           area_names[int(block.area_idx)]);
   for (auto p : preds[b]) out << ", B" << size_t(p);
-  out << color(ANSI_COLOR_END);
+  out << color(ANSI_COLOR_END) << '\n';
 
-  if (!block.code.empty() && !block.code.front().origin) out << '\n';
+  if (block.code.empty()) {
+    out << "        <empty>\n";
+    return;
+  }
 
-  const IRInstruction* currentOrigin = nullptr;
   for (auto& inst : block.code) {
-    if (currentOrigin != inst.origin && inst.origin) {
-      currentOrigin = inst.origin;
-      out << "\n    " << currentOrigin->toString() << '\n';
+    out << "      ";
+    if (origin != inst.origin && inst.origin) {
+      origin = inst.origin;
+      out << folly::format("{:<45} # {}\n", show(unit, inst), *origin);
+    } else {
+      out << show(unit, inst) << '\n';
     }
+  }
+}
+
+void printInstrs(std::ostream& out,
+                 const Vunit& unit,
+                 const jit::vector<Vinstr>& code) {
+  for (auto& inst : code) {
     out << "        " << show(unit, inst) << '\n';
   }
 }
@@ -249,7 +363,7 @@ void printBlock(std::ostream& out, const Vunit& unit,
 void printCfg(std::ostream& out, const Vunit& unit,
               const jit::vector<Vlabel>& blocks) {
   out << "digraph G {\n";
-  for (auto b: blocks) {
+  for (auto b : blocks) {
     auto& block = unit.blocks[b];
     auto succlist = succs(block);
     if (succlist.empty()) continue;
@@ -271,13 +385,35 @@ void printCfg(const Vunit& unit, const jit::vector<Vlabel>& blocks) {
 }
 
 std::string show(const Vunit& unit) {
-  auto preds = computePreds(unit);
-  auto blocks = sortBlocks(unit);
-
   std::ostringstream out;
-  for (auto b : blocks) {
-    printBlock(out, unit, preds, b);
+  auto preds = computePreds(unit);
+  boost::dynamic_bitset<> reachableSet(unit.blocks.size());
+
+  // Print reachable blocks first.
+  auto reachableBlocks = sortBlocks(unit);
+  const IRInstruction* origin = nullptr;
+  for (auto b : reachableBlocks) {
+    printBlock(out, unit, preds, b, origin);
+    reachableSet.set(b);
   }
+
+  // Print unreachable blocks last.
+  auto const numUnreachable = reachableSet.size() - reachableSet.count();
+  if (numUnreachable == 0) return out.str();
+
+  if (Trace::moduleEnabledRelease(Trace::vasm, kVasmUnreachableLevel)) {
+    out << "\nUnreachable blocks:\n";
+    for (size_t b = 0; b < unit.blocks.size(); b++) {
+      if (!reachableSet.test(b)) {
+        printBlock(out, unit, preds, Vlabel{b}, origin);
+      }
+    }
+  } else {
+    out << folly::format("\n{} unreachable blocks not shown. "
+                         "Set TRACE=vasm:{} or greater to print them.\n",
+                         numUnreachable, kVasmUnreachableLevel);
+  }
+
   return out.str();
 }
 
@@ -290,5 +426,7 @@ void printUnit(int level, const std::string& caption, const Vunit& unit) {
     banner("")
   );
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 }}

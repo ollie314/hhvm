@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,27 +15,30 @@
 */
 #include "hphp/hhbbc/index.h"
 
-#include <unordered_map>
-#include <mutex>
-#include <map>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <algorithm>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <unordered_set>
-#include <vector>
 #include <utility>
+#include <vector>
 
-#include <boost/range/iterator_range.hpp>
+#include <boost/dynamic_bitset.hpp>
+
 #include <tbb/concurrent_hash_map.h>
 
-#include <folly/String.h>
 #include <folly/Format.h>
 #include <folly/Hash.h>
+#include <folly/Lazy.h>
+#include <folly/MapUtil.h>
 #include <folly/Memory.h>
 #include <folly/Optional.h>
-#include <folly/Lazy.h>
+#include <folly/Range.h>
+#include <folly/String.h>
 
 #include "hphp/util/assertions.h"
 #include "hphp/util/match.h"
@@ -106,10 +109,10 @@ template<class T> using ISStringToOne = ISStringToOneT<borrowed_ptr<T>>;
 using G = std::lock_guard<std::mutex>;
 
 template<class MultiMap>
-boost::iterator_range<typename MultiMap::const_iterator>
+folly::Range<typename MultiMap::const_iterator>
 find_range(const MultiMap& map, typename MultiMap::key_type key) {
   auto const pair = map.equal_range(key);
-  return boost::make_iterator_range(pair.first, pair.second);
+  return folly::range(pair.first, pair.second);
 }
 
 // Like find_range, but copy them into a temporary buffer instead of
@@ -310,11 +313,17 @@ struct ClassInfo {
   borrowed_ptr<ClassInfo> parent = nullptr;
 
   /*
-   * A vector of the declared interfaces class info structures.  This
-   * is in declaration order mirroring the php::Class interfaceNames
-   * vector, and do not include inherited interfaces.
+   * A vector of the declared interfaces class info structures.  This is in
+   * declaration order mirroring the php::Class interfaceNames vector, and does
+   * not include inherited interfaces.
    */
   std::vector<borrowed_ptr<const ClassInfo>> declInterfaces;
+
+  /*
+   * A (case-insensitive) map from interface names supported by this class to
+   * their ClassInfo structures, flattened across the hierarchy.
+   */
+  ISStringToOneT<borrowed_ptr<const ClassInfo>> implInterfaces;
 
   /*
    * A (case-sensitive) map from class constant name to the php::Const
@@ -436,6 +445,16 @@ bool Class::subtypeOf(const Class& o) const {
   if (s1 || s2) return s1 == s2;
   auto c1 = val.right();
   auto c2 = o.val.right();
+
+  // If c2 is an interface, see if c1 declared it.
+  if (c2->cls->attrs & AttrInterface) {
+    if (c1->implInterfaces.count(c2->cls->name)) {
+      return true;
+    }
+    return false;
+  }
+
+  // Otherwise check for direct inheritance.
   if (c1->baseList.size() >= c2->baseList.size()) {
     return c1->baseList[c2->baseList.size() - 1] == c2;
   }
@@ -467,6 +486,15 @@ SString Class::name() const {
   return val.match(
     [] (SString s) { return s; },
     [] (borrowed_ptr<ClassInfo> ci) { return ci->cls->name; }
+  );
+}
+
+bool Class::couldBeInterfaceOrTrait() const {
+  return val.match(
+    [] (SString) { return true; },
+    [] (borrowed_ptr<ClassInfo> cinfo) {
+      return (cinfo->cls->attrs & (AttrInterface | AttrTrait));
+    }
   );
 }
 
@@ -514,7 +542,7 @@ std::string show(const Class& c) {
       return s->data();
     },
     [] (borrowed_ptr<ClassInfo> cinfo) {
-      return folly::format("{}*", cinfo->cls->name->data()).str();
+      return folly::format("{}*", cinfo->cls->name).str();
     }
   );
 }
@@ -575,6 +603,8 @@ std::string show(const Func& f) {
 }
 
 //////////////////////////////////////////////////////////////////////
+
+using IfaceSlotMap = std::unordered_map<borrowed_ptr<const php::Class>, Slot>;
 
 struct IndexData {
   IndexData() = default;
@@ -645,6 +675,12 @@ struct IndexData {
   PublicSPropState publicSPropState;
   PropState unknownClassSProps;
 
+  /*
+   * Map from interfaces to their assigned vtable slots, computed in
+   * compute_iface_vtables().
+   */
+  IfaceSlotMap ifaceSlotMap;
+
   std::unordered_map<
     borrowed_ptr<const php::Class>,
     std::vector<Type>
@@ -712,12 +748,19 @@ bool build_cls_info_rec(borrowed_ptr<ClassInfo> rleaf,
   auto const isIface = rparent->cls->attrs & AttrInterface;
 
   /*
+   * Make a flattened table of all the interfaces implemented by the class.
+   */
+  if (isIface) {
+    rleaf->implInterfaces[rparent->cls->name] = rparent;
+  }
+
+  /*
    * Make a table of all the constants on this class.
    *
    * Duplicate class constants override parent class constants, but
    * for interfaces it's an error to have a duplicate constant, unless
    * it just happens from implementing the same interface more than
-   * once.
+   * once, or the constant is abstract.
    *
    * Note: hphpc doesn't actually check for this case, but since with
    * HardConstProp we're potentially doing propagation of these
@@ -728,7 +771,10 @@ bool build_cls_info_rec(borrowed_ptr<ClassInfo> rleaf,
   for (auto& c : rparent->cls->constants) {
     auto& cptr = rleaf->clsConstants[c.name];
     if (isIface && cptr) {
-      if (cptr->cls != rparent->cls) return false;
+      if (cptr->val.hasValue() && c.val.hasValue() &&
+          cptr->cls != rparent->cls) {
+        return false;
+      }
     }
     cptr = &c;
   }
@@ -1041,6 +1087,218 @@ void define_func_families(IndexData& index) {
   }
 }
 
+/*
+ * ConflictGraph maintains lists of interfaces that conflict with each other
+ * due to being implemented by the same class.
+ */
+struct ConflictGraph {
+  void add(borrowed_ptr<const php::Class> i, borrowed_ptr<const php::Class> j) {
+    if (i == j) return;
+    auto& conflicts = map[i];
+    if (std::find(conflicts.begin(), conflicts.end(), j) != conflicts.end()) {
+      return;
+    }
+    conflicts.push_back(j);
+  }
+
+  std::unordered_map<borrowed_ptr<const php::Class>,
+                     std::vector<borrowed_ptr<const php::Class>>> map;
+};
+
+/*
+ * Trace information about interface conflict sets and the vtables computed
+ * from them.
+ */
+void trace_interfaces(const IndexData& index, const ConflictGraph& cg) {
+  // Compute what the vtable for each Class will look like, and build up a list
+  // of all interfaces.
+  struct Cls {
+    const ClassInfo* cinfo;
+    std::vector<const php::Class*> vtable;
+  };
+  std::vector<Cls> classes;
+  std::vector<const php::Class*> ifaces;
+  size_t total_slots = 0, empty_slots = 0;
+  for (auto& cinfo : index.allClassInfos) {
+    if (cinfo->cls->attrs & AttrInterface) {
+      ifaces.emplace_back(cinfo->cls);
+      continue;
+    }
+    if (cinfo->cls->attrs & (AttrTrait | AttrEnum | AttrAbstract)) continue;
+
+    classes.emplace_back(Cls{borrow(cinfo)});
+    auto& vtable = classes.back().vtable;
+    for (auto& pair : cinfo->implInterfaces) {
+      auto it = index.ifaceSlotMap.find(pair.second->cls);
+      assert(it != end(index.ifaceSlotMap));
+      auto const slot = it->second;
+      if (slot >= vtable.size()) vtable.resize(slot + 1);
+      vtable[slot] = pair.second->cls;
+    }
+
+    total_slots += vtable.size();
+    for (auto iface : vtable) if (iface == nullptr) ++empty_slots;
+  }
+
+  Slot max_slot = 0;
+  for (auto const& pair : index.ifaceSlotMap) {
+    max_slot = std::max(max_slot, pair.second);
+  }
+
+  // Sort the list of class vtables so the largest ones come first.
+  auto class_cmp = [&](const Cls& a, const Cls& b) {
+    return a.vtable.size() > b.vtable.size();
+  };
+  std::sort(begin(classes), end(classes), class_cmp);
+
+  // Sort the list of interfaces so the biggest conflict sets come first.
+  auto iface_cmp = [&](const php::Class* a, const php::Class* b) {
+    return cg.map.at(a).size() > cg.map.at(b).size();
+  };
+  std::sort(begin(ifaces), end(ifaces), iface_cmp);
+
+  std::string out;
+  folly::format(&out, "{} interfaces, {} classes\n",
+                ifaces.size(), classes.size());
+  folly::format(&out,
+                "{} vtable slots, {} empty vtable slots, max slot {}\n",
+                total_slots, empty_slots, max_slot);
+  folly::format(&out, "\n{:-^80}\n", " interface slots & conflict sets");
+  for (auto iface : ifaces) {
+    auto cgIt = cg.map.find(iface);
+    if (cgIt == end(cg.map)) break;
+    auto& conflicts = cgIt->second;
+
+    folly::format(&out, "{:>40} {:3} {:2} [", iface->name,
+                  conflicts.size(),
+                  folly::get_default(index.ifaceSlotMap, iface));
+    auto sep = "";
+    for (auto conflict : conflicts) {
+      folly::format(&out, "{}{}", sep, conflict->name);
+      sep = ", ";
+    }
+    folly::format(&out, "]\n");
+  }
+
+  folly::format(&out, "\n{:-^80}\n", " class vtables ");
+  for (auto& item : classes) {
+    if (item.vtable.empty()) break;
+
+    folly::format(&out, "{:>30}: [", item.cinfo->cls->name);
+    auto sep = "";
+    for (auto iface : item.vtable) {
+      folly::format(&out, "{}{}", sep, iface ? iface->name->data() : "null");
+      sep = ", ";
+    }
+    folly::format(&out, "]\n");
+  }
+
+  Trace::traceRelease("%s", out.c_str());
+}
+
+/*
+ * Find the lowest Slot that doesn't conflict with anything in the conflict set
+ * for iface.
+ */
+Slot find_min_slot(borrowed_ptr<const php::Class> iface,
+                   const IfaceSlotMap& slots,
+                   const ConflictGraph& cg) {
+  auto const& conflicts = cg.map.at(iface);
+  if (conflicts.empty()) {
+    // No conflicts. This is the only interface implemented by the classes that
+    // implement it.
+    return 0;
+  }
+
+  boost::dynamic_bitset<> used;
+
+  for (auto& c : conflicts) {
+    auto const it = slots.find(c);
+    if (it == slots.end()) continue;
+    auto const slot = it->second;
+
+    if (used.size() <= slot) used.resize(slot + 1);
+    used.set(slot);
+  }
+  used.flip();
+  return used.any() ? used.find_first() : used.size();
+}
+
+/*
+ * Compute vtable slots for all interfaces. No two interfaces implemented by
+ * the same class will share the same vtable slot.
+ */
+void compute_iface_vtables(IndexData& index) {
+  trace_time tracer("compute interface vtables");
+
+  ConflictGraph cg;
+  std::vector<borrowed_ptr<const php::Class>> ifaces;
+  std::unordered_map<borrowed_ptr<const php::Class>, int> iface_uses;
+
+  // Build up the conflict sets.
+  for (auto& cinfo : index.allClassInfos) {
+    if (cinfo->cls->attrs & AttrInterface) {
+      ifaces.emplace_back(cinfo->cls);
+      // Make sure cg.map has an entry for every interface - this simplifies
+      // some code later on.
+      cg.map[cinfo->cls];
+      continue;
+    }
+
+    // Only worry about classes that can be instantiated. If an abstract class
+    // has any concrete subclasses, those classes will make sure the right
+    // entries are in the conflict sets.
+    if (cinfo->cls->attrs & (AttrTrait | AttrEnum | AttrAbstract)) continue;
+
+    for (auto& ipair : cinfo->implInterfaces) {
+      ++iface_uses[ipair.second->cls];
+      for (auto& jpair : cinfo->implInterfaces) {
+        cg.add(ipair.second->cls, jpair.second->cls);
+      }
+    }
+  }
+
+  // We assign slots greedily, so sort the interface list so the most
+  // frequently implemented ones come first.
+  auto iface_cmp = [&](const php::Class* a, const php::Class* b) {
+    return iface_uses[a] > iface_uses[b];
+  };
+  std::sort(begin(ifaces), end(ifaces), iface_cmp);
+
+  // Assign slots, keeping track of the largest assigned slot and the total
+  // number of uses for each slot.
+  Slot max_slot = 0;
+  std::unordered_map<Slot, int> slot_uses;
+  for (auto* iface : ifaces) {
+    auto const slot = find_min_slot(iface, index.ifaceSlotMap, cg);
+    index.ifaceSlotMap[iface] = slot;
+    max_slot = std::max(max_slot, slot);
+
+    // Interfaces implemented by the same class never share a slot, so normal
+    // addition is fine here.
+    slot_uses[slot] += iface_uses[iface];
+  }
+
+  // Finally, sort and reassign slots so the most frequently used slots come
+  // first. This slightly reduces the number of wasted vtable vector entries at
+  // runtime.
+  std::vector<Slot> slots;
+  slots.reserve(max_slot + 1);
+  for (Slot i = 0; i <= max_slot; ++i) slots.emplace_back(i);
+  auto slot_cmp = [&](Slot a, Slot b) { return slot_uses[a] > slot_uses[b]; };
+  std::sort(begin(slots), end(slots), slot_cmp);
+
+  std::vector<Slot> slots_permute(max_slot + 1, 0);
+  for (size_t i = 0; i <= max_slot; ++i) slots_permute[slots[i]] = i;
+  for (auto& pair : index.ifaceSlotMap) {
+    pair.second = slots_permute[pair.second];
+  }
+
+  if (Trace::moduleEnabledRelease(Trace::hhbbc_iface)) {
+    trace_interfaces(index, cg);
+  }
+}
+
 void mark_magic_on_parents(ClassInfo& cinfo, ClassInfo& derived) {
   for (auto& kv : magicMethodMap) {
     if ((derived.*kv.second.pmem).thisHas) {
@@ -1080,7 +1338,8 @@ void remove_attribute(borrowed_ptr<const PhpObject> obj, Attr attr) {
 void mark_no_override_classes(IndexData& index) {
   for (auto& cinfo : index.allClassInfos) {
     if (cinfo->subclassList.size() == 1 &&
-        !(cinfo->cls->attrs & AttrInterface)) {
+        !(cinfo->cls->attrs & AttrInterface) &&
+        cinfo->cls->attrs & AttrUnique) {
       assert(cinfo->subclassList.front() == borrow(cinfo));
       if (!(cinfo->cls->attrs & AttrNoOverride)) {
         FTRACE(2, "Adding AttrNoOverride to {}\n", cinfo->cls->name->data());
@@ -1104,6 +1363,7 @@ void mark_no_override_functions(IndexData& index) {
   // First, mark every (non-interface, non-special) method as AttrNoOverride.
   for (auto& meth : index.methods) {
     if (meth.second->cls->attrs & AttrInterface) continue;
+    if (!(meth.second->cls->attrs & AttrUnique)) continue;
     if (is_special_method_name(meth.second->name)) continue;
     add_attribute(meth.second, AttrNoOverride);
   }
@@ -1274,6 +1534,9 @@ Type context_sensitive_return_type(const Index& index,
   // TODO(#4441939): we can't do anything if it's a strict subtype of
   // array because of the lack of intersection types.  See below.
   if (contextType.strictSubtypeOf(TArr)) return callInsensitiveType;
+  if (contextType.strictSubtypeOf(TVec)) return callInsensitiveType;
+  if (contextType.strictSubtypeOf(TDict)) return callInsensitiveType;
+  if (contextType.strictSubtypeOf(TKeyset)) return callInsensitiveType;
 
   /*
    * Note: it may seem like the context sensitive return type should
@@ -1376,6 +1639,66 @@ PrepKind prep_kind_from_set(PossibleFuncRange range, uint32_t paramId) {
   return *prep;
 }
 
+PublicSPropEntry lookup_public_static_impl(
+  const IndexData& data,
+  borrowed_ptr<const ClassInfo> cinfo,
+  SString prop
+) {
+  auto const noInfo = PublicSPropEntry{TInitGen, TInitGen, true};
+
+  if (data.publicSPropState != PublicSPropState::Valid) {
+    return noInfo;
+  }
+
+  auto const knownClsPart = [&] () -> borrowed_ptr<const PublicSPropEntry> {
+    for (auto ci = cinfo; ci != nullptr; ci = ci->parent) {
+      auto const it = ci->publicStaticProps.find(prop);
+      if (it != end(ci->publicStaticProps)) {
+        return &it->second;
+      }
+    }
+    return nullptr;
+  }();
+  auto const unkPart = [&]() -> borrowed_ptr<const Type> {
+    auto unkIt = data.unknownClassSProps.find(prop);
+    if (unkIt != end(data.unknownClassSProps)) {
+      return &unkIt->second;
+    }
+    return nullptr;
+  }();
+
+  if (knownClsPart == nullptr) {
+    return noInfo;
+  }
+
+  always_assert_flog(
+    !knownClsPart->inferredType.subtypeOf(TBottom),
+    "A public static property had type TBottom; probably "
+    "was marked uninit but didn't show up in the class 86sinit."
+  );
+  if (unkPart != nullptr) {
+    return PublicSPropEntry {
+      union_of(knownClsPart->inferredType, *unkPart),
+      union_of(knownClsPart->initializerType, *unkPart),
+      true
+    };
+  }
+  return *knownClsPart;
+}
+
+PublicSPropEntry lookup_public_static_impl(
+  const IndexData& data,
+  borrowed_ptr<const php::Class> cls,
+  SString name
+) {
+  auto const classes = find_range(data.classInfo, cls->name);
+  if (begin(classes) == end(classes) ||
+      std::next(begin(classes)) != end(classes)) {
+    return PublicSPropEntry{TInitGen, TInitGen, true};
+  }
+  return lookup_public_static_impl(data, begin(classes)->second, name);
+}
+
 //////////////////////////////////////////////////////////////////////
 
 }
@@ -1408,6 +1731,7 @@ Index::Index(borrowed_ptr<php::Program> program)
   mark_no_override_functions(*m_data);
   define_func_families(*m_data);        // uses AttrNoOverride functions
   find_magic_methods(*m_data);          // uses the subclass lists
+  compute_iface_vtables(*m_data);
 
   check_invariants(*m_data);
 
@@ -1437,18 +1761,22 @@ folly::Optional<res::Class> Index::resolve_class(Context ctx,
                                                  SString clsName) const {
   clsName = normalizeNS(clsName);
 
+  // We know it has to name a class only if there's no type alias with this
+  // name.
+  //
+  // TODO(#3519401): when we start unfolding type aliases, we could
+  // look at whether it is an alias for a specific class here.
+  // (Note this might need to split into a different API: type
+  // aliases aren't allowed everywhere we're doing resolve_class
+  // calls.)
+  if (m_data->typeAliases.count(clsName)) {
+    return folly::none;
+  }
+
   auto name_only = [&] () -> folly::Optional<res::Class> {
-    // We know it has to name a class only if there's no type alias with this
-    // name.  We also refuse to have name-only resolutions of enums, so that
+    // We also refuse to have name-only resolutions of enums, so that
     // all name only resolutions can be treated as objects.
-    //
-    // TODO(#3519401): when we start unfolding type aliases, we could
-    // look at whether it is an alias for a specific class here.
-    // (Note this might need to split into a different API: type
-    // aliases aren't allowed everywhere we're doing resolve_class
-    // calls.)
-    if (!m_data->typeAliases.count(clsName) &&
-        !m_data->enums.count(clsName)) {
+    if (!m_data->enums.count(clsName)) {
       return res::Class { this, clsName };
     }
     return folly::none;
@@ -1590,7 +1918,7 @@ res::Func Index::resolve_method(Context ctx,
    * called as long, as we only do so in cases where it will fatal at
    * runtime.
    *
-   * So, in the presense of magic methods, we must handle the fact
+   * So, in the presence of magic methods, we must handle the fact
    * that attempting to call an inaccessible method will instead call
    * the magic method, if it exists.  Note that if any class derives
    * from a class and adds magic methods, it can change still change
@@ -1721,13 +2049,9 @@ Index::resolve_func_fallback(Context ctx,
 }
 
 Type Index::lookup_constraint(Context ctx, const TypeConstraint& tc) const {
-  if (!tc.hasConstraint()) return TCell;
-
-  /*
-   * Type variable constraints are not used at runtime to enforce
-   * anything.
-   */
-  if (tc.isTypeVar()) return TCell;
+  assert(IMPLIES(
+    !tc.hasConstraint() || tc.isTypeVar() || tc.isTypeConstant(),
+    tc.isMixed()));
 
   /*
    * Soft hints (@Foo) are not checked.
@@ -1735,18 +2059,26 @@ Type Index::lookup_constraint(Context ctx, const TypeConstraint& tc) const {
   if (tc.isSoft()) return TCell;
 
   switch (tc.metaType()) {
-  case TypeConstraint::MetaType::Precise:
-    {
+    case AnnotMetaType::Precise: {
       auto const mainType = [&]() -> const Type {
         auto const dt = tc.underlyingDataType();
-        if (!dt) return TInitCell;
+        assert(dt.hasValue());
 
         switch (*dt) {
+        case KindOfUninit:       return TCell;
+        case KindOfNull:         return TNull;
         case KindOfBoolean:      return TBool;
         case KindOfInt64:        return TInt;
         case KindOfDouble:       return TDbl;
+        case KindOfPersistentString:
         case KindOfString:       return TStr;
-        case KindOfStaticString: return TStr;
+        case KindOfPersistentVec:
+        case KindOfVec:          return TVec;
+        case KindOfPersistentDict:
+        case KindOfDict:         return TDict;
+        case KindOfPersistentKeyset:
+        case KindOfKeyset:       return TKeyset;
+        case KindOfPersistentArray:
         case KindOfArray:        return TArr;
         case KindOfResource:     return TRes;
         case KindOfObject:
@@ -1768,25 +2100,33 @@ Type Index::lookup_constraint(Context ctx, const TypeConstraint& tc) const {
               : subObj(*rcls);
           }
           return TInitCell;
-        default:
+        case KindOfClass:
+        case KindOfRef:
           always_assert_flog(false, "Unexpected DataType");
           break;
         }
         return TInitCell;
       }();
 
-      return (mainType == TInitCell || !tc.isNullable()) ? mainType
+      return (mainType == TInitCell || !tc.isNullable())
+        ? mainType
         : opt(mainType);
     }
-  case TypeConstraint::MetaType::Self:
-  case TypeConstraint::MetaType::Parent:
-  case TypeConstraint::MetaType::Callable:
-    break;
-  case TypeConstraint::MetaType::Number:
-    return tc.isNullable() ? TOptNum : TNum;
-  case TypeConstraint::MetaType::ArrayKey:
-    // TODO(3774082): Support TInt | TStr type constraint
-    return TInitCell;
+    case AnnotMetaType::Mixed:
+      /*
+       * Here we handle "mixed", typevars, and some other ignored
+       * typehints (ex. "(function(..): ..)" typehints).
+       */
+      return TCell;
+    case AnnotMetaType::Self:
+    case AnnotMetaType::Parent:
+    case AnnotMetaType::Callable:
+      break;
+    case AnnotMetaType::Number:
+      return tc.isNullable() ? TOptNum : TNum;
+    case AnnotMetaType::ArrayKey:
+      // TODO(3774082): Support TInt | TStr type constraint
+      return TInitCell;
   }
 
   return TCell;
@@ -1799,23 +2139,30 @@ bool Index::satisfies_constraint(Context ctx, const Type t,
 
 Type Index::satisfies_constraint_helper(Context ctx,
                                         const TypeConstraint& tc) const {
-  if (!tc.hasConstraint() || tc.isTypeVar()) {
-    return TGen;
-  }
+  assert(IMPLIES(
+    !tc.hasConstraint() || tc.isTypeVar() || tc.isTypeConstant(),
+    tc.isMixed()));
 
   switch (tc.metaType()) {
-  case TypeConstraint::MetaType::Precise:
-    {
+    case AnnotMetaType::Precise: {
       auto const mainType = [&]() -> const Type {
         auto const dt = tc.underlyingDataType();
-        if (!dt) return TBottom;
-
+        assert(dt.hasValue());
         switch (*dt) {
+        case KindOfUninit:       return TBottom;
+        case KindOfNull:         return TNull;
         case KindOfBoolean:      return TBool;
         case KindOfInt64:        return TInt;
         case KindOfDouble:       return TDbl;
+        case KindOfPersistentString:
         case KindOfString:       return TStr;
-        case KindOfStaticString: return TStr;
+        case KindOfPersistentVec:
+        case KindOfVec:          return TVec;
+        case KindOfPersistentDict:
+        case KindOfDict:         return TDict;
+        case KindOfPersistentKeyset:
+        case KindOfKeyset:       return TKeyset;
+        case KindOfPersistentArray:
         case KindOfArray:        return TArr;
         case KindOfResource:     return TRes;
         case KindOfObject:
@@ -1829,27 +2176,53 @@ Type Index::satisfies_constraint_helper(Context ctx,
             return subObj(*rcls);
           }
           return TBottom;
-        default:
+        case KindOfClass:
+        case KindOfRef:
           always_assert_flog(false, "Unexpected DataType");
           break;
         }
         return TBottom;
       }();
-
       return (mainType == TBottom || !tc.isNullable()) ? mainType
         : opt(mainType);
     }
-  case TypeConstraint::MetaType::Self:
-  case TypeConstraint::MetaType::Parent:
-  case TypeConstraint::MetaType::Callable:
-    break;
-  case TypeConstraint::MetaType::Number:
-    return tc.isNullable() ? TOptNum : TNum;
-  case TypeConstraint::MetaType::ArrayKey:
-    // TODO(3774082): Support TInt | TStr type constraint
-    break;
+    case AnnotMetaType::Mixed:
+      /*
+       * Here we handle "mixed", typevars, and some other ignored
+       * typehints (ex. "(function(..): ..)" typehints).
+       */
+      return TGen;
+    case AnnotMetaType::Self:
+    case AnnotMetaType::Parent:
+    case AnnotMetaType::Callable:
+      break;
+    case AnnotMetaType::Number:
+      return tc.isNullable() ? TOptNum : TNum;
+    case AnnotMetaType::ArrayKey:
+      // TODO(3774082): Support TInt | TStr type constraint
+      break;
   }
+
   return TBottom;
+}
+
+bool Index::is_async_func(res::Func rfunc) const {
+  return match<bool>(
+    rfunc.val,
+    [&] (res::Func::FuncName s)        { return false; },
+    [&] (res::Func::MethodName s)      { return false; },
+    [&] (borrowed_ptr<FuncInfo> finfo) {
+      return finfo->func->isAsync && !finfo->func->isGenerator;
+    },
+    [&] (borrowed_ptr<FuncFamily> fam) {
+      for (auto const& finfo : fam->possibleFuncs) {
+        if (!finfo->func->isAsync || finfo->func->isGenerator) {
+          return false;
+        }
+      }
+      return true;
+    }
+  );
 }
 
 Type Index::lookup_class_constant(Context ctx,
@@ -1860,12 +2233,16 @@ Type Index::lookup_class_constant(Context ctx,
 
   auto const it = cinfo->clsConstants.find(cnsName);
   if (it != end(cinfo->clsConstants)) {
-    if (it->second->val.m_type == KindOfUninit) {
+    if (!it->second->val.hasValue() || it->second->isTypeconst) {
+      // This is an abstract class constant or typeconstant
+      return TInitCell;
+    }
+    if (it->second->val.value().m_type == KindOfUninit) {
       // This is a class constant that needs an 86cinit to run.  It
       // would be good to eventually be able to analyze these.
       return TInitCell;
     }
-    return from_cell(it->second->val);
+    return from_cell(it->second->val.value());
   }
   return TInitCell;
 }
@@ -1928,7 +2305,7 @@ Index::lookup_closure_use_vars(borrowed_ptr<const php::Func> func) const {
   if (!numUseVars) return {};
   auto const it = m_data->closureUseVars.find(func->cls);
   if (it == end(m_data->closureUseVars)) {
-    return std::vector<Type>(numUseVars, TInitGen);
+    return std::vector<Type>(numUseVars, TGen);
   }
   return it->second;
 }
@@ -1999,10 +2376,6 @@ Index::lookup_private_statics(borrowed_ptr<const php::Class> cls) const {
 }
 
 Type Index::lookup_public_static(Type cls, Type name) const {
-  if (m_data->publicSPropState != PublicSPropState::Valid) {
-    return TInitGen;
-  }
-
   auto const cinfo = [&] () -> borrowed_ptr<const ClassInfo> {
     if (!is_specialized_cls(cls)) {
       return nullptr;
@@ -2014,58 +2387,29 @@ Type Index::lookup_public_static(Type cls, Type name) const {
     }
     not_reached();
   }();
-  if (!cinfo) return TInitGen;
 
   auto const vname = tv(name);
-  if (!vname || (vname && vname->m_type != KindOfStaticString)) {
+  if (!vname || (vname && vname->m_type != KindOfPersistentString)) {
     return TInitGen;
   }
   auto const sname = vname->m_data.pstr;
 
-  auto const knownClsPart = [&] {
-    for (auto ci = cinfo; ci != nullptr; ci = ci->parent) {
-      auto const it = ci->publicStaticProps.find(sname);
-      if (it != end(ci->publicStaticProps)) {
-        return it->second.inferredType;
-      }
-    }
-    return TInitGen;
-  }();
-  auto const unkPart = [&]() -> Type {
-    auto unkIt = m_data->unknownClassSProps.find(sname);
-    if (unkIt != end(m_data->unknownClassSProps)) {
-      return unkIt->second;
-    }
-    return TBottom;
-  }();
+  return lookup_public_static_impl(*m_data, cinfo, sname).inferredType;
+}
 
-  always_assert_flog(
-    !knownClsPart.subtypeOf(TBottom),
-    "A public static property had type TBottom; probably "
-    "was marked uninit but didn't show up in the class 86sinit."
-  );
-
-  return union_of(unkPart, knownClsPart);
+Type Index::lookup_public_static(borrowed_ptr<const php::Class> cls,
+                                 SString name) const {
+  return lookup_public_static_impl(*m_data, cls, name).inferredType;
 }
 
 bool Index::lookup_public_static_immutable(borrowed_ptr<const php::Class> cls,
                                            SString name) const {
-  if (m_data->publicSPropState != PublicSPropState::Valid) {
-    return false;
-  }
-  if (m_data->unknownClassSProps.count(name)) return false;
-  auto const classes = find_range(m_data->classInfo, cls->name);
-  if (begin(classes) == end(classes) ||
-      std::next(begin(classes)) != end(classes)) {
-    return false;
-  }
-  auto const cinfo = begin(classes)->second;
-  auto const it = cinfo->publicStaticProps.find(name);
-  if (it == end(cinfo->publicStaticProps)) {
-    // Presumably protected or private.
-    return false;
-  }
-  return !it->second.everModified;
+  return !lookup_public_static_impl(*m_data, cls, name).everModified;
+}
+
+Slot
+Index::lookup_iface_vtable_slot(borrowed_ptr<const php::Class> cls) const {
+  return folly::get_default(m_data->ifaceSlotMap, cls, kInvalidSlot);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -2296,16 +2640,16 @@ Index::could_be_related(borrowed_ptr<const php::Class> cls,
 
 //////////////////////////////////////////////////////////////////////
 
-void PublicSPropIndexer::merge(Type tcls, Type name, Type val) {
+void PublicSPropIndexer::merge(Context ctx, Type tcls, Type name, Type val) {
   auto const vname = tv(name);
 
   FTRACE(2, "merge_public_static: {} {} {}\n",
     show(tcls), show(name), show(val));
 
-  // Figure out which class this can affect.  If we have a DCls::Sub we assume
-  // it could affect any class (we could chase the inheritance hierarchy
-  // downward to try to limit it, but don't currently).
-  auto const cinfo = [&]() -> borrowed_ptr<ClassInfo> {
+  // Figure out which class this can affect.  If we have a DCls::Sub we have to
+  // assume it could affect any subclass, so we repeat this merge for all exact
+  // class types deriving from that base.
+  auto const maybe_cinfo = [&]() -> folly::Optional<borrowed_ptr<ClassInfo>> {
     if (!is_specialized_cls(tcls)) {
       return nullptr;
     }
@@ -2314,13 +2658,20 @@ void PublicSPropIndexer::merge(Type tcls, Type name, Type val) {
     case DCls::Exact:
       return dcls.cls.val.right();
     case DCls::Sub:
-      return nullptr;
+      if (!dcls.cls.val.right()) return nullptr;
+      for (auto& sub : dcls.cls.val.right()->subclassList) {
+        auto const rcls = res::Class { m_index, sub };
+        merge(ctx, clsExact(rcls), name, val);
+      }
+      return folly::none;
     }
     not_reached();
   }();
+  if (!maybe_cinfo) return;
 
+  auto const cinfo = *maybe_cinfo;
   bool const unknownName = !vname ||
-    (vname && vname->m_type != KindOfStaticString);
+    (vname && vname->m_type != KindOfPersistentString);
 
   if (!cinfo) {
     if (unknownName) {
@@ -2339,6 +2690,8 @@ void PublicSPropIndexer::merge(Type tcls, Type name, Type val) {
         "NOTE: had to mark everything unknown for public static "
         "property types due to dynamic code.  -fanalyze-public-statics "
         "will not help for this program.\n"
+        "NOTE: The offending code occured in this context: %s\n",
+        show(ctx).c_str()
       );
       m_everything_bad = true;
       return;
@@ -2360,7 +2713,7 @@ void PublicSPropIndexer::merge(Type tcls, Type name, Type val) {
   if (unknownName) {
     for (auto ci = cinfo; ci != nullptr; ci = ci->parent) {
       for (auto& kv : ci->publicStaticProps) {
-        merge(tcls, sval(kv.first), val);
+        merge(ctx, tcls, sval(kv.first), val);
       }
     }
     return;

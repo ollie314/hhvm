@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,17 +18,18 @@
 #define incl_HPHP_SYSTEMLIB_H_
 
 #include "hphp/runtime/base/types.h"
+#include "hphp/util/portability.h"
 
 namespace HPHP {
-///////////////////////////////////////////////////////////////////////////////
+struct ObjectData;
+struct Unit;
+struct Class;
+struct Func;
+struct Object;
+} //namespace HPHP
 
-class ObjectData;
-class Unit;
-class Class;
-class Func;
-namespace Eval {
-  class PhpFile;
-}
+namespace HPHP { namespace SystemLib {
+///////////////////////////////////////////////////////////////////////////////
 
 #define SYSTEMLIB_CLASSES(x)                    \
   x(stdclass)                                   \
@@ -48,8 +49,6 @@ namespace Eval {
   x(DOMException)                               \
   x(PDOException)                               \
   x(SoapFault)                                  \
-  x(Closure)                                    \
-  x(Generator)                                  \
   x(Serializable)                               \
   x(ArrayAccess)                                \
   x(ArrayObject)                                \
@@ -66,49 +65,94 @@ namespace Eval {
   x(__PHP_Incomplete_Class)                     \
   x(APCIterator)
 
-class SystemLib {
- public:
-  static bool s_inited;
-  static bool s_anyNonPersistentBuiltins;
-  static std::string s_source;
-  static HPHP::Unit* s_unit;
-  static HPHP::Unit* s_hhas_unit;
-  static HPHP::Unit* s_nativeFuncUnit;
-  static HPHP::Unit* s_nativeClassUnit;
-
+extern bool s_inited;
+extern bool s_anyNonPersistentBuiltins;
+extern std::string s_source;
+extern Unit* s_unit;
+extern Unit* s_hhas_unit;
+extern Unit* s_nativeFuncUnit;
+extern Unit* s_nativeClassUnit;
+extern Func* s_nullFunc;
 
 #define DECLARE_SYSTEMLIB_CLASS(cls)       \
-  static HPHP::Class* s_ ## cls ## Class;
+extern Class* s_ ## cls ## Class;
   SYSTEMLIB_CLASSES(DECLARE_SYSTEMLIB_CLASS)
 #undef DECLARE_SYSTEMLIB_CLASS
 
-  static HPHP::Func* s_nullFunc;
+extern Class* s_ThrowableClass;
+extern Class* s_BaseExceptionClass;
+extern Class* s_ErrorClass;
+extern Class* s_ArithmeticErrorClass;
+extern Class* s_AssertionErrorClass;
+extern Class* s_DivisionByZeroErrorClass;
+extern Class* s_ParseErrorClass;
+extern Class* s_TypeErrorClass;
 
-  static ObjectData* AllocStdClassObject();
-  static ObjectData* AllocPinitSentinel();
-  static ObjectData* AllocExceptionObject(const Variant& message);
-  static ObjectData* AllocBadMethodCallExceptionObject(const Variant& message);
-  static ObjectData* AllocInvalidArgumentExceptionObject(const Variant& message);
-  static ObjectData* AllocRuntimeExceptionObject(const Variant& message);
-  static ObjectData* AllocOutOfBoundsExceptionObject(const Variant& message);
-  static ObjectData* AllocInvalidOperationExceptionObject(const Variant& message);
-  static ObjectData* AllocDOMExceptionObject(const Variant& message,
-                                             const Variant& code);
-  static ObjectData* AllocDirectoryObject();
-  static ObjectData* AllocPDOExceptionObject();
-  static ObjectData* AllocSoapFaultObject(const Variant& code,
-                                          const Variant& message,
-                                          const Variant& actor = null_variant,
-                                          const Variant& detail = null_variant,
-                                          const Variant& name = null_variant,
-                                          const Variant& header = null_variant);
-  static ObjectData* AllocLazyKVZipIterableObject(const Variant& mp);
+Object AllocStdClassObject();
+Object AllocPinitSentinel();
+Object AllocExceptionObject(const Variant& message);
+Object AllocErrorObject(const Variant& message);
+Object AllocArithmeticErrorObject(const Variant& message);
+Object AllocDivisionByZeroErrorObject(const Variant& message);
+Object AllocParseErrorObject(const Variant& message);
+Object AllocTypeErrorObject(const Variant& message);
+Object AllocBadMethodCallExceptionObject(const Variant& message);
+Object AllocInvalidArgumentExceptionObject(const Variant& message);
+Object AllocRuntimeExceptionObject(const Variant& message);
+Object AllocOutOfBoundsExceptionObject(const Variant& message);
+Object AllocInvalidOperationExceptionObject(const Variant& message);
+Object AllocDOMExceptionObject(const Variant& message,
+                               const Variant& code);
+Object AllocDirectoryObject();
+Object AllocPDOExceptionObject();
+Object AllocSoapFaultObject(const Variant& code,
+                            const Variant& message,
+                            const Variant& actor = null_variant,
+                            const Variant& detail = null_variant,
+                            const Variant& name = null_variant,
+                            const Variant& header = null_variant);
+Object AllocLazyKVZipIterableObject(const Variant& mp);
 
-  static ObjectData* AllocLazyIterableViewObject(const Variant& iterable);
-  static ObjectData* AllocLazyKeyedIterableViewObject(const Variant& iterable);
-};
+Object AllocLazyIterableViewObject(const Variant& iterable);
+Object AllocLazyKeyedIterableViewObject(const Variant& iterable);
+
+[[noreturn]] void throwExceptionObject(const Variant& message);
+[[noreturn]] void throwErrorObject(const Variant& message);
+[[noreturn]] void throwArithmeticErrorObject(const Variant& message);
+[[noreturn]] void throwDivisionByZeroErrorObject(const Variant& message);
+[[noreturn]] void throwParseErrorObject(const Variant& message);
+[[noreturn]] void throwTypeErrorObject(const Variant& message);
+[[noreturn]]
+void throwBadMethodCallExceptionObject(const Variant& message);
+[[noreturn]]
+void throwInvalidArgumentExceptionObject(const Variant& message);
+[[noreturn]] void throwRuntimeExceptionObject(const Variant& message);
+[[noreturn]] void throwOutOfBoundsExceptionObject(const Variant& message);
+[[noreturn]]
+void throwInvalidOperationExceptionObject(const Variant& message);
+[[noreturn]]
+void throwDOMExceptionObject(const Variant& message,
+                             const Variant& code);
+[[noreturn]]
+void throwSoapFaultObject(const Variant& code,
+                          const Variant& message,
+                          const Variant& actor = null_variant,
+                          const Variant& detail = null_variant,
+                          const Variant& name = null_variant,
+                          const Variant& header = null_variant);
+
+
+/**
+ * Register a persistent unit to be re-merged (in non-repo mode)
+ */
+void addPersistentUnit(Unit* unit);
+
+/**
+ * Re-merge all persistent units
+ */
+void mergePersistentUnits();
 
 ///////////////////////////////////////////////////////////////////////////////
-}
+}} // namespace HPHP::SystemLib
 
 #endif

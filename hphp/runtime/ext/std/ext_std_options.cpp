@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,33 +18,39 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/resource.h>
-#include <sys/utsname.h>
 #include <pwd.h>
 #include <algorithm>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/utsname.h>
+#endif
+
 #include <folly/ScopeGuard.h>
 #include <folly/String.h>
+#include <folly/portability/SysResource.h>
+#include <folly/portability/SysTime.h>
 
-#include "hphp/runtime/ext/std/ext_std_misc.h"
-#include "hphp/runtime/ext/std/ext_std_errorfunc.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/ext/extension.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/php-globals.h"
-#include "hphp/runtime/base/unit-cache.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/memory-manager.h"
+#include "hphp/runtime/base/php-globals.h"
+#include "hphp/runtime/base/request-event-handler.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/runtime-error.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/base/zend-functions.h"
 #include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/ext/extension-registry.h"
+#include "hphp/runtime/ext/std/ext_std_errorfunc.h"
+#include "hphp/runtime/ext/std/ext_std_function.h"
+#include "hphp/runtime/ext/std/ext_std_misc.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/system/constants.h"
 #include "hphp/util/process.h"
-#include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/util/timer.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -52,27 +58,20 @@ namespace HPHP {
 const StaticString s_SLASH_TMP("/tmp");
 const StaticString s_ZEND_VERSION("2.4.99");
 
-const int64_t k_INFO_GENERAL       = (1<<0);
-const int64_t k_INFO_CREDITS       = (1<<0);
-const int64_t k_INFO_CONFIGURATION = (1<<0);
-const int64_t k_INFO_MODULES       = (1<<0);
-const int64_t k_INFO_ENVIRONMENT   = (1<<0);
-const int64_t k_INFO_VARIABLES     = (1<<0);
-const int64_t k_INFO_LICENSE       = (1<<0);
-const int64_t k_INFO_ALL           = 0x7FFFFFFF;
-
 const int64_t k_ASSERT_ACTIVE      = 1;
 const int64_t k_ASSERT_CALLBACK    = 2;
 const int64_t k_ASSERT_BAIL        = 3;
 const int64_t k_ASSERT_WARNING     = 4;
 const int64_t k_ASSERT_QUIET_EVAL  = 5;
+const int64_t k_ASSERT_EXCEPTION   = 6;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 struct OptionData final : RequestEventHandler {
   void requestInit() override {
-    assertActive = RuntimeOption::AssertActive ? 1 : 0;
-    assertWarning = RuntimeOption::AssertWarning ? 1 : 0;
+    assertActive = 1;
+    assertException = 0;
+    assertWarning = 1;
     assertBail = 0;
     assertQuietEval = false;
   }
@@ -81,7 +80,12 @@ struct OptionData final : RequestEventHandler {
     assertCallback.unset();
   }
 
+  void vscan(IMarker& mark) const override {
+    mark(assertCallback);
+  }
+
   int assertActive;
+  int assertException;
   int assertWarning;
   int assertBail;
   bool assertQuietEval;
@@ -91,6 +95,17 @@ struct OptionData final : RequestEventHandler {
 IMPLEMENT_STATIC_REQUEST_LOCAL(OptionData, s_option_data);
 
 /////////////////////////////////////////////////////////////////////////////
+
+void StandardExtension::requestInitOptions() {
+  IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
+    "assert.active", "1", &s_option_data->assertActive);
+  IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
+    "assert.exception", "0", &s_option_data->assertException);
+  IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
+    "assert.warning", "1", &s_option_data->assertWarning);
+  IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_ALL,
+    "assert.bail", "0", &s_option_data->assertBail);
+}
 
 static Variant HHVM_FUNCTION(assert_options,
                              int64_t what, const Variant& value /*=null */) {
@@ -119,6 +134,11 @@ static Variant HHVM_FUNCTION(assert_options,
     if (!value.isNull()) s_option_data->assertQuietEval = value.toBoolean();
     return Variant(oldValue);
   }
+  if (what == k_ASSERT_EXCEPTION) {
+    int oldValue = s_option_data->assertException;
+    if (!value.isNull()) s_option_data->assertException = value.toBoolean();
+    return Variant(oldValue);
+  }
   throw_invalid_argument("assert option %ld is not supported", (long)what);
   return false;
 }
@@ -140,19 +160,47 @@ static Variant eval_for_assert(ActRec* const curFP, const String& codeStr) {
     return Variant(true);
   }
 
+  if (!(curFP->func()->attrs() & AttrMayUseVV)) {
+    throw_not_supported("assert()",
+                        "assert called from non-varenv function");
+  }
+
   if (!curFP->hasVarEnv()) {
     curFP->setVarEnv(VarEnv::createLocal(curFP));
   }
   auto varEnv = curFP->getVarEnv();
 
-  auto const func = unit->getMain();
+  if (curFP != vmfp()) {
+    // If we aren't using FCallBuiltin, the stack frame of the call to assert
+    // will be in middle of the code we are about to eval and our caller, whose
+    // varEnv we want to use. The invokeFunc below will get very confused if
+    // this is the case, since it will be using a varEnv that belongs to the
+    // wrong function on the stack. So, we rebind it here, to match what
+    // invokeFunc will expect.
+    assert(!vmfp()->hasVarEnv());
+    vmfp()->setVarEnv(varEnv);
+    varEnv->enterFP(curFP, vmfp());
+  }
+
+  ObjectData* thiz = nullptr;
+  Class* cls = nullptr;
+  Class* ctx = curFP->func()->cls();
+  if (ctx) {
+    if (curFP->hasThis()) {
+      thiz = curFP->getThis();
+      cls = thiz->getVMClass();
+    } else {
+      cls = curFP->getClass();
+    }
+  }
+  auto const func = unit->getMain(ctx);
   TypedValue retVal;
   g_context->invokeFunc(
     &retVal,
     func,
     init_null_variant,
-    nullptr,
-    nullptr,
+    thiz,
+    cls,
     varEnv,
     nullptr,
     ExecutionContext::InvokePseudoMain
@@ -193,15 +241,25 @@ static Variant impl_assert(const Variant& assertion,
     ai.append(assertion.isString() ? assertion : empty_string_variant_ref);
     HHVM_FN(call_user_func)(s_option_data->assertCallback, ai.toArray());
   }
-  String name(message.isNull() ? "Assertion" : message.toString());
+  if (s_option_data->assertException) {
+    if (message.isObject()) {
+      Object exn = message.toObject();
+      if (exn.instanceof(SystemLib::s_AssertionErrorClass)) {
+        throw_object(exn);
+      }
+    }
+
+    SystemLib::throwExceptionObject(message.toString());
+  }
   if (s_option_data->assertWarning) {
+    String name(message.isNull() ? "Assertion" : message.toString());
     auto const str = !assertion.isString()
       ? " failed"
       : concat3(" \"",  assertion.toString(), "\" failed");
-    raise_warning("%s%s", name.data(),  str.data());
+    raise_warning("assert(): %s%s", name.data(),  str.data());
   }
   if (s_option_data->assertBail) {
-    throw ExtendedException("An assertion was raised.");
+    throw ExitException(1);
   }
 
   return init_null();
@@ -223,20 +281,24 @@ static int64_t HHVM_FUNCTION(dl, const String& library) {
 }
 
 static bool HHVM_FUNCTION(extension_loaded, const String& name) {
-  return Extension::IsLoaded(name);
+  return ExtensionRegistry::isLoaded(name);
 }
 
 static Array HHVM_FUNCTION(get_loaded_extensions,
                            bool zend_extensions /*=false */) {
-  return Extension::GetLoadedExtensions();
+  return ExtensionRegistry::getLoaded();
 }
 
-static Array HHVM_FUNCTION(get_extension_funcs,
-                           const String& module_name) {
-  // TODO Have loadSystemlib() or Native::registerBuiltinFunction
-  // track this for us so that we can support this here and
-  // in ReflectionExtesion
-  throw_not_supported(__func__, "extensions are built differently");
+static Variant HHVM_FUNCTION(get_extension_funcs, const String& module_name) {
+  auto extension = ExtensionRegistry::get(module_name);
+  if (!extension) return Variant(false);
+
+  auto const& fns = extension->getExtensionFunctions();
+  PackedArrayInit result(fns.size());
+  for (auto const& fn : fns) {
+    result.append(Variant(fn));
+  }
+  return result.toVariant();
 }
 
 static Variant HHVM_FUNCTION(get_cfg_var, const String& option) {
@@ -244,20 +306,23 @@ static Variant HHVM_FUNCTION(get_cfg_var, const String& option) {
 }
 
 static String HHVM_FUNCTION(get_current_user) {
+#ifdef _MSC_VER
+  return Process::GetCurrentUser();
+#else
   int pwbuflen = sysconf(_SC_GETPW_R_SIZE_MAX);
   if (pwbuflen < 1) {
     return empty_string();
   }
-  char *pwbuf = (char*)smart_malloc(pwbuflen);
+  char *pwbuf = (char*)req::malloc_noptrs(pwbuflen);
+  SCOPE_EXIT { req::free(pwbuf); };
   struct passwd pw;
   struct passwd *retpwptr = NULL;
   if (getpwuid_r(getuid(), &pw, pwbuf, pwbuflen, &retpwptr) != 0) {
-    smart_free(pwbuf);
     return empty_string();
   }
   String ret(pw.pw_name, CopyString);
-  smart_free(pwbuf);
   return ret;
+#endif
 }
 
 static Array HHVM_FUNCTION(get_defined_constants, bool categorize /*=false */) {
@@ -283,7 +348,7 @@ static String HHVM_FUNCTION(set_include_path, const Variant& new_include_path) {
 static Array HHVM_FUNCTION(get_included_files) {
   PackedArrayInit pai(g_context->m_evaledFilesOrder.size());
   for (auto& file : g_context->m_evaledFilesOrder) {
-    pai.append(const_cast<StringData*>(file));
+    pai.append(Variant{const_cast<StringData*>(file)});
   }
   return pai.toArray();
 }
@@ -526,7 +591,7 @@ static int parse_opts(const char * opts, int opts_len, opt_struct **result) {
     }
   }
 
-  opt_struct *paras = (opt_struct *)smart_malloc(sizeof(opt_struct) * count);
+  opt_struct *paras = req::make_raw_array<opt_struct>(count);
   memset(paras, 0, sizeof(opt_struct) * count);
   *result = paras;
   while ((*opts >= 48 && *opts <= 57) ||  /* 0 - 9 */
@@ -558,8 +623,8 @@ static Array HHVM_FUNCTION(getopt, const String& options,
 
     /* the first <len> slots are filled by the one short ops
      * we now extend our array and jump to the new added structs */
-    opts = (opt_struct *)smart_realloc(
-      opts, sizeof(opt_struct) * (len + count + 1));
+    opts =
+      (opt_struct *)req::realloc(opts, sizeof(opt_struct) * (len + count + 1));
     orig_opts = opts;
     opts += len;
 
@@ -583,7 +648,7 @@ static Array HHVM_FUNCTION(getopt, const String& options,
       opts++;
     }
   } else {
-    opts = (opt_struct*) smart_realloc(opts, sizeof(opt_struct) * (len + 1));
+    opts = (opt_struct*) req::realloc(opts, sizeof(opt_struct) * (len + 1));
     orig_opts = opts;
     opts += len;
   }
@@ -596,7 +661,7 @@ static Array HHVM_FUNCTION(getopt, const String& options,
   static const StaticString s_argv("argv");
   Array vargv = php_global(s_argv).toArray();
   int argc = vargv.size();
-  char **argv = (char **)smart_malloc((argc+1) * sizeof(char*));
+  char **argv = (char **)req::malloc((argc+1) * sizeof(char*));
   std::vector<String> holders;
   int index = 0;
   for (ArrayIter iter(vargv); iter; ++iter) {
@@ -615,8 +680,8 @@ static Array HHVM_FUNCTION(getopt, const String& options,
 
   SCOPE_EXIT {
     free_longopts(orig_opts);
-    smart_free(orig_opts);
-    smart_free(argv);
+    req::free(orig_opts);
+    req::free(argv);
   };
 
   Array ret = Array::Create();
@@ -767,8 +832,8 @@ static bool HHVM_FUNCTION(clock_getres,
 #else
   struct timespec ts;
   int ret = clock_getres(clk_id, &ts);
-  sec = (int64_t)ts.tv_sec;
-  nsec = (int64_t)ts.tv_nsec;
+  sec.assignIfRef((int64_t)ts.tv_sec);
+  nsec.assignIfRef((int64_t)ts.tv_nsec);
   return ret == 0;
 #endif
 }
@@ -777,8 +842,8 @@ static bool HHVM_FUNCTION(clock_gettime,
                           int64_t clk_id, VRefParam sec, VRefParam nsec) {
   struct timespec ts;
   int ret = gettime(clk_id, &ts);
-  sec = (int64_t)ts.tv_sec;
-  nsec = (int64_t)ts.tv_nsec;
+  sec.assignIfRef((int64_t)ts.tv_sec);
+  nsec.assignIfRef((int64_t)ts.tv_nsec);
   return ret == 0;
 }
 
@@ -832,31 +897,31 @@ Variant HHVM_FUNCTION(ini_set,
 }
 
 static int64_t HHVM_FUNCTION(memory_get_allocation) {
-  auto const& stats = MM().getStats();
-  int64_t ret = stats.totalAlloc;
-  assert(ret >= 0);
-  return ret;
+  auto total = MM().getStats().totalAlloc;
+  assert(total >= 0);
+  return total;
 }
 
 static int64_t HHVM_FUNCTION(hphp_memory_get_interval_peak_usage,
                              bool real_usage /*=false */) {
-  auto const& stats = MM().getStats();
-  int64_t ret = real_usage ? stats.peakIntervalUsage : stats.peakIntervalAlloc;
+  auto const stats = MM().getStats();
+  int64_t ret = real_usage ? stats.peakIntervalUsage :
+                stats.peakIntervalCap;
   assert(ret >= 0);
   return ret;
 }
 
 static int64_t HHVM_FUNCTION(memory_get_peak_usage,
                              bool real_usage /*=false */) {
-  auto const& stats = MM().getStats();
-  int64_t ret = real_usage ? stats.peakUsage : stats.peakAlloc;
+  auto const stats = MM().getStats();
+  int64_t ret = real_usage ? stats.peakUsage : stats.peakCap;
   assert(ret >= 0);
   return ret;
 }
 
 static int64_t HHVM_FUNCTION(memory_get_usage, bool real_usage /*=false */) {
-  auto const& stats = MM().getStats();
-  int64_t ret = real_usage ? stats.usage : stats.alloc;
+  auto const stats = MM().getStats();
+  int64_t ret = real_usage ? stats.usage() : stats.capacity;
   // Since we don't always alloc and dealloc a shared structure from the same
   // thread it is possible that this can go negative when we are tracking
   // jemalloc stats.
@@ -876,13 +941,73 @@ String HHVM_FUNCTION(php_sapi_name) {
   return RuntimeOption::ExecutionMode;
 }
 
-const StaticString s_s("s");
-const StaticString s_r("r");
-const StaticString s_n("n");
-const StaticString s_v("v");
-const StaticString s_m("m");
+#ifdef _WIN32
+const char* php_get_edition_name(DWORD majVer, DWORD minVer);
+folly::Optional<String> php_get_windows_name();
+String php_get_windows_cpu();
+#endif
+
+const StaticString
+  s_s("s"),
+  s_r("r"),
+  s_n("n"),
+  s_v("v"),
+  s_m("m");
 
 Variant HHVM_FUNCTION(php_uname, const String& mode /*="" */) {
+#ifdef _WIN32
+  if (mode == s_s) {
+    return s_Windows_NT;
+  } else if (mode == s_r) {
+    DWORD dwVersion = GetVersion();
+    DWORD dwMajorVersion = (DWORD)(LOBYTE(LOWORD(dwVersion)));
+    DWORD dwMinorVersion = (DWORD)(HIBYTE(LOWORD(dwVersion)));
+    return folly::sformat("{}.{}", dwMajorVersion, dwMinorVersion);
+  } else if (mode == s_n) {
+    DWORD dwSize = MAX_COMPUTERNAME_LENGTH + 1;
+    char ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+
+    GetComputerName(ComputerName, &dwSize);
+    return String(ComputerName, dwSize, CopyString);
+  } else if (mode == s_v) {
+    DWORD dwVersion = GetVersion();
+    auto dwBuild = (DWORD)(HIWORD(dwVersion));
+    auto winVer = php_get_windows_name();
+    if (!winVer.hasValue()) {
+      return folly::sformat("build {}", dwBuild);
+    }
+    return folly::sformat("build {} ({})", dwBuild, winVer.value());
+  } else if (mode == s_m) {
+    return php_get_windows_cpu();
+  } else {
+    auto winVer = php_get_windows_name();
+
+    DWORD dwSize = MAX_COMPUTERNAME_LENGTH + 1;
+    char ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+    GetComputerName(ComputerName, &dwSize);
+
+    DWORD dwVersion = GetVersion();
+    DWORD dwMajorVersion = (DWORD)(LOBYTE(LOWORD(dwVersion)));
+    DWORD dwMinorVersion = (DWORD)(HIBYTE(LOWORD(dwVersion)));
+    DWORD dwBuild = (DWORD)(HIWORD(dwVersion));
+
+    if (dwMajorVersion == 6 && dwMinorVersion == 2 && winVer.hasValue()) {
+      if (strncmp(winVer.value().c_str(), "Windows 8.1", 11) == 0 ||
+          strncmp(winVer.value().c_str(), "Windows Server 2012 R2", 22) == 0) {
+        dwMinorVersion = 3;
+      }
+    }
+
+    return folly::sformat("Windows NT {} {}.{} build {} ({}) {}",
+      ComputerName,
+      dwMajorVersion,
+      dwMinorVersion,
+      dwBuild,
+      winVer.hasValue() ? winVer.value().c_str() : "unknown",
+      php_get_windows_cpu()
+    );
+  }
+#else
   struct utsname buf;
   if (uname((struct utsname *)&buf) == -1) {
     return init_null();
@@ -905,21 +1030,17 @@ Variant HHVM_FUNCTION(php_uname, const String& mode /*="" */) {
              buf.machine);
     return String(tmp_uname, CopyString);
   }
-}
-
-static bool HHVM_FUNCTION(phpinfo, int64_t what /*=0 */) {
-  g_context->write("HipHop\n");
-  return false;
+#endif
 }
 
 static Variant HHVM_FUNCTION(phpversion, const String& extension /*="" */) {
   Extension *ext;
 
   if (extension.empty()) {
-    return k_PHP_VERSION;
+    return get_PHP_VERSION();
   }
 
-  if ((ext = Extension::GetExtension(extension)) != nullptr &&
+  if ((ext = ExtensionRegistry::get(extension)) != nullptr &&
       strcmp(ext->getVersion(), NO_EXTENSION_VERSION_YET) != 0) {
     return ext->getVersion();
   }
@@ -950,9 +1071,15 @@ static void HHVM_FUNCTION(set_time_limit, int64_t seconds) {
 }
 
 String HHVM_FUNCTION(sys_get_temp_dir) {
+#ifdef WIN32
+  char buf[PATH_MAX];
+  auto len = GetTempPathA(PATH_MAX, buf);
+  return String(buf, len, CopyString);
+#else
   char *env = getenv("TMPDIR");
   if (env && *env) return String(env, CopyString);
   return s_SLASH_TMP;
+#endif
 }
 
 static String HHVM_FUNCTION(zend_version) {
@@ -1159,30 +1286,6 @@ Variant HHVM_FUNCTION(version_compare,
   return init_null();
 }
 
-static bool HHVM_FUNCTION(gc_enabled) {
-  return false;
-}
-
-static void HHVM_FUNCTION(gc_enable) {
-  if (RuntimeOption::EnableHipHopSyntax) {
-    raise_warning("HipHop currently does not support circular reference "
-                  "collection");
-  }
-}
-
-static void HHVM_FUNCTION(gc_disable) {
-  // we could raise a warning here, but gc_disable can be considered
-  // "successful" in that there's (still) no official GC after it's
-  // called ; and previous callers of gc_enable have already been warned.
-}
-
-static int64_t HHVM_FUNCTION(gc_collect_cycles) {
-  if (RuntimeOption::EnableHipHopSyntax) {
-    raise_warning("HipHop currently does not support circular reference "
-                  "collection");
-  }
-  return 0;
-}
 ///////////////////////////////////////////////////////////////////////////////
 
 void StandardExtension::initOptions() {
@@ -1212,6 +1315,7 @@ void StandardExtension::initOptions() {
   HHVM_FE(clock_gettime);
   HHVM_FE(cpu_get_count);
   HHVM_FE(cpu_get_model);
+  HHVM_FALIAS(ini_alter, ini_set);
   HHVM_FE(ini_get);
   HHVM_FE(ini_get_all);
   HHVM_FE(ini_restore);
@@ -1225,42 +1329,31 @@ void StandardExtension::initOptions() {
   HHVM_FE(hphp_memory_stop_interval);
   HHVM_FE(php_sapi_name);
   HHVM_FE(php_uname);
-  HHVM_FE(phpinfo);
   HHVM_FE(phpversion);
   HHVM_FE(putenv);
   HHVM_FE(set_time_limit);
   HHVM_FE(sys_get_temp_dir);
   HHVM_FE(zend_version);
   HHVM_FE(version_compare);
-  HHVM_FE(gc_enabled);
-  HHVM_FE(gc_enable);
-  HHVM_FE(gc_disable);
-  HHVM_FE(gc_collect_cycles);
 
-#define INFO(v) Native::registerConstant<KindOfInt64> \
-                  (makeStaticString("INFO_" #v), k_INFO_##v);
-  INFO(GENERAL);
-  INFO(CREDITS);
-  INFO(CONFIGURATION);
-  INFO(MODULES);
-  INFO(ENVIRONMENT);
-  INFO(VARIABLES);
-  INFO(LICENSE);
-  INFO(ALL);
-#undef INFO
+  HHVM_RC_INT(INFO_GENERAL, 1 << 0);
+  HHVM_RC_INT(INFO_CREDITS, 1 << 0);
+  HHVM_RC_INT(INFO_CONFIGURATION, 1 << 0);
+  HHVM_RC_INT(INFO_MODULES, 1 << 0);
+  HHVM_RC_INT(INFO_ENVIRONMENT, 1 << 0);
+  HHVM_RC_INT(INFO_VARIABLES, 1 << 0);
+  HHVM_RC_INT(INFO_LICENSE, 1 << 0);
+  HHVM_RC_INT(INFO_ALL, 0x7FFFFFFF);
 
-#define ASSERTCONST(v) Native::registerConstant<KindOfInt64> \
-                  (makeStaticString("ASSERT_" #v), k_ASSERT_##v);
-  ASSERTCONST(ACTIVE);
-  ASSERTCONST(CALLBACK);
-  ASSERTCONST(BAIL);
-  ASSERTCONST(WARNING);
-  ASSERTCONST(QUIET_EVAL);
-#undef ASSERTCONST
+  HHVM_RC_INT(ASSERT_ACTIVE, k_ASSERT_ACTIVE);
+  HHVM_RC_INT(ASSERT_CALLBACK, k_ASSERT_CALLBACK);
+  HHVM_RC_INT(ASSERT_BAIL, k_ASSERT_BAIL);
+  HHVM_RC_INT(ASSERT_WARNING, k_ASSERT_WARNING);
+  HHVM_RC_INT(ASSERT_QUIET_EVAL, k_ASSERT_QUIET_EVAL);
+  HHVM_RC_INT(ASSERT_EXCEPTION, k_ASSERT_EXCEPTION);
 
   loadSystemlib("std_options");
 }
-
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -3,7 +3,7 @@
 /* Gets information about the version and capabilities of the installed GD
  * library.
  */
-<<__Native>>
+<<__ParamCoerceModeFalse, __Native>>
 function gd_info(): array;
 
 /* The getimagesize() function will determine the size of any given image file
@@ -30,9 +30,9 @@ function getimagesizefromstring(string $filename,
 
 /* Returns the extension for the given IMAGETYPE_XXX constant.
  */
-<<__Native>>
+<<__ParamCoerceModeFalse, __Native>>
 function image_type_to_extension(int $imagetype,
-                                 bool $include_dot = true): string;
+                                 bool $include_dot = true): mixed;
 
 /* The image_type_to_mime_type() function will determine the Mime-Type for an
  * IMAGETYPE constant.
@@ -46,6 +46,25 @@ function image_type_to_mime_type(int $imagetype): string;
 function image2wbmp(resource $image,
                     string $filename = "",
                     int $threshold = -1): bool;
+
+/* Return an image containing the affine tramsformed src image, using
+ * an optional clipping area.
+ */
+<<__Native>>
+function imageaffine(resource $image,
+                     array $affine = [],
+                     array $clip = []): mixed;
+
+/* Concat two matrices.
+ */
+<<__Native>>
+function imageaffinematrixconcat(array $m1, array $m2): mixed;
+
+/* Return an image containing the affine tramsformed src image, using
+ * an optional clipping area.
+ */
+<<__Native>>
+function imageaffinematrixget(int $type, mixed $options = []): mixed;
 
 /* imagealphablending() allows for two different modes of drawing on truecolor
  * images. In blending mode, the alpha channel component of the color supplied
@@ -265,7 +284,7 @@ function imagecolortransparent(resource $image,
 /* Applies a convolution matrix on the image, using the given coefficient and
  * offset.
  */
-<<__Native>>
+<<__ParamCoerceModeFalse, __Native>>
 function imageconvolution(resource $image,
                           array $matrix,
                           float $div,
@@ -496,6 +515,17 @@ function imagecreatefromxpm(string $filename): mixed;
 function imagecreatetruecolor(int $width,
                               int $height): mixed;
 
+/* Crop an image using the given coordinates and size, x, y, width and height.
+ */
+<<__Native>>
+function imagecrop(resource $image, array $rect): mixed;
+
+/* Crop an image automatically using one of the available modes.
+ */
+<<__Native>>
+function imagecropauto(resource $image, int $mode = -1,
+                       float $threshold = 0.5, int $color = -1): mixed;
+
 /* This function is deprecated. Use combination of imagesetstyle() and
  * imageline() instead.
  */
@@ -521,6 +551,11 @@ function imageellipse(resource $image,
                       int $width,
                       int $height,
                       int $color): bool;
+
+/* Draws an ellipse centered at the specified coordinates.
+ */
+<<__Native>>
+function imageflip(resource $image, int $mode = -1): bool;
 
 /* Performs a flood fill starting at the given coordinate (top left is 0, 0)
  * with the given color in the image.
@@ -662,7 +697,7 @@ function imagegif(resource $image,
  * is set and the image is used as a JPEG image, the image is created as a
  * progressive JPEG.
  */
-<<__Native>>
+<<__Native("NumArgs")>>
 function imageinterlace(resource $image,
                         int $interlace = 0): mixed;
 
@@ -752,6 +787,13 @@ function imagerotate(resource $source_image,
 <<__Native>>
 function imagesavealpha(resource $image,
                         bool $saveflag): bool;
+
+/*
+ * imagescale - Scale an image using the given new width and height.
+ */
+<<__Native>>
+function imagescale(resource $img, int $newwidth, int $newheigh = -1,
+                               int $method = IMG_BILINEAR_FIXED): mixed;
 
 /* imagesetbrush() sets the brush image to be used by all line drawing
  * functions (such as imageline() and imagepolygon()) when drawing with the
@@ -911,8 +953,19 @@ function png2wbmp(string $pngname,
                   int $dest_width,
                   int $threshold): bool;
 
-/* imagepalettecopy() copies the palette from the source image to the destination image.
-*/
+/**
+ * imagepalettecopy() copies the palette from the source image
+ * to the destination image.
+ */
 <<__Native>>
 function imagepalettecopy(resource $dst,
-                            resource $src): mixed;
+                          resource $src): mixed;
+
+/**
+ * Sets the interpolation method, setting an interpolation method
+ * effects the rendering of various functions in GD,
+ * such as the imagerotate() function.
+ */
+<<__Native>>
+function imagesetinterpolation(resource $img,
+                               int $method = IMG_BILINEAR_FIXED): bool;

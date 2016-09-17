@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -48,6 +48,7 @@ struct TransRec {
   std::vector<Block>     blocks;
   std::vector<TransBCMapping>
                          bcMapping;
+  Annotations            annotations;
   std::string            funcName;
   SrcKey                 src;
   MD5                    md5;
@@ -58,12 +59,14 @@ struct TransRec {
   uint32_t               acoldLen;
   uint32_t               afrozenLen;
   Offset                 bcStart;
-  TransID                id;
+  TransID                id{kInvalidTransID};
   TransKind              kind;
+  bool                   hasLoop;
 
   TransRec() {}
 
   TransRec(SrcKey                      s,
+           TransID                     transID,
            TransKind                   _kind,
            TCA                         _aStart,
            uint32_t                    _aLen,
@@ -73,10 +76,24 @@ struct TransRec {
            uint32_t                    _afrozenLen,
            RegionDescPtr               region = RegionDescPtr(),
            std::vector<TransBCMapping> _bcMapping =
-             std::vector<TransBCMapping>());
+             std::vector<TransBCMapping>(),
+           Annotations&&               _annotations =
+             Annotations(),
+           bool                        _hasLoop = false);
 
+  bool isValid() const { return id != kInvalidTransID; }
   std::string print(uint64_t profCount) const;
   Offset bcPast() const;
+  void optimizeForMemory();
+
+private:
+  struct SavedAnnotation {
+    std::string   fileName;
+    uint64_t      offset;
+    uint32_t      length;
+  };
+  SavedAnnotation writeAnnotation(const Annotation& annotation,
+                                  bool compress = true);
 };
 
 } }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,6 +16,8 @@
 */
 
 #include "hphp/runtime/ext/std/ext_std_string.h"
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/zend-printf.h"
 
 namespace HPHP {
@@ -51,9 +53,8 @@ Variant HHVM_FUNCTION(wordwrap, const String& str, int64_t linewidth /* = 75 */,
   if (brklen == 1 && !cut) {
     auto new_sd = StringData::Make(str.get(), CopyString);
     new_sd->invalidateHash();
-    Variant ret = new_sd;
-    auto const bs = new_sd->bufferSlice();
-    char* newtext = bs.begin();
+    auto ret = Variant::attach(new_sd);
+    char* newtext = new_sd->mutableData();
     auto bc = brkstr[0];
     size_t current = 0, laststart = 0, lastspace = 0;
     for (; current < textlen; current++) {
@@ -133,12 +134,12 @@ Variant HHVM_FUNCTION(wordwrap, const String& str, int64_t linewidth /* = 75 */,
   // if it's not possible to reduce the output string's capacity by more
   // than 25%, then we can just return the string as is.
   size_t estShrinkCap =
-    MemoryManager::estimateSmartCap(sizeof(StringData) + s.size() + 1);
+    MemoryManager::estimateCap(sizeof(StringData) + s.size() + 1);
   if (estShrinkCap * 4 >= (size_t)s.capacity() * 3) {
     return s;
   }
   // reallocate into a smaller buffer so that we don't waste memory
-  return StringData::Make(s.get(), CopyString);
+  return Variant::attach(StringData::Make(s.get(), CopyString));
 }
 
 ///////////////////////////////////////////////////////////////////////////////

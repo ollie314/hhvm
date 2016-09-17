@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,8 +27,11 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-File* DataStreamWrapper::open(const String& filename, const String& mode,
-                              int options, const Variant& context) {
+req::ptr<File>
+DataStreamWrapper::open(const String& filename,
+                        const String& mode,
+                        int options,
+                        const req::ptr<StreamContext>& context) {
 
   // @todo: check allow_url_include?
 
@@ -116,7 +119,6 @@ File* DataStreamWrapper::open(const String& filename, const String& mode,
   }
   data = comma + 1;
   data_len -= 1;
-  std::unique_ptr<MemFile> file;
   String decoded;
 
   if (base64) {
@@ -128,9 +130,7 @@ File* DataStreamWrapper::open(const String& filename, const String& mode,
   } else {
     decoded = url_decode(data, data_len);
   }
-  file =
-    std::unique_ptr<MemFile>(newres<MemFile>(decoded.data(), decoded.size()));
-  return file.release();
+  return req::make<MemFile>(decoded.data(), decoded.size());
 }
 
 ///////////////////////////////////////////////////////////////////////////////

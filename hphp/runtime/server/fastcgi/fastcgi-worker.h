@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,8 +25,8 @@ namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class FastCGIServer;
-class FastCGITransportTraits;
+struct FastCGIServer;
+struct FastCGITransportTraits;
 
 /*
  * FastCGIJob is used by FastCGIServer to enqueue jobs once a request has
@@ -34,38 +34,37 @@ class FastCGITransportTraits;
  * the thread executing the request to read headers and POST data, as well as
  * send data back to the FastCGI client.
  */
-class FastCGIJob : public ServerJob {
-  friend class FastCGITransportTraits;
-public:
+struct FastCGIJob : public ServerJob {
   explicit FastCGIJob(std::shared_ptr<FastCGITransport> transport)
-    : m_transport(transport) {}
-  ~FastCGIJob() {}
+    : m_transport(transport)
+  {}
 
-  Transport* getTransport();
-
+  std::shared_ptr<FastCGITransport> getTransport() { return m_transport; }
   void getRequestStart(struct timespec *outReqStart);
 
 private:
-  std::shared_ptr<FastCGITransport> m_transport;
   struct timespec reqStart;
+  std::shared_ptr<FastCGITransport> m_transport;
 };
 
-class FastCGITransportTraits {
-public:
+struct FastCGITransportTraits {
   FastCGITransportTraits(std::shared_ptr<FastCGIJob> job,
-    void* context, int id);
-  ~FastCGITransportTraits();
+                         void* context,
+                         int id)
+    : m_server(reinterpret_cast<FastCGIServer*>(context))
+    , m_transport(job->getTransport())
+  {}
 
-  Server *getServer() const;
-  Transport *getTransport() const;
+  Server* getServer() const;
+  Transport* getTransport() const;
 
 private:
-  FastCGIServer *m_server;
+  FastCGIServer* m_server;
   std::shared_ptr<FastCGITransport> m_transport;
 };
 
-typedef ServerWorker<std::shared_ptr<FastCGIJob>,
-                     FastCGITransportTraits> FastCGIWorker;
+using FastCGIWorker = ServerWorker<std::shared_ptr<FastCGIJob>,
+                                   FastCGITransportTraits>;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -1,13 +1,43 @@
 DOMEntityReference
-
-Warning: DOMEntityReference::__construct() expects exactly 1 parameter, 0 given in %s/test/quick/builtin_extensions.inc on line 5
-object(DOMEntityReference)#1 (0) {
+object(DOMEntityReference)#1 (16) {
+  ["nodeName"]=>
+  string(3) "Foo"
+  ["nodeValue"]=>
+  NULL
+  ["nodeType"]=>
+  int(5)
+  ["parentNode"]=>
+  NULL
+  ["childNodes"]=>
+  string(22) "(object value omitted)"
+  ["firstChild"]=>
+  NULL
+  ["lastChild"]=>
+  NULL
+  ["previousSibling"]=>
+  NULL
+  ["nextSibling"]=>
+  NULL
+  ["attributes"]=>
+  NULL
+  ["ownerDocument"]=>
+  NULL
+  ["namespaceURI"]=>
+  NULL
+  ["prefix"]=>
+  string(0) ""
+  ["localName"]=>
+  NULL
+  ["baseURI"]=>
+  NULL
+  ["textContent"]=>
+  string(0) ""
 }
 
 Warning: Attempted to serialize unserializable builtin class DOMEntityReference in %s/test/quick/builtin_extensions.inc on line 8
 string(2) "N;"
 NULL
-array(22) {
+array(19) {
   [0]=>
   string(11) "__construct"
   [1]=>
@@ -45,27 +75,51 @@ array(22) {
   [17]=>
   string(11) "getNodePath"
   [18]=>
-  string(5) "__get"
-  [19]=>
-  string(5) "__set"
-  [20]=>
-  string(7) "__isset"
-  [21]=>
   string(11) "__debuginfo"
 }
 ================
 A_DOMEntityReference
-
-Warning: DOMEntityReference::__construct() expects exactly 1 parameter, 0 given in %s/test/quick/builtin_extensions.inc on line 23
-object(A_DOMEntityReference)#2 (1) {
+object(A_DOMEntityReference)#2 (17) {
   ["___x"]=>
   NULL
+  ["nodeName"]=>
+  string(3) "Foo"
+  ["nodeValue"]=>
+  NULL
+  ["nodeType"]=>
+  int(5)
+  ["parentNode"]=>
+  NULL
+  ["childNodes"]=>
+  string(22) "(object value omitted)"
+  ["firstChild"]=>
+  NULL
+  ["lastChild"]=>
+  NULL
+  ["previousSibling"]=>
+  NULL
+  ["nextSibling"]=>
+  NULL
+  ["attributes"]=>
+  NULL
+  ["ownerDocument"]=>
+  NULL
+  ["namespaceURI"]=>
+  NULL
+  ["prefix"]=>
+  string(0) ""
+  ["localName"]=>
+  NULL
+  ["baseURI"]=>
+  NULL
+  ["textContent"]=>
+  string(0) ""
 }
 
 Warning: Attempted to serialize unserializable builtin class A_DOMEntityReference in %s/test/quick/builtin_extensions.inc on line 26
 string(2) "N;"
 NULL
-array(22) {
+array(19) {
   [0]=>
   string(11) "__construct"
   [1]=>
@@ -103,11 +157,5 @@ array(22) {
   [17]=>
   string(11) "getNodePath"
   [18]=>
-  string(5) "__get"
-  [19]=>
-  string(5) "__set"
-  [20]=>
-  string(7) "__isset"
-  [21]=>
   string(11) "__debuginfo"
 }

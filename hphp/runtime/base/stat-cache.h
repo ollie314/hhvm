@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,26 +23,27 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include <tbb/concurrent_hash_map.h>
 
+#include "hphp/util/hash-map-typedefs.h"
 #include "hphp/util/lock.h"
-#include "hphp/runtime/base/smart-ptr.h"
+#include "hphp/runtime/base/atomic-shared-ptr.h"
+#include "hphp/runtime/base/atomic-countable.h"
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class StatCache {
- public:
+struct StatCache {
   struct Node;
-  typedef AtomicSmartPtr<Node> NodePtr;
+  typedef AtomicSharedPtr<Node> NodePtr;
   typedef tbb::concurrent_hash_map<std::string, NodePtr,
                                    stringHashCompare> NameNodeMap;
   typedef hphp_hash_map<int, NodePtr, int64_hash> WatchNodeMap;
 
-  class Node : public AtomicCountable {
-   public:
+  struct Node : AtomicCountable {
     typedef hphp_hash_map<std::string, NodePtr, string_hash> NameNodeMap;
     typedef hphp_hash_map<std::string, void*, string_hash> NameMap;
 

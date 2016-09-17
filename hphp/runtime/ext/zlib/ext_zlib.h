@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_ZLIB_H_
 #define incl_HPHP_EXT_ZLIB_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
 
 namespace HPHP {
@@ -71,12 +71,12 @@ Variant HHVM_FUNCTION(gzopen, const String& filename, const String& mode,
 bool HHVM_FUNCTION(gzclose, const Resource& zp);
 Variant HHVM_FUNCTION(gzread, const Resource& zp, int64_t length = 0);
 Variant HHVM_FUNCTION(gzseek, const Resource& zp, int64_t offset,
-                              int64_t whence = k_SEEK_SET);
+                              int64_t whence = SEEK_SET);
 Variant HHVM_FUNCTION(gztell, const Resource& zp);
 bool HHVM_FUNCTION(gzeof, const Resource& zp);
 bool HHVM_FUNCTION(gzrewind, const Resource& zp);
 Variant HHVM_FUNCTION(gzgetc, const Resource& zp);
-Variant HHVM_FUNCTION(gzgets, const Resource& zp, int64_t length = 1024);
+Variant HHVM_FUNCTION(gzgets, const Resource& zp, int64_t length = 0);
 Variant HHVM_FUNCTION(gzgetss, const Resource& zp, int64_t length = 0,
                             const String& allowable_tags = null_string);
 Variant HHVM_FUNCTION(gzpassthru, const Resource& zp);

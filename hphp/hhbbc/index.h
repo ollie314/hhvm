@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,7 +29,6 @@
 #include <folly/Hash.h>
 
 #include "hphp/util/either.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/repo-auth-type-array.h"
 #include "hphp/runtime/vm/type-constraint.h"
 
@@ -125,7 +124,7 @@ struct ClassInfo;
  *
  * These represent handles to program entities that may have variable
  * amounts of information.  For example, we may know the name of a
- * class in a res::Class, but not know for sure which php::Class
+ * class in a res::Class, but do not know for sure which php::Class
  * struct is actually associated with it.
  */
 namespace res {
@@ -165,6 +164,15 @@ struct Class {
    * Returns the name of this class.  Non-null guarantee.
    */
   SString name() const;
+
+  /*
+   * Whether this class could possibly be an interface or a trait.
+   *
+   * When returning false, it is known that this class is not an interface
+   * or a trait. When returning true, it's possible that this class is not
+   * an interface or trait but the system cannot tell.
+   */
+  bool couldBeInterfaceOrTrait() const;
 
   /*
    * Returns whether this type has the no override attribute, that is, if it
@@ -506,12 +514,13 @@ struct Index {
 
   /*
    * Lookup the best known type for a public static property, with a given
-   * class type and name type.
+   * class and name.
    *
    * This function will always return TInitGen before refine_public_statics has
    * been called, or if the AnalyzePublicStatics option is off.
    */
   Type lookup_public_static(Type cls, Type name) const;
+  Type lookup_public_static(borrowed_ptr<const php::Class>, SString name) const;
 
   /*
    * Returns whether a public static property is known to be immutable.  This
@@ -520,6 +529,14 @@ struct Index {
    */
   bool lookup_public_static_immutable(borrowed_ptr<const php::Class>,
                                       SString name) const;
+
+  /*
+   * Returns the computed vtable slot for the given class, if it's an interface
+   * that was given a vtable slot. No two interfaces implemented by the same
+   * class will share the same vtable slot. May return kInvalidSlot, if the
+   * given class isn't an interface or if it wasn't assigned a slot.
+   */
+  Slot lookup_iface_vtable_slot(borrowed_ptr<const php::Class>) const;
 
   /*
    * Refine the return type for a function, based on a round of
@@ -574,6 +591,12 @@ struct Index {
    */
   void refine_public_statics(const PublicSPropIndexer&);
 
+  /*
+   * Return true if the resolved function is an async
+   * function.
+   */
+  bool is_async_func(res::Func rfunc) const;
+
 private:
   Index(const Index&) = delete;
   Index& operator=(Index&&) = delete;
@@ -600,6 +623,10 @@ private:
  * how it is used.
  */
 struct PublicSPropIndexer {
+  explicit PublicSPropIndexer(borrowed_ptr<const Index> index)
+    : m_index(index)
+  {}
+
   /*
    * Called by the interpreter during analyze_func_collect when a
    * PublicSPropIndexer is active.  This function must be called anywhere the
@@ -612,7 +639,7 @@ struct PublicSPropIndexer {
    * This routine may be safely called concurrently by multiple analysis
    * threads.
    */
-  void merge(Type cls, Type name, Type val);
+  void merge(Context ctx, Type cls, Type name, Type val);
 
 private:
   friend struct Index;
@@ -634,6 +661,7 @@ private:
   using KnownMap = tbb::concurrent_hash_map<KnownKey,Type>;
 
 private:
+  borrowed_ptr<const Index> m_index;
   std::atomic<bool> m_everything_bad{false};
   UnknownMap m_unknown;
   KnownMap m_known;
