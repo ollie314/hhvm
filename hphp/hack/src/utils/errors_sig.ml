@@ -283,6 +283,7 @@ module type S = sig
   val generic_at_runtime : Pos.t -> unit
   val interface_with_partial_typeconst : Pos.t -> unit
   val multiple_xhp_category : Pos.t -> unit
+  val malformed_locl_cstr : Pos.t -> unit
   val not_abstract_without_typeconst : (Pos.t * string) -> unit
   val typeconst_depends_on_external_tparam : Pos.t -> Pos.t -> string -> unit
   val typeconst_assigned_tparam : Pos.t -> string -> unit
@@ -315,9 +316,11 @@ module type S = sig
   val unification_cycle : Pos.t -> string -> unit
   val eq_incompatible_types : Pos.t -> (Pos.t * string) list
     -> (Pos.t * string) list -> unit
+  val instanceof_always_false : Pos.t -> unit
+  val instanceof_always_true : Pos.t -> unit
 
   val to_json : Pos.absolute error_ -> Hh_json.json
-  val to_string : Pos.absolute error_ -> string
+  val to_string : ?indent:bool -> Pos.absolute error_ -> string
   val try_ : (unit -> 'a) -> (error -> 'a) -> 'a
   val try_with_error : (unit -> 'a) -> (unit -> 'a) -> 'a
   val try_add_err : Pos.t -> string -> (unit -> 'a) -> (unit -> 'a) -> 'a

@@ -125,8 +125,8 @@ let rec localize_with_env ~ety_env env (dty: decl ty) =
       begin match SMap.get x ety_env.substs with
       | Some x_ty ->
           let env = List.fold cstrl ~init:env ~f:(fun env (ck, ty) ->
-                let env, ty = localize ~ety_env env ty in
-                TGenConstraint.add_check_constraint_todo env r x ck ty x_ty) in
+          let env, ty = localize ~ety_env env ty in
+          TGenConstraint.add_check_constraint_todo env r x ck ty x_ty) in
           env, (ety_env, (Reason.Rinstantiate (fst x_ty, x, r), snd x_ty))
       | None ->
         (* If parameter is registered for bounds in the environment
@@ -214,23 +214,31 @@ and localize_ft ?(instantiate_tparams=true) ~ety_env env ft =
     let env, param = localize ~ety_env env param in
     env, (name, param)
   end in
-  let env, tparams = List.map_env env ft.ft_tparams
-      begin fun env (var, name, cstrl) ->
-        let env, cstrl = List.map_env env cstrl
-            (fun env (ck, ty) ->
-               let env, ty = localize ~ety_env env ty in
-               env, (ck, ty)) in
-        env, (var, name, cstrl)
+  let localize_tparam env (var, name, cstrl) =
+    let env, cstrl = List.map_env env cstrl begin fun env (ck, ty) ->
+      let env, ty = localize ~ety_env env ty in
+      env, (ck, ty)
     end in
-
+    env, (var, name, cstrl)
+  in
+  let env, tparams = List.map_env env ft.ft_tparams localize_tparam in
+  let env, locl_cstr = List.map_env env ft.ft_locl_cstr localize_tparam in
   let env, arity = match ft.ft_arity with
     | Fvariadic (min, (name, var_ty)) ->
        let env, var_ty = localize ~ety_env env var_ty in
        env, Fvariadic (min, (name, var_ty))
     | Fellipsis _ | Fstandard (_, _) as x -> env, x in
   let env, ret = localize ~ety_env env ft.ft_ret in
+  let env = List.fold_left locl_cstr ~init:env ~f:(fun env (_,(p,x),cstrl) ->
+    match SMap.get x substs with
+      | Some x_ty -> List.fold_left cstrl ~init:env ~f:begin fun env (ck, ty) ->
+          let r = Reason.Rwitness p in
+          TGenConstraint.add_check_constraint_todo env r x ck ty x_ty
+        end
+      | None -> env
+  ) in
   env, { ft with ft_arity = arity; ft_params = params;
-                 ft_ret = ret; ft_tparams = tparams }
+                 ft_ret = ret; ft_tparams = tparams; ft_locl_cstr = locl_cstr }
 
 let env_with_self env =
   {
@@ -250,11 +258,15 @@ let localize_generic_parameters_with_bounds
     ~ety_env (env:Env.env) (tparams:Nast.tparam list) =
   let env = Env.add_generic_parameters env tparams in
   let add_bound env ((_, (_,id), cstrl): Nast.tparam) =
-    List.fold_left cstrl ~init:env ~f:(fun env (ck, h) ->
+    List.fold_left cstrl ~init:env ~f:begin fun env (ck, h) ->
       let env, ty = localize env (Decl_hint.hint env.Env.decl_env h) ~ety_env in
       match ck with
       | Ast.Constraint_super -> Env.add_lower_bound env id ty
-      | Ast.Constraint_as    -> Env.add_upper_bound env id ty) in
+      | Ast.Constraint_eq    ->
+        let env = Env.add_upper_bound env id ty in
+        Env.add_lower_bound env id ty
+      | Ast.Constraint_as    -> Env.add_upper_bound env id ty
+    end in
   List.fold_left tparams ~f:add_bound ~init:env
 
 

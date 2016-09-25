@@ -14,16 +14,33 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/util/atomic-vector.h"
+#ifndef incl_HPHP_RUNTIME_VM_JIT_RELOCATION_PPC64_H_
+#define incl_HPHP_RUNTIME_VM_JIT_RELOCATION_PPC64_H_
 
-namespace HPHP {
+#include "hphp/runtime/vm/jit/relocation.h"
 
-std::vector<std::function<void()>> AtomicVectorInit::s_funcs;
+namespace HPHP { namespace jit { namespace ppc64 {
 
-void AtomicVectorInit::runAll() {
-  for (auto& func : s_funcs) {
-    func();
-  }
+void adjustForRelocation(RelocationInfo&) {
+  not_implemented();
+}
+void adjustForRelocation(RelocationInfo& rel, TCA srcStart, TCA srcEnd) {
+  not_implemented();
+}
+void adjustCodeForRelocation(RelocationInfo& rel, CGMeta& fixups) {
+  not_implemented();
+}
+void adjustMetaDataForRelocation(RelocationInfo&, AsmInfo*, CGMeta&) {
+  not_implemented();
+}
+void findFixups(TCA start, TCA end, CGMeta& fixups) {
+  not_implemented();
+}
+size_t relocate(RelocationInfo&, CodeBlock&, TCA, TCA, CGMeta&, TCA*) {
+  not_implemented();
+  return 0;
 }
 
-}
+}}}
+
+#endif

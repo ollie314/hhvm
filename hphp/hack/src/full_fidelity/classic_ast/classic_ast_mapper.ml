@@ -47,7 +47,7 @@ let f_tparams _env _node =
   []
 
 let f_ret env node = match (Syntax.syntax node) with
-  | SimpleTypeSpecifier c -> Some (happly_hint c)
+  | SimpleTypeSpecifier c -> Some (happly_hint c.simple_type_specifier)
   | _ ->
     (** TODO *)
     None
@@ -60,7 +60,7 @@ let f_body _env _node =
   []
 
 let hint _env node = match Syntax.syntax node with
-  | SimpleTypeSpecifier c -> Some (happly_hint c)
+  | SimpleTypeSpecifier c -> Some (happly_hint c.simple_type_specifier)
   | _ ->
       None
 
@@ -109,19 +109,22 @@ let f_params env node = match Syntax.syntax node with
 let functionDeclaration env node decl =
   let open Ast in
   match Syntax.syntax decl.function_declaration_header with
-  | FunctionDeclarationHeader header ->
+  | FunctionDeclarationHeader
+  { function_async; function_keyword; function_name;
+    function_type_parameter_list; function_left_paren; function_parameter_list;
+    function_right_paren; function_colon; function_type } ->
     let f_mode = f_mode env.mode in
-    let f_tparams = f_tparams env header.function_type_params in
-    let f_ret = f_ret env header.function_type in
-    let f_ret_by_ref = f_ret_by_ref env header.function_type in
-    let f_name = f_name env header.function_name in
-    let f_params = f_params env header.function_params in
+    let f_tparams = f_tparams env function_type_parameter_list in
+    let f_ret = f_ret env function_type in
+    let f_ret_by_ref = f_ret_by_ref env function_type in
+    let f_name = f_name env function_name in
+    let f_params = f_params env function_parameter_list in
     let f_body = f_body env decl.function_body in
     (** TODOs *)
     let f_user_attributes = [] in
     let f_fun_kind = Ast.FSync in
-    (* FIXME: Don't use the default tcopt *)
-    let f_namespace = Namespace_env.empty TypecheckerOptions.default in
+    (* FIXME: Don't use the default popt *)
+    let f_namespace = Namespace_env.empty ParserOptions.default in
     let f_span = pos node in
     {
       f_mode = f_mode;

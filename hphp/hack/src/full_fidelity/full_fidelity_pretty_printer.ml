@@ -202,45 +202,49 @@ let rec get_doc node =
   match syntax node with
   | Missing -> missing
   | Token x -> from_token x
-  | LiteralExpression x
-  | VariableExpression x
-  | QualifiedNameExpression x
-  | PipeVariableExpression x -> get_doc x
-  | Error x -> get_from_children x
+
   | SyntaxList x -> get_from_children x
+  | Error { error } -> get_doc error
+  | LiteralExpression x -> get_doc x.literal_expression
+  | VariableExpression x -> get_doc x.variable_expression
+  | QualifiedNameExpression x -> get_doc x.qualified_name_expression
+  | PipeVariableExpression x -> get_doc x.pipe_variable_expression
   | ListItem x -> (get_doc x.list_item) ^^^ (get_doc x.list_separator)
   | ScriptHeader x -> get_doc x.header_less_than ^^^
                       get_doc x.header_question ^^^
                       (x.header_language |> get_doc |> add_break)
   | Script x -> group_doc ( get_doc x.script_header
                      ^| get_doc x.script_declarations )
-  | ClassishDeclaration x ->
-    let attr = add_break (get_doc x.classish_attr) in
-
+  | ClassishDeclaration
+    { classish_attribute; classish_modifiers; classish_keyword;
+      classish_name; classish_type_parameter_list; classish_extends;
+      classish_extends_list; classish_implements; classish_implements_list;
+      classish_body } ->
+    let attr = add_break (get_doc classish_attribute) in
     let preface = group_doc (
-      get_doc x.classish_modifiers ^|
-      get_doc x.classish_token
+      get_doc classish_modifiers ^|
+      get_doc classish_keyword
     ) in
 
     let name_and_generics =
-      let name = get_doc x.classish_name in
-      let type_params = get_doc x.classish_type_params in
+      let name = get_doc classish_name in
+      let type_params = get_doc classish_type_parameter_list in
       group_doc (indent_doc name type_params indt)
     in
 
     let extends =
-      let extends_token = get_doc x.classish_extends in
-      let extends_list = get_doc x.classish_extends_list in
+      let extends_token = get_doc classish_extends in
+      let extends_list = get_doc classish_extends_list in
       group_doc (indent_doc extends_token extends_list indt)
     in
 
     let implements =
-      let implements_token = get_doc x.classish_implements in
-      let implements_list = get_doc x.classish_implements_list in
+      let implements_token = get_doc classish_implements in
+      let implements_list = get_doc classish_implements_list in
       group_doc (indent_doc implements_token implements_list indt)
     in
 
-    let body = get_doc x.classish_body in
+    let body = get_doc classish_body in
 
     (* TODO: Make this better *)
     attr ^^^
@@ -275,36 +279,39 @@ let rec get_doc node =
     let s = get_doc x.xhp_category_semicolon in
     c ^| l ^^^ s
   | XHPEnumType x ->
-    let e = get_doc x.xhp_enum_token in
+    let e = get_doc x.xhp_enum_keyword in
     let l = get_doc x.xhp_enum_left_brace in
     let v = get_doc x.xhp_enum_values in
     let r = get_doc x.xhp_enum_right_brace in
     group_doc (e ^| l ^| v ^| r)
-  | XHPClassAttributeDeclaration x ->
-    let attr = get_doc x.xhp_attr_token in
-    let attrs = get_doc x.xhp_attr_list in
-    let semi = get_doc x.xhp_attr_semicolon in
+  | XHPClassAttributeDeclaration
+    { xhp_attribute_keyword; xhp_attribute_list; xhp_attribute_semicolon } ->
+    let attr = get_doc xhp_attribute_keyword in
+    let attrs = get_doc xhp_attribute_list in
+    let semi = get_doc xhp_attribute_semicolon in
     group_doc (attr ^| attrs ^^^ semi)
-  | XHPClassAttribute x ->
-    let t = get_doc x.xhp_attr_decl_type in
-    let n = get_doc x.xhp_attr_decl_name in
-    let i = get_doc x.xhp_attr_decl_init in
-    let r = get_doc x.xhp_attr_decl_required in
+  | XHPClassAttribute
+    { xhp_attribute_decl_type; xhp_attribute_decl_name;
+      xhp_attribute_decl_initializer; xhp_attribute_decl_required } ->
+    let t = get_doc xhp_attribute_decl_type in
+    let n = get_doc xhp_attribute_decl_name in
+    let i = get_doc xhp_attribute_decl_initializer in
+    let r = get_doc xhp_attribute_decl_required in
     group_doc (t ^| n ^| i ^| r)
   | TraitUse x ->
-    let use = get_doc x.trait_use_token in
+    let use = get_doc x.trait_use_keyword in
     let name_list = get_doc x.trait_use_name_list in
     let semi = get_doc x.trait_use_semicolon in
     use ^| name_list ^^^ semi
   | RequireClause x ->
-    let r = get_doc x.require_token in
+    let r = get_doc x.require_keyword in
     let k = get_doc x.require_kind in
     let n = get_doc x.require_name in
     let s = get_doc x.require_semicolon in
     r ^| k ^| n ^^^ s
   | ConstDeclaration x ->
     let abstr = get_doc x.const_abstract in
-    let token = get_doc x.const_token in
+    let token = get_doc x.const_keyword in
     let ty = get_doc x.const_type_specifier in
     let lst = get_doc x.const_declarator_list in
     let semi = get_doc x.const_semicolon in
@@ -315,8 +322,8 @@ let rec get_doc node =
     group_doc (name ^| init)
   | TypeConstDeclaration x ->
     let abstr = get_doc x.type_const_abstract in
-    let const = get_doc x.type_const_const_token in
-    let type_ = get_doc x.type_const_type_token in
+    let const = get_doc x.type_const_keyword in
+    let type_ = get_doc x.type_const_type_keyword in
     let name = get_doc x.type_const_name in
     let type_constraint = get_doc x.type_const_type_constraint in
     let equal = get_doc x.type_const_equal in
@@ -329,7 +336,7 @@ let rec get_doc node =
       group_doc (type_spec ^^^ semicolon)
     )
   | EnumDeclaration x ->
-    let en = get_doc x.enum_enum in
+    let en = get_doc x.enum_keyword in
     let na = get_doc x.enum_name in
     let co = get_doc x.enum_colon in
     let ba = get_doc x.enum_base in
@@ -349,7 +356,7 @@ let rec get_doc node =
     (* TODO: What's the best way to ensure that there's a newline between the
     attribute and the alias declaration proper? *)
     let attr = get_doc x.alias_attribute_spec in
-    let a = get_doc x.alias_token in
+    let a = get_doc x.alias_keyword in
     let n = get_doc x.alias_name in
     let generic = get_doc x.alias_generic_parameter in
     let c = get_doc x.alias_constraint in
@@ -357,18 +364,20 @@ let rec get_doc node =
     let t = get_doc x.alias_type in
     let s = get_doc x.alias_semicolon in
     attr ^| a ^| n ^| generic ^| c ^| e ^| t ^^^ s
-  | PropertyDeclaration x ->
-    let m = get_doc x.prop_modifiers in
-    let t = get_doc x.prop_type in
-    let d = get_doc x.prop_declarators in
-    let s = get_doc x.prop_semicolon in
+  | PropertyDeclaration
+    { property_modifiers; property_type;
+      property_declarators; property_semicolon } ->
+    let m = get_doc property_modifiers in
+    let t = get_doc property_type in
+    let d = get_doc property_declarators in
+    let s = get_doc property_semicolon in
     m ^| t ^| d ^^^ s
-  | PropertyDeclarator x ->
-    let n = get_doc x.prop_name in
-    let i = get_doc x.prop_init in
+  | PropertyDeclarator { property_name; property_initializer } ->
+    let n = get_doc property_name in
+    let i = get_doc property_initializer in
     n ^| i
   | NamespaceDeclaration x ->
-    let t = get_doc x.namespace_token in
+    let t = get_doc x.namespace_keyword in
     let n = get_doc x.namespace_name in
     let b = get_doc x.namespace_body in
     t ^| n ^| b
@@ -378,7 +387,7 @@ let rec get_doc node =
     let right = get_doc x.namespace_right_brace in
     indent_block_no_space left body right indt |> add_break
   | NamespaceUseDeclaration x ->
-    let u = get_doc x.namespace_use in
+    let u = get_doc x.namespace_use_keyword in
     let k = get_doc x.namespace_use_kind in
     let c = get_doc x.namespace_use_clauses in
     let s = get_doc x.namespace_use_semicolon in
@@ -390,7 +399,7 @@ let rec get_doc node =
     let l = get_doc x.namespace_use_alias in
     k ^| n ^| a ^| l
   | NamespaceGroupUseDeclaration x ->
-    let u = get_doc x.namespace_group_use in
+    let u = get_doc x.namespace_group_use_keyword in
     let k = get_doc x.namespace_group_use_kind in
     let p = get_doc x.namespace_group_use_prefix in
     let l = get_doc x.namespace_group_use_left_brace in
@@ -404,35 +413,42 @@ let rec get_doc node =
       let body = x.function_body in
       let after_attr = handle_compound_inline_brace header body missing in
       group_doc (attr ^| after_attr)
-  | FunctionDeclarationHeader x ->
-    let preface = group_doc ( get_doc x.function_async
-                              ^| get_doc x.function_token) in
+  | FunctionDeclarationHeader
+    { function_async; function_keyword; function_name;
+      function_type_parameter_list; function_left_paren;
+      function_parameter_list; function_right_paren; function_colon;
+      function_type }
+   ->
+    let preface = group_doc ( get_doc function_async
+                              ^| get_doc function_keyword) in
     let name_and_generics =
-      let type_params = get_doc x.function_type_params in
-      let name = get_doc x.function_name in
+      let type_params = get_doc function_type_parameter_list in
+      let name = get_doc function_name in
       group_doc (indent_doc name type_params indt)
     in
     let parameters =
-      let left = get_doc x.function_left_paren in
-      let right = get_doc x.function_right_paren in
-      let params = get_doc x.function_params in
+      let left = get_doc function_left_paren in
+      let right = get_doc function_right_paren in
+      let params = get_doc function_parameter_list in
       indent_block_no_space left params right indt
     in
     let type_declaration =
-      let fun_colon = get_doc x.function_colon in
-      let fun_type = get_doc x.function_type in
+      let fun_colon = get_doc function_colon in
+      let fun_type = get_doc function_type in
       group_doc (fun_colon ^| fun_type)
     in
     group_doc (
       group_doc ( group_doc (preface ^| name_and_generics) ^^| parameters )
       ^| type_declaration
     )
-  | MethodishDeclaration x ->
-    let methodish_attr = get_doc x.methodish_attr in
-    let methodish_modifiers = get_doc x.methodish_modifiers in
-    let function_header = get_doc x.methodish_function_decl_header in
-    let body_node = x.methodish_function_body in
-    let semicolon = get_doc x.methodish_semicolon in
+  | MethodishDeclaration
+    { methodish_attribute; methodish_modifiers; methodish_function_decl_header;
+      methodish_function_body; methodish_semicolon } ->
+    let methodish_attr = get_doc methodish_attribute in
+    let methodish_modifiers = get_doc methodish_modifiers in
+    let function_header = get_doc methodish_function_decl_header in
+    let body_node = methodish_function_body in
+    let semicolon = get_doc methodish_semicolon in
     let before_body = group_doc (methodish_modifiers ^| function_header) in
     let after_attr =
       handle_compound_inline_brace before_body body_node missing in
@@ -442,12 +458,14 @@ let rec get_doc node =
     let decorator = get_doc x.decorated_expression_decorator in
     let expression = get_doc x.decorated_expression_expression in
     group_doc (decorator ^^^ expression)
-  | ParameterDeclaration x ->
-    let attr = get_doc x.param_attr in
-    let visibility = get_doc x.param_visibility in
-    let parameter_type = get_doc x.param_type in
-    let parameter_name = get_doc x.param_name in
-    let parameter_default = get_doc x.param_default in
+  | ParameterDeclaration
+    { param_attribute; param_visibility; param_type; param_name;
+      param_default } ->
+    let attr = get_doc param_attribute in
+    let visibility = get_doc param_visibility in
+    let parameter_type = get_doc param_type in
+    let parameter_name = get_doc param_name in
+    let parameter_default = get_doc param_default in
     group_doc
       ( attr ^| visibility ^| parameter_type ^| parameter_name
       ^| parameter_default )
@@ -481,35 +499,41 @@ let rec get_doc node =
     let semicolon = get_doc x.expr_statement_semicolon in
     (* semicolon always follows the last line *)
     body ^^^ semicolon |> group_doc |> add_break
-  | WhileStatement x ->
-    let keyword = get_doc x.while_keyword in
-    let left = get_doc x.while_left_paren in
-    let right = get_doc x.while_right_paren in
-    let condition = get_doc x.while_condition_expr in
+  | WhileStatement
+    { while_keyword; while_left_paren; while_condition; while_right_paren;
+      while_body } ->
+    let keyword = get_doc while_keyword in
+    let left = get_doc while_left_paren in
+    let condition = get_doc while_condition in
+    let right = get_doc while_right_paren in
     let left_part = group_doc (keyword ^^| left) in
     let start_block = indent_block_no_space left_part condition right indt in
-    handle_compound_brace_prefix_indent start_block x.while_body indt
+    handle_compound_brace_prefix_indent start_block while_body indt
     |> add_break
-  | IfStatement x ->
-    let keyword = get_doc x.if_keyword in
-    let left = get_doc x.if_left_paren in
-    let condition = get_doc x.if_condition_expr in
-    let right = get_doc x.if_right_paren in
-    let if_stmt = x.if_statement in
-    let elseif_clause = get_doc x.if_elseif_clauses in
-    let else_clause = get_doc x.if_else_clause in
+  | IfStatement
+    { if_keyword; if_left_paren; if_condition; if_right_paren; if_statement;
+      if_elseif_clauses; if_else_clause }->
+    let keyword = get_doc if_keyword in
+    let left = get_doc if_left_paren in
+    let condition = get_doc if_condition in
+    let right = get_doc if_right_paren in
+    let if_stmt = if_statement in
+    let elseif_clause = get_doc if_elseif_clauses in
+    let else_clause = get_doc if_else_clause in
     let left_part = group_doc (keyword ^^| left) in
     let start_block = indent_block_no_space left_part condition right indt in
     let if_statement =
       handle_compound_brace_prefix_indent start_block if_stmt indt in
     let if_statement = add_break if_statement in
     group_doc (if_statement ^| elseif_clause ^| else_clause)
-  | ElseifClause x ->
-    let keyword = get_doc x.elseif_keyword in
-    let left = get_doc x.elseif_left_paren in
-    let condition = get_doc x.elseif_condition_expr in
-    let right = get_doc x.elseif_right_paren in
-    let elif_statement_syntax = x.elseif_statement in
+  | ElseifClause
+    { elseif_keyword; elseif_left_paren; elseif_condition; elseif_right_paren;
+      elseif_statement }  ->
+    let keyword = get_doc elseif_keyword in
+    let left = get_doc elseif_left_paren in
+    let condition = get_doc elseif_condition in
+    let right = get_doc elseif_right_paren in
+    let elif_statement_syntax = elseif_statement in
     let left_part = group_doc (keyword ^^| left) in
     let start_block = indent_block_no_space left_part condition right indt in
     handle_compound_brace_prefix_indent start_block elif_statement_syntax indt
@@ -615,18 +639,24 @@ let rec get_doc node =
     let o = get_doc x.scope_resolution_operator in
     let n = get_doc x.scope_resolution_name in
     group_doc (q ^^^ o ^^^ n)
-  | MemberSelectionExpression x
-  | SafeMemberSelectionExpression x ->
-    let ob = get_doc x.member_object in
-    let op = get_doc x.member_operator in
-    let nm = get_doc x.member_name in
+  | MemberSelectionExpression
+    { member_object; member_operator; member_name } ->
+    let ob = get_doc member_object in
+    let op = get_doc member_operator in
+    let nm = get_doc member_name in
+    group_doc (ob ^^^ op ^^^ nm)
+  | SafeMemberSelectionExpression
+    { safe_member_object; safe_member_operator; safe_member_name } ->
+    let ob = get_doc safe_member_object in
+    let op = get_doc safe_member_operator in
+    let nm = get_doc safe_member_name in
     group_doc (ob ^^^ op ^^^ nm)
   | YieldExpression x ->
-    let y = get_doc x.yield_token in
+    let y = get_doc x.yield_keyword in
     let o = get_doc x.yield_operand in
     group_doc (y ^| o)
   | PrintExpression x ->
-    let t = get_doc x.print_token in
+    let t = get_doc x.print_keyword in
     let e = get_doc x.print_expr in
     group_doc (t ^| e)
   | CastExpression x ->
@@ -641,26 +671,31 @@ let rec get_doc node =
     let arrow = get_doc x.lambda_arrow in
     let body = get_doc x.lambda_body in
     group_doc (async ^| signature ^| arrow ^| body)
-  | LambdaSignature x ->
-    let left = get_doc x.lambda_left_paren in
-    let params = get_doc x.lambda_params in
-    let right = get_doc x.lambda_right_paren in
-    let colon = get_doc x.lambda_colon in
-    let ty = get_doc x.lambda_type in
+  | LambdaSignature
+    { lambda_left_paren; lambda_parameter_list; lambda_right_paren;
+      lambda_colon; lambda_type } ->
+    let left = get_doc lambda_left_paren in
+    let params = get_doc lambda_parameter_list in
+    let right = get_doc lambda_right_paren in
+    let colon = get_doc lambda_colon in
+    let ty = get_doc lambda_type in
     group_doc (left ^| params ^| right ^| colon ^| ty)
-  | AnonymousFunction x ->
-    let async = get_doc x.anonymous_async in
-    let fn = get_doc x.anonymous_function in
-    let left = get_doc x.anonymous_left_paren in
-    let params = get_doc x.anonymous_params in
-    let right = get_doc x.anonymous_right_paren in
-    let colon = get_doc x.anonymous_colon in
-    let return_type = get_doc x.anonymous_type in
+  | AnonymousFunction
+    { anonymous_async; anonymous_function; anonymous_left_paren;
+    anonymous_parameter_list; anonymous_right_paren; anonymous_colon;
+    anonymous_type; anonymous_use; anonymous_body } ->
+    let async = get_doc anonymous_async in
+    let fn = get_doc anonymous_function in
+    let left = get_doc anonymous_left_paren in
+    let params = get_doc anonymous_parameter_list in
+    let right = get_doc anonymous_right_paren in
+    let colon = get_doc anonymous_colon in
+    let return_type = get_doc anonymous_type in
     let preface = group_doc ( async ^| fn ) in
     let parameters = indent_block_no_space left params right indt in
     let type_declaration = group_doc (colon ^| return_type) in
-    let uses = get_doc x.anonymous_use in
-    let body = x.anonymous_body in
+    let uses = get_doc anonymous_use in
+    let body = anonymous_body in
     let before_body =
       group_doc (
         group_doc ( group_doc preface ^^| parameters )
@@ -668,19 +703,20 @@ let rec get_doc node =
       ) in
       handle_compound_inline_brace before_body body missing
   | AnonymousFunctionUseClause x ->
-    let u = get_doc x.anonymous_use_token in
+    let u = get_doc x.anonymous_use_keyword in
     let l = get_doc x.anonymous_use_left_paren in
     let v = get_doc x.anonymous_use_variables in
     let r = get_doc x.anonymous_use_right_paren in
     u ^| l ^^^ v ^^^ r
-  | PrefixUnaryOperator x ->
-    let op = x.unary_operator in
-    if is_separable_prefix op then
-      get_doc op ^| get_doc x.unary_operand
+  | PrefixUnaryOperator
+    { prefix_unary_operator; prefix_unary_operand } ->
+    if is_separable_prefix prefix_unary_operator then
+      get_doc prefix_unary_operator ^| get_doc prefix_unary_operand
     else
-      get_doc op ^^^ get_doc x.unary_operand
-  | PostfixUnaryOperator x ->
-    get_doc x.unary_operand ^^^ get_doc x.unary_operator
+      get_doc prefix_unary_operator ^^^ get_doc prefix_unary_operand
+  | PostfixUnaryOperator
+    { postfix_unary_operand; postfix_unary_operator } ->
+    get_doc postfix_unary_operand ^^^ get_doc postfix_unary_operator
   | BinaryOperator x ->
     let left = get_doc x.binary_left_operand in
     let op = get_doc x.binary_operator in
@@ -715,11 +751,12 @@ let rec get_doc node =
     let right = get_doc x.braced_expr_right_brace in
     let expr = get_doc x.braced_expr in
     indent_block_no_space left expr right indt
-  | ListExpression x ->
-    let keyword = get_doc x.listlike_keyword in
-    let left_paren = get_doc x.listlike_left_paren in
-    let right_paren = get_doc x.listlike_right_paren in
-    let members = get_doc x.listlike_members in
+  | ListExpression
+    { list_keyword; list_left_paren; list_members; list_right_paren } ->
+    let keyword = get_doc list_keyword in
+    let left_paren = get_doc list_left_paren in
+    let members = get_doc list_members in
+    let right_paren = get_doc list_right_paren in
     let left = group_doc (keyword ^| left_paren) in
     indent_block_no_space left members right_paren indt
   | CollectionLiteralExpression x ->
@@ -735,16 +772,20 @@ let rec get_doc node =
     let a = get_doc x.object_creation_arguments in
     let r = get_doc x.object_creation_rparen in
     n ^| c ^^^ l ^^^ a ^^^ r
-  | FieldInitializer x ->
-    let n = get_doc x.field_init_name in
-    let a = get_doc x.field_init_arrow in
-    let v = get_doc x.field_init_value in
+  | FieldInitializer
+    { field_initializer_name; field_initializer_arrow;
+      field_initializer_value }->
+    let n = get_doc field_initializer_name in
+    let a = get_doc field_initializer_arrow in
+    let v = get_doc field_initializer_value in
     n ^| a ^| v
-  | ShapeExpression x ->
-    let sh = get_doc x.shape_shape in
-    let lp = get_doc x.shape_left_paren in
-    let fs = get_doc x.shape_fields in
-    let rp = get_doc x.shape_right_paren in
+  | ShapeExpression
+    { shape_expression_keyword; shape_expression_left_paren;
+      shape_expression_fields; shape_expression_right_paren } ->
+    let sh = get_doc shape_expression_keyword in
+    let lp = get_doc shape_expression_left_paren in
+    let fs = get_doc shape_expression_fields in
+    let rp = get_doc shape_expression_right_paren in
     sh ^| lp ^^^ fs ^^^ rp
   | ArrayCreationExpression x ->
     let left_bracket = get_doc x.array_creation_left_bracket in
@@ -778,15 +819,17 @@ let rec get_doc node =
     let expr = get_doc x.xhp_body in
     let right = get_doc x.xhp_close in
     left ^^^ expr ^^^ right
-  | XHPOpen x ->
-    let name = get_doc x.xhp_open_name in
-    let attrs = get_doc x.xhp_open_attrs in
-    let close = get_doc x.xhp_open_right_angle in
+  | XHPOpen
+    { xhp_open_name; xhp_open_attributes; xhp_open_right_angle } ->
+    let name = get_doc xhp_open_name in
+    let attrs = get_doc xhp_open_attributes in
+    let close = get_doc xhp_open_right_angle in
     group_doc (group_doc (indent_doc name attrs indt) ^| close)
-  | XHPAttribute x ->
-    let name = get_doc x.xhp_attr_name in
-    let equals = get_doc x.xhp_attr_equal in
-    let expr = get_doc x.xhp_attr_expr in
+  | XHPAttribute
+    { xhp_attribute_name; xhp_attribute_equal; xhp_attribute_expr }->
+    let name = get_doc xhp_attribute_name in
+    let equals = get_doc xhp_attribute_equal in
+    let expr = get_doc xhp_attribute_expr in
     group_doc (group_doc (name ^^| equals) ^^| expr)
   | XHPClose x ->
     let left = get_doc x.xhp_close_left_angle in
@@ -798,11 +841,11 @@ let rec get_doc node =
     let right = get_doc x.type_constant_right_type in
     let separator = get_doc x.type_constant_separator in
     left ^^^ separator ^^^ right
-  | SimpleTypeSpecifier x -> get_doc x
-  | TypeConstraint x ->
-    let operator = get_doc x.constraint_token in
-    let mtype = get_doc x.matched_type in
-    operator ^| mtype
+  | SimpleTypeSpecifier x -> get_doc x.simple_type_specifier
+  | TypeConstraint { constraint_keyword; constraint_type } ->
+    let k = get_doc constraint_keyword in
+    let t = get_doc constraint_type in
+    k ^| t
   | TypeParameter x ->
     let variance = get_doc x.type_variance_opt in
     let name = get_doc x.type_name in
@@ -855,11 +898,13 @@ let rec get_doc node =
     let a = get_doc x.field_arrow in
     let t = get_doc x.field_type in
     n ^| a ^| t
-  | ShapeTypeSpecifier x ->
-    let sh = get_doc x.shape_shape in
-    let lp = get_doc x.shape_left_paren in
-    let fs = get_doc x.shape_fields in
-    let rp = get_doc x.shape_right_paren in
+  | ShapeTypeSpecifier
+    { shape_type_keyword; shape_type_left_paren;
+      shape_type_fields; shape_type_right_paren } ->
+    let sh = get_doc shape_type_keyword in
+    let lp = get_doc shape_type_left_paren in
+    let fs = get_doc shape_type_fields in
+    let rp = get_doc shape_type_right_paren in
     sh ^| lp ^^^ fs ^^^ rp
   | TypeArguments x ->
     let left = get_doc x.type_arguments_left_angle in
@@ -919,18 +964,20 @@ let rec get_doc node =
     let ds = get_doc x.static_declarations in
     let se = get_doc x.static_semicolon in
     st ^| ds ^^^ se
-  | StaticDeclarator x ->
-    let n = get_doc x.static_name in
-    let i = get_doc x.static_init in
+  | StaticDeclarator
+    { static_name; static_initializer } ->
+    let n = get_doc static_name in
+    let i = get_doc static_initializer in
     group_doc (n ^| i)
   | EchoStatement x ->
-    let echo = get_doc x.echo_token in
+    let echo = get_doc x.echo_keyword in
     let expr_list = get_doc x.echo_expression_list in
     let semicolon = get_doc x.echo_semicolon in
     echo ^| expr_list ^^^ semicolon
-  | SimpleInitializer x ->
-    let e = get_doc x.simple_init_equal in
-    let v = get_doc x.simple_init_value in
+  | SimpleInitializer
+    { simple_initializer_equal; simple_initializer_value } ->
+    let e = get_doc simple_initializer_equal in
+    let v = get_doc simple_initializer_value in
     group_doc (e ^| v)
 
 (* sep is the compulsory separator separating the children in the list *)

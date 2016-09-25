@@ -71,7 +71,7 @@ let is_variadic node =
 let misplaced_variadic_param params =
   let is_variadic node =
     begin match syntax node with
-    | ParameterDeclaration { param_attr; param_visibility; param_type;
+    | ParameterDeclaration { param_attribute; param_visibility; param_type;
       param_name; param_default } ->
         is_variadic param_name
     | _ -> false
@@ -145,7 +145,7 @@ let rec containing_classish_kind parents =
   | h :: t ->
     begin
       match syntax h with
-      | ClassishDeclaration c -> token_kind c.classish_token
+      | ClassishDeclaration c -> token_kind c.classish_keyword
       | _ -> containing_classish_kind t
     end
 
@@ -204,7 +204,7 @@ let class_constructor_has_static node parents =
  *)
 let class_non_constructor_has_visibility_param node parents =
   let label = node.function_name in
-  let params = node.function_params in
+  let params = node.function_parameter_list in
   let has_visibility node =
     match syntax node with
     | ParameterDeclaration node ->
@@ -219,7 +219,7 @@ let class_non_constructor_has_visibility_param node parents =
  * and that the methodish containing it has non-empty parameters *)
 let class_destructor_has_param node parents =
   let label = node.function_name in
-  let param = node.function_params in
+  let param = node.function_parameter_list in
   (is_destruct label) && not (is_missing param)
 
 (* Given a function declaration header, confirm that it is a destructor
@@ -237,7 +237,7 @@ let class_constructor_destructor_has_non_void_type node parents =
   let is_missing = is_missing type_ano && is_missing function_colon in
   let is_void = match syntax type_ano with
     | SimpleTypeSpecifier spec ->
-      is_void spec
+      is_void spec.simple_type_specifier
     | _ -> false
   in
   (is_construct label || is_destruct label) &&
@@ -320,7 +320,7 @@ let switch_first_is_label compound =
 
 let rec parameter_type_is_required parents =
   match parents with
-  | h :: _ when is_function h -> true
+  | h :: _ when is_function_declaration h -> true
   | h :: _ when is_anonymous_function h -> false (* TODO: Lambda? *)
   | _ :: t -> parameter_type_is_required t
   | [] -> false
@@ -349,9 +349,10 @@ let xhp_errors node _parents =
    element names. *)
   match syntax node with
   |  XHPAttribute attr when
-    (is_bad_xhp_attribute_name (PositionedSyntax.text attr.xhp_attr_name)) ->
-      let s = start_offset attr.xhp_attr_name in
-      let e = end_offset attr.xhp_attr_name in
+    (is_bad_xhp_attribute_name
+    (PositionedSyntax.text attr.xhp_attribute_name)) ->
+      let s = start_offset attr.xhp_attribute_name in
+      let e = end_offset attr.xhp_attribute_name in
       [ SyntaxError.make s e SyntaxError.error2002 ]
   | _ -> [ ]
 
@@ -391,7 +392,7 @@ let methodish_errors node parents =
   (* TODO how to narrow the range of error *)
   | FunctionDeclarationHeader header ->
     let errors = [] in
-    let params = header.function_params in
+    let params = header.function_parameter_list in
     let type_ano = header.function_type in
     let errors =
       produce_error_for_header errors class_destructor_has_param node parents
@@ -471,10 +472,10 @@ let parameter_errors node parents is_strict =
       let s = start_offset node in
       let e = end_offset node in
       [ SyntaxError.make s e SyntaxError.error2001 ]
-  | FunctionDeclarationHeader { function_params; _ } ->
-    params_errors function_params
-  | AnonymousFunction { anonymous_params; _ } ->
-    params_errors anonymous_params
+  | FunctionDeclarationHeader { function_parameter_list; _ } ->
+    params_errors function_parameter_list
+  | AnonymousFunction { anonymous_parameter_list; _ } ->
+    params_errors anonymous_parameter_list
   | _ -> []
 
 let function_errors node _parents is_strict =
@@ -523,7 +524,7 @@ let statement_errors node parents =
 
 let property_errors node is_strict =
   match syntax node with
-  | PropertyDeclaration p when is_strict && is_missing (p.prop_type) ->
+  | PropertyDeclaration p when is_strict && is_missing (p.property_type) ->
       let s = start_offset node in
       let e = end_offset node in
       [ SyntaxError.make s e SyntaxError.error2001 ]
@@ -578,8 +579,8 @@ let type_errors node parents is_strict =
   match syntax node with
   | SimpleTypeSpecifier t ->
     let acc = [ ] in
-    produce_error acc (type_contains_array_in_strict is_strict) t
-    SyntaxError.error2032 t
+    produce_error acc (type_contains_array_in_strict is_strict)
+      t.simple_type_specifier SyntaxError.error2032 t.simple_type_specifier
   | _ -> [ ]
 
 let find_syntax_errors node is_strict =

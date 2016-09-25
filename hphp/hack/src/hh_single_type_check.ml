@@ -28,6 +28,7 @@ type mode =
   | Dump_inheritance
   | Dump_tast
   | Errors
+  | AllErrors
   | Lint
   | Suggest
   | Dump_deps
@@ -214,7 +215,8 @@ let die str =
   close_out oc;
   exit 2
 
-let error l = output_string stderr (Errors.to_string (Errors.to_absolute l))
+let error ?(indent=false) l =
+  output_string stderr (Errors.to_string ~indent (Errors.to_absolute l))
 
 let parse_options () =
   let fn_ref = ref None in
@@ -230,7 +232,10 @@ let parse_options () =
   let options = [
     "--ai",
       Arg.String (set_ai),
-      "Run the abstract interpreter";
+    "Run the abstract interpreter";
+    "--all-errors",
+      Arg.Unit (set_mode AllErrors),
+      "List all errors not just the first one";
     "--auto-complete",
       Arg.Unit (set_mode Autocomplete),
       "Produce autocomplete suggestions";
@@ -580,6 +585,11 @@ let handle_mode mode filename tcopt files_contents files_info errors =
       if errors <> []
       then (error (List.hd_exn errors); exit 2)
       else Printf.printf "No errors\n"
+  | AllErrors ->
+      let errors = check_errors tcopt errors files_info in
+      if errors <> []
+      then (List.iter ~f:(error ~indent:true) errors; exit 2)
+      else Printf.printf "No errors\n"
   | Dump_tast ->
       let pos_ty_map = ref Pos.Map.empty in
       Typing_hooks.attach_infer_ty_hook (Typed_ast.save_ty pos_ty_map);
@@ -615,13 +625,11 @@ let decl_and_run_mode {filename; mode; no_builtins} =
 
   let errors, files_info, _ = Errors.do_ begin fun () ->
     let parsed_files =
-      (* FIXME: Don't use default tcopt *)
       Relative_path.Map.mapi
-       (Parser_hack.program TypecheckerOptions.default) files_contents in
-    (* FIXME: Don't use default tcopt *)
+       Parser_hack.program_with_default_popt files_contents in
     let parsed_builtins =
-      Parser_hack.program
-        TypecheckerOptions.default builtins_filename builtins in
+      Parser_hack.program_with_default_popt
+        builtins_filename builtins in
     let parsed_files = Relative_path.Map.add parsed_files
       ~key:builtins_filename ~data:parsed_builtins in
 

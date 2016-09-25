@@ -89,6 +89,7 @@ namespace Trace {
       TM(tprefix)     /* Meta: prefix with string */  \
       TM(traceAsync)  /* Meta: lazy writes to disk */ \
       TM(asmx64)        \
+      TM(asmppc64)      \
       TM(atomicvector)  \
       TM(bcinterp)      \
       TM(bisector)      \
@@ -144,6 +145,7 @@ namespace Trace {
       TM(minstr)        \
       TM(mm)            \
       TM(objprof)       \
+      TM(perf_mem_event) \
       TM(pgo)           \
       TM(printir)       \
       TM(rat)           \

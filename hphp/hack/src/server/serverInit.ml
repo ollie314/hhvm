@@ -125,8 +125,11 @@ let load_state root saved_state_load_type cmd (_ic, oc) =
       Hh_json.get_bool_exn @@ List.Assoc.find_exn kv "is_cached" in
     let deptable_fn =
       Hh_json.get_string_exn @@ List.Assoc.find_exn kv "deptable" in
-    SharedMem.load_dep_table deptable_fn;
+    let read_deptable_time = SharedMem.load_dep_table deptable_fn in
     let end_time = Unix.gettimeofday () in
+    Hh_logger.log
+      "Reading the dependency file took (sec): %d" read_deptable_time;
+    HackEventLogger.load_deptable_end read_deptable_time;
     Daemon.to_channel oc @@ Ok (`Fst (state_fn, is_cached, end_time));
     let json = read_json_line ic in
     assert (Unix.close_process_in ic = Unix.WEXITED 0);
@@ -209,7 +212,7 @@ let parsing genv env ~get_next t =
       genv.workers
       Relative_path.Map.empty
       ~get_next
-      env.tcopt in
+      env.popt in
   let files_info = Relative_path.Map.union files_info env.files_info in
   let hs = SharedMem.heap_size () in
   Hh_logger.log "Heap size: %d" hs;
@@ -389,8 +392,6 @@ let init ?load_mini_script genv =
   let state_future = state_future >>= fun f ->
     with_loader_timeout timeout "wait_for_state" f
   in
-  HackEventLogger.load_mini_state_end t;
-  let t = Hh_logger.log_duration "Loading mini-state" t in
 
   let t = update_files genv env.files_info t in
   let env, t = naming env t in

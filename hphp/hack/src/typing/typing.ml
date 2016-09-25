@@ -408,6 +408,10 @@ and stmt env = function
   | If (e, b1, b2)  ->
       let env, ty = expr env e in
       Async.enforce_not_awaitable env (fst e) ty;
+      (* We stash away the locals environment because condition updates it
+       * locally for checking b1. For example, we might have condition
+       * $x === null, or $x instanceof C, which changes the type of $x in
+       * lenv *)
       let parent_lenv = env.Env.lenv in
       let env   = condition env true e in
       let env   = block env b1 in
@@ -466,7 +470,7 @@ and stmt env = function
       | _, Tunresolved _ ->
           (* we allow return types to grow for anonymous functions *)
           let env, rty = TUtils.unresolved env rty in
-          let env, _ = Type.unify pos Reason.URreturn env expected_return rty in
+          let env = Type.sub_type pos Reason.URreturn env rty expected_return in
           env
       | _, (Tany | Tmixed | Tarraykind _ | Toption _ | Tprim _
         | Tvar _ | Tfun _ | Tabstract (_, _) | Tclass (_, _) | Ttuple _
@@ -790,7 +794,6 @@ and eif env ~coalesce ~in_cond p c e1 e2 =
   let env, tyc = raw_expr in_cond env c in
   Async.enforce_not_awaitable env (fst c) tyc;
   let parent_lenv = env.Env.lenv in
-  let parent_locals = parent_lenv.Env.local_types in
   let c = if coalesce then (p, Binop (Ast.Diff2, c, (p, Null))) else c in
   let env = condition env true c in
   let env, ty1 = match e1 with
@@ -809,11 +812,7 @@ and eif env ~coalesce ~in_cond p c e1 e2 =
   (* we restore the locals to their parent state so as not to leak the
    * effects of the `condition` calls above *)
   let env = { env with Env.lenv =
-                         { Env.fake_members = fake_members;
-                           Env.local_types = parent_locals;
-                           Env.tpenv = parent_lenv.Env.tpenv
-                         }
-            } in
+              { parent_lenv with Env.fake_members = fake_members } } in
   (* This is a shortened form of what we do in Typing_lenv.intersect. The
    * latter takes local environments as arguments, but our types here
    * aren't assigned to local variables in an environment *)
@@ -913,7 +912,7 @@ and expr_
       (* '$this' always refers to the late bound static type *)
       env, ExprDepTy.make env CIstatic ty
   | Assert (AE_assert e) ->
-      let env = condition env true e in
+    let env = condition env true e in
       env, (Reason.Rwitness p, Tprim Tvoid)
   | True
   | False ->
@@ -1038,6 +1037,7 @@ and expr_
               ft_abstract = false;
               ft_arity = fun_arity;
               ft_tparams = fty.ft_tparams;
+              ft_locl_cstr = fty.ft_locl_cstr;
               ft_params = fty.ft_params;
               ft_ret = fty.ft_ret;
             } in
@@ -2104,7 +2104,9 @@ and dispatch_call p env call_type (fpos, fun_expr as e) el uel =
                 ft_pos = fty.ft_pos;
                 ft_deprecated = None;
                 ft_abstract = false;
-                ft_arity = Fstandard (arity, arity); ft_tparams = [];
+                ft_arity = Fstandard (arity, arity);
+                ft_tparams = [];
+                ft_locl_cstr = [];
                 ft_params = List.map vars (fun x -> (None, x));
                 ft_ret = tr;
               }
@@ -2447,7 +2449,7 @@ and array_get is_lvalue p env ty1 ety1 e2 ty2 =
               any, any
         in
         let env, ty2 = TUtils.unresolved env ty2 in
-        let env, _ = Type.unify p (Reason.index_class cn) env k ty2 in
+        let env = Type.sub_type p (Reason.index_class cn) env ty2 k in
         env, v
   (* Certain container/collection types are intended to be immutable/const,
    * thus they should never appear as a lvalue when indexing i.e.
@@ -2479,7 +2481,7 @@ and array_get is_lvalue p env ty1 ety1 e2 ty2 =
         | [ty] -> ty
         | _ -> arity_error id; Reason.Rwitness p, Tany in
       let ty1 = Reason.Ridx (fst e2, fst ety1), Tprim Tint in
-      let env, _ = Type.unify p (Reason.index_class cn) env ty2 ty1 in
+      let env = Type.sub_type p (Reason.index_class cn) env ty2 ty1 in
       env, ty
   | Tclass ((_, cn), _)
       when is_lvalue &&
@@ -2487,7 +2489,7 @@ and array_get is_lvalue p env ty1 ety1 e2 ty2 =
     error_const_mutation env p ety1
   | Tarraykind (AKmap (k, v)) ->
       let env, ty2 = TUtils.unresolved env ty2 in
-      let env, _ = Type.unify p Reason.index_array env k ty2 in
+      let env = Type.sub_type p Reason.index_array env ty2 k in
       env, v
   | Tarraykind ((AKshape  _ |  AKtuple _) as akind) ->
       let key = Typing_arrays.static_array_access env (Some e2) in
@@ -2504,7 +2506,7 @@ and array_get is_lvalue p env ty1 ety1 e2 ty2 =
             begin match Nast.ShapeMap.get field_name fdm with
               | Some (k, v) ->
                   let env, ty2 = TUtils.unresolved env ty2 in
-                  let env, _ = Type.unify p Reason.index_array env k ty2 in
+                  let env = Type.sub_type p Reason.index_array env ty2 k in
                   env, Some v
               | None -> env, None
             end
@@ -2521,9 +2523,8 @@ and array_get is_lvalue p env ty1 ety1 e2 ty2 =
   | Tany | Tarraykind (AKany | AKempty)-> env, (Reason.Rnone, Tany)
   | Tprim Tstring ->
       let ty = Reason.Rwitness p, Tprim Tstring in
-      let env, ty = Type.unify p Reason.URnone env ty1 ty in
       let int = Reason.Ridx (fst e2, fst ety1), Tprim Tint in
-      let env, _ = Type.unify p Reason.index_array env ty2 int in
+      let env = Type.sub_type p Reason.index_array env ty2 int in
       env, ty
   | Ttuple tyl ->
       (match e2 with
@@ -2844,7 +2845,7 @@ and obj_get_with_visibility ~is_method ~nullsafe env ty1
 
 (* k_lhs takes the type of the object receiver *)
 and obj_get_ ~is_method ~nullsafe env ty1 cid (p, s as id)
-             k k_lhs =
+    k k_lhs =
   let env, ety1 = Env.expand_type env ty1 in
   let default_case () =
     k begin
@@ -3348,7 +3349,9 @@ and unop p env uop ty =
       env, (Reason.Rlogic_ret p, Tprim Tbool)
   | Ast.Utild ->
       (* ~$x (bitwise not) only works with int *)
-      Type.unify p Reason.URnone env (Reason.Rarith p, Tprim Tint) ty
+      let env = Type.sub_type p Reason.URnone env ty
+        (Reason.Rarith p, Tprim Tint) in
+      env, (Reason.Rarith p, Tprim Tint)
   | Ast.Uincr
   | Ast.Upincr
   | Ast.Updecr
@@ -3478,9 +3481,9 @@ and binop in_cond p env bop p1 ty1 p2 ty2 =
       let env, ety2 = Env.expand_type env ty2 in
       (match ety1, ety2 with
       | (_, Tprim Tbool), _ | _, (_, Tprim Tbool) ->
-          let env, _ = Type.unify p Reason.URnone env ty1
+          let env = Type.sub_type p Reason.URnone env ty1
             (Reason.Rlogic_ret p1, Tprim Tbool) in
-          let env, _ = Type.unify p Reason.URnone env ty2
+          let env = Type.sub_type p Reason.URnone env ty2
             (Reason.Rlogic_ret p1, Tprim Tbool) in
           env, (Reason.Rlogic_ret p, Tprim Tbool)
       | (_, (Tany | Tmixed | Tarraykind _ | Toption _
@@ -3488,9 +3491,9 @@ and binop in_cond p env bop p1 ty1 p2 ty2 =
         | Ttuple _ | Tanon (_, _) | Tunresolved _ | Tobject | Tshape _
         )
         ), _ ->
-          let env, _ = Type.unify p Reason.URnone env ty1
+          let env = Type.sub_type p Reason.URnone env ty1
             (Reason.Rarith p1, Tprim Tint) in
-          let env, _ = Type.unify p Reason.URnone env ty2
+          let env = Type.sub_type p Reason.URnone env ty2
             (Reason.Rarith p1, Tprim Tint) in
           env, (Reason.Rarith_ret p, Tprim Tint)
       )
@@ -3680,14 +3683,74 @@ and condition env tparamet =
   | _, Unop (Ast.Unot, e) ->
       condition env (not tparamet) e
   | p, InstanceOf (ivar, cid) when tparamet && is_instance_var ivar ->
+      (* Check the expession and determine its static type *)
       let env, x_ty = expr env ivar in
       let env, x_ty = Env.expand_type env x_ty in
+
+      (* What is the local variable bound to the expression? *)
       let env, (ivar_pos, x) = get_instance_var env ivar in
-      let env = Env.set_local env x x_ty in
-      (* XXX the position p here is not really correct... it's the position
+
+      (* The position p here is not really correct... it's the position
        * of the instanceof expression, not the class id. But we don't store
        * position data for the latter. *)
       let env, obj_ty = static_class_id p env cid in
+
+      (* New implementation of instanceof that is statically safe *)
+      let safe_instanceof env obj_ty _c class_info =
+        (* Generate fresh names consisting of formal type parameter name
+         * with unique suffix *)
+        let env, tparams_with_new_names =
+          List.map_env env class_info.tc_tparams
+            (fun env ((_,(_,name),_) as tp) ->
+              let env, name = Env.add_fresh_generic_parameter env name in
+              env, (tp, name)) in
+        let s =
+            snd _c ^ "<" ^
+            String.concat "," (List.map tparams_with_new_names ~f:snd)
+            ^ ">" in
+        let reason = Reason.Rinstanceof (ivar_pos, s) in
+        let tyl_fresh = List.map
+            ~f:(fun (_,newname) -> (reason, Tabstract(AKgeneric newname, None)))
+            tparams_with_new_names in
+
+        (* Type of variable in block will be class name
+         * with fresh type parameters *)
+        let obj_ty = (fst obj_ty, Tclass(_c, tyl_fresh)) in
+
+        (* Add in constraints as assumptions on those type parameters *)
+        let ety_env = {
+          type_expansions = [];
+          substs = Subst.make class_info.tc_tparams tyl_fresh;
+          this_ty = obj_ty; (* In case `this` appears in constraints *)
+          from_class = None;
+        } in
+        let add_bounds env ((_, _, cstr_list), newname) =
+            List.fold_left cstr_list ~init:env ~f:begin fun env (ck, ty) ->
+              (* Substitute fresh type parameters for
+               * original formals in constraint *)
+              let env, ty = Phase.localize ~ety_env env ty in
+                match ck with
+                | Ast.Constraint_super -> Env.add_lower_bound env newname ty
+                | Ast.Constraint_as -> Env.add_upper_bound env newname ty
+                | Ast.Constraint_eq -> Env.add_upper_bound
+                    (Env.add_lower_bound env newname ty) newname ty
+              end in
+        let env =
+          List.fold_left tparams_with_new_names ~f:add_bounds ~init:env in
+
+        (* Finally, if we have a class-test on something with static class type,
+         * then we can chase the hierarchy and decompose the types to deduce
+         * further assumptions on type parameters. For example, we might have
+         *   class B<Tb> { ... }
+         *   class C extends B<int>
+         * and have obj_ty = C and x_ty = B<T> for a generic parameter T.
+         * Then decompose_subtype will deduce that T=int and add int as both
+         * lower and upper bound on T in env.lenv.tpenv
+         *)
+        let env = SubType.decompose_subtype env obj_ty x_ty
+            (fun env -> (*Errors.instanceof_always_false env.Env.pos;*) env) in
+        env, obj_ty in
+
       let rec resolve_obj env obj_ty =
         (* Expand so that we don't modify x *)
         let env, obj_ty = Env.expand_type env obj_ty in
@@ -3710,11 +3773,13 @@ and condition env tparamet =
           env, obj_ty
         | _, Tabstract ((AKdependent _ | AKnewtype _), Some ty) ->
           resolve_obj env ty
-        | _, Tclass ((_, cid as _c), _) ->
-          let class_ = Env.get_class env cid in
-          (match class_ with
-            | None -> env, (Reason.Rwitness ivar_pos, Tobject)
-            | Some _class ->
+        | _, Tclass ((_, cid as _c), tyl) ->
+          begin match Env.get_class env cid with
+            (* Why would this happen? *)
+            | None ->
+              env, (Reason.Rwitness ivar_pos, Tobject)
+
+            | Some class_info ->
               if SubType.is_sub_type env x_ty obj_ty
               then
                 (* If the right side of the `instanceof` object is
@@ -3730,8 +3795,17 @@ and condition env tparamet =
                  * of typing errors in partial mode (See also
                  * t3216948).  *)
                 env, x_ty
+              else
+                (* We only implement the safe instanceof in strict mode *)
+                (* Also: for generic types we implememt it only with
+                 * experimental feature enabled *)
+              if Env.is_strict env &&
+                 (tyl = [] || TypecheckerOptions.experimental_feature_enabled
+                   (Env.get_options env)
+                   TypecheckerOptions.experimental_instanceof)
+              then safe_instanceof env obj_ty _c class_info
               else env, obj_ty
-          )
+          end
         | r, Tunresolved tyl ->
           let env, tyl = List.map_env env tyl resolve_obj in
           env, (r, Tunresolved tyl)
@@ -3856,6 +3930,11 @@ and check_implements_tparaml (env: Env.env) ht =
           match ck with
           | Ast.Constraint_as ->
             ignore (Type.sub_type_decl p Reason.URnone env ty cstr)
+          | Ast.Constraint_eq ->
+            (* This code could well be unreachable, because we don't allow
+             * equality constraints on class generics. *)
+            ignore (Type.sub_type_decl p Reason.URnone env ty cstr);
+            ignore (Type.sub_type_decl p Reason.URnone env cstr ty)
           | Ast.Constraint_super ->
             ignore (Type.sub_type_decl p Reason.URnone env cstr ty)
         end
@@ -4118,9 +4197,10 @@ and method_def env m =
   Reason.expr_display_id_map := IMap.empty;
   Typing_hooks.dispatch_enter_method_def_hook m;
   let env = Env.env_with_locals env Local_id.Map.empty in
-  let env = Phase.localize_generic_parameters_with_bounds env m.m_tparams
+  let todo = m.m_tparams @ m.m_locl_cstrs in
+  let env = Phase.localize_generic_parameters_with_bounds env todo
     ~ety_env:({ (Phase.env_with_self env) with from_class = Some CIstatic; }) in
-  TI.check_tparams_instantiable env m.m_tparams;
+  TI.check_tparams_instantiable env todo;
   let env = Env.set_local env this (Env.get_self env) in
   let env, ret = match m.m_ret with
     | None -> env, (Reason.Rwitness (fst m.m_name), Tany)

@@ -117,7 +117,7 @@ module type Errors_modes = sig
   val to_list: 'a error_ -> 'a message list
   val to_absolute : error -> Pos.absolute error_
 
-  val to_string : Pos.absolute error_ -> string
+  val to_string : ?indent:bool -> Pos.absolute error_ -> string
 
   val get_sorted_error_list: error list * applied_fixme list -> error list
 
@@ -167,7 +167,7 @@ module NonTracingErrors: Errors_modes = struct
     let msg_l = List.map msg_l (fun (p, s) -> Pos.to_absolute p, s) in
     code, msg_l
 
-  let to_string (error : Pos.absolute error_) : string =
+  let to_string ?(indent=false) (error : Pos.absolute error_) : string =
     let error_code, msgl = (get_code error), (to_list error) in
     let buf = Buffer.create 50 in
     (match msgl with
@@ -177,9 +177,11 @@ module NonTracingErrors: Errors_modes = struct
           let error_code = Common.error_code_to_string error_code in
           Printf.sprintf "%s\n%s (%s)\n"
             (Pos.string pos1) msg1 error_code
-        end;
+      end;
+        let indentstr = if indent then "  " else "" in
         List.iter rest_of_error begin fun (p, w) ->
-          let msg = Printf.sprintf "%s\n%s\n" (Pos.string p) w in
+          let msg = Printf.sprintf "%s%s\n%s%s\n"
+              indentstr (Pos.string p) indentstr w in
           Buffer.add_string buf msg
         end
     );
@@ -255,7 +257,7 @@ module TracingErrors: Errors_modes = struct
     bt, code, msg_l
 
   (** TODO: Much of this is copy-pasta. *)
-  let to_string (error : Pos.absolute error_) : string =
+  let to_string ?(indent=false) (error : Pos.absolute error_) : string =
     let bt, error_code, msgl = (get_bt error),
       (get_code error), (to_list error) in
     let buf = Buffer.create 50 in
@@ -268,8 +270,10 @@ module TracingErrors: Errors_modes = struct
             (Pos.string pos1) (Printexc.raw_backtrace_to_string bt)
             msg1 error_code
         end;
+        let indentstr = if indent then "  " else "" in
         List.iter rest_of_error begin fun (p, w) ->
-          let msg = Printf.sprintf "%s\n%s\n" (Pos.string p) w in
+          let msg = Printf.sprintf "%s%s\n%s%s\n"
+              indentstr (Pos.string p) indentstr w in
           Buffer.add_string buf msg
         end
     );
@@ -492,6 +496,7 @@ module NastCheck                            = struct
   let constructor_required                  = 3030 (* DONT MODIFY!!!! *)
   let interface_with_partial_typeconst      = 3031 (* DONT MODIFY!!!! *)
   let multiple_xhp_category                 = 3032 (* DONT MODIFY!!!! *)
+  let malformed_locl_cstr                   = 3033 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
@@ -651,6 +656,8 @@ module Typing                               = struct
   let keyset_set                            = 4156 (* DONT MODIFY!!!! *)
   let eq_incompatible_types                 = 4157 (* DONT MODIFY!!!! *)
   let contravariant_this                    = 4158 (* DONT MODIFY!!!! *)
+  let instanceof_always_false               = 4159 (* DONT MODIFY!!!! *)
+  let instanceof_always_true                = 4160 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
@@ -1118,6 +1125,10 @@ let interface_with_partial_typeconst tconst_pos =
 let multiple_xhp_category pos =
   add NastCheck.multiple_xhp_category pos
     "XHP classes can only contain one category declaration"
+
+let malformed_locl_cstr pos =
+  add NastCheck.malformed_locl_cstr pos
+    "We currently only support a single generic on the LHS"
 
 let return_in_gen p =
   add NastCheck.return_in_gen p
@@ -1959,6 +1970,15 @@ let abstract_concrete_override pos parent_pos kind =
     pos, "Cannot re-declare this " ^ kind_str ^ " as abstract";
     parent_pos, "Previously defined here"
   ])
+
+let instanceof_always_false pos =
+  add Typing.instanceof_always_false pos
+    "This 'instanceof' test will never succeed"
+
+let instanceof_always_true pos =
+  add Typing.instanceof_always_true pos
+    "This 'instanceof' test will always succeed"
+
 
 (*****************************************************************************)
 (* Typing decl errors *)

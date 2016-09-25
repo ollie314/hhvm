@@ -158,8 +158,8 @@ let u_var_name (_pos, s) =
 let u_of_smap _ _ = u_todo "smap"  (fun () -> StrEmpty)
 
 let is_empty_ns ns =
-  (* FIXME: Don't use the default tcopt *)
-  if (ns = Namespace_env.empty TypecheckerOptions.default) then true else false
+  (* FIXME: Don't use the default popt *)
+  if (ns = Namespace_env.empty ParserOptions.default) then true else false
 
 let rec u_program v = u_of_list_spc u_def v
   and u_in_mode _ f = u_todo "mode" f
@@ -255,6 +255,7 @@ let rec u_program v = u_of_list_spc u_def v
   and u_constraint_kind =
     function
     | Constraint_as -> u_todo "as" (fun () -> StrEmpty)
+    | Constraint_eq -> u_todo "=" (fun () -> StrEmpty)
     | Constraint_super -> u_todo "super" (fun () -> StrEmpty)
   and u_tparam (v2, v3, v4) =
     u_todo "tparam"
@@ -440,6 +441,7 @@ let rec u_program v = u_of_list_spc u_def v
       m_tparams;
       m_name;
       m_params;
+      m_constrs = _;
       m_body;
       m_user_attributes;
       m_ret;

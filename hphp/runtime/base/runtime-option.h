@@ -604,8 +604,21 @@ struct RuntimeOption {
   F(uint32_t, ReusableTCPadding, 128)                                   \
   F(int64_t,  StressUnitCacheFreq, 0)                                   \
   F(int64_t, PerfWarningSampleRate, 1)                                  \
-  /* Profiling flags */                                                 \
-  F(bool, EnableReverseDataMap, false)                                  \
+  /* PPC64 Option: Minimum immediate size to use TOC */                 \
+  F(uint16_t, PPC64MinTOCImmSize, 64)                                   \
+  /********************                                                 \
+   | Profiling flags. |                                                 \
+   ********************/                                                \
+  /* Whether to maintain the address-to-VM-object mapping. */           \
+  F(bool, EnableReverseDataMap, true)                                   \
+  /* Turn on perf-mem-event sampling roughly every this many requests.  \
+   * To maintain the same overall sampling rate, the ratio between the  \
+   * request and sample frequencies should be kept constant. */         \
+  F(uint32_t, PerfMemEventRequestFreq, 0)                               \
+  /* Sample this many memory instructions per second.  This should be   \
+   * kept low to avoid the risk of collecting a sample while we're      \
+   * processing a previous sample. */                                   \
+  F(uint32_t, PerfMemEventSampleFreq, 80)                               \
   /* */
 
 private:

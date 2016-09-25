@@ -37,17 +37,17 @@ let get_rechecked_count (stats_ref, _) = !stats_ref.rechecked_count
 module MainInit : sig
   val go:
     ServerArgs.options ->
+    string ->
     (unit -> env) ->    (* init function to run while we have init lock *)
     env
 end = struct
   (* This code is only executed when the options --check is NOT present *)
-  let go options init_fun =
+  let go options init_id init_fun =
     let root = ServerArgs.root options in
     let t = Unix.gettimeofday () in
     Hh_logger.log "Initializing Server (This might take some time)";
     (* note: we only run periodical tasks on the root, not extras *)
     ServerIdle.init root;
-    let init_id = Random_id.short_string () in
     Hh_logger.log "Init id: %s" init_id;
     let env = HackEventLogger.with_id ~stage:`Init init_id init_fun in
     Hh_logger.log "Server is READY";
@@ -233,10 +233,10 @@ let recheck_loop = recheck_loop empty_recheck_loop_stats
 let serve_one_iteration genv env client_provider stats_refs =
   let last_stats, recheck_id = stats_refs in
   ServerMonitorUtils.exit_if_parent_dead ();
-  let has_client, has_persistent =
+  let client, has_persistent =
     ClientProvider.sleep_and_check client_provider env.persistent_client in
   let has_parsing_hook = !ServerTypeCheck.hook_after_parsing <> None in
-  if not has_persistent && not has_client && not has_parsing_hook
+  if not has_persistent && client = None && not has_parsing_hook
   then begin
     (* Ugly hack: We want GC_SHAREDMEM_RAN to record the last rechecked
      * count so that we can figure out if the largest reclamations
@@ -276,26 +276,19 @@ let serve_one_iteration genv env client_provider stats_refs =
   in
 
   last_stats := stats;
-  let env = if has_client then
-    (try
-      let client = ClientProvider.accept_client client_provider in
-      HackEventLogger.got_client_channels start_t;
-      (try
-        let env = handle_connection genv env client false in
-        HackEventLogger.handled_connection start_t;
-        env
-      with
-      | e ->
-        HackEventLogger.handle_connection_exception e;
-        Hh_logger.log "Handling client failed. Ignoring.";
-        env)
+  let env = match client with
+  | None -> env
+  | Some client -> begin
+    try
+      let env = handle_connection genv env client false in
+      HackEventLogger.handled_connection start_t;
+      env
     with
     | e ->
-      HackEventLogger.get_client_channels_exception e;
-      Hh_logger.log
-        "Getting Client FDs failed. Ignoring.";
-      env)
-  else env in
+      HackEventLogger.handle_connection_exception e;
+      Hh_logger.log "Handling client failed. Ignoring.";
+      env
+  end in
   if has_persistent then
     let client = Utils.unsafe_opt env.persistent_client in
     HackEventLogger.got_persistent_client_channels start_t;
@@ -348,6 +341,7 @@ let program_init genv =
   env
 
 let setup_server options handle =
+  let init_id = Random_id.short_string () in
   Hh_logger.log "Version: %s" Build_id.build_id_ohai;
   let root = ServerArgs.root options in
   (* The OCaml default is 500, but we care about minimizing the memory
@@ -360,11 +354,19 @@ let setup_server options handle =
     io_priority;
     enable_on_nfs;
     lazy_decl;
+    load_script_config;
     _
   } as local_config = local_config in
+  let saved_state_load_type =
+    LoadScriptConfig.saved_state_load_type_to_string load_script_config in
   if Sys_utils.is_test_mode ()
   then EventLogger.init (Daemon.devnull ()) 0.0
-  else HackEventLogger.init root (Unix.gettimeofday ()) lazy_decl;
+  else HackEventLogger.init
+    root
+    init_id
+    (Unix.gettimeofday ())
+    lazy_decl
+    saved_state_load_type;
   let root_s = Path.to_string root in
   if Sys_utils.is_nfs root_s && not enable_on_nfs then begin
     Hh_logger.log "Refusing to run on %s: root is on NFS!" root_s;
@@ -380,10 +382,10 @@ let setup_server options handle =
   Sys_utils.set_signal Sys.sigpipe Sys.Signal_ignore;
   PidLog.init (ServerFiles.pids_file root);
   PidLog.log ~reason:"main" (Unix.getpid());
-  ServerEnvBuild.make_genv options config local_config handle
+  ServerEnvBuild.make_genv options config local_config handle, init_id
 
 let run_once options handle =
-  let genv = setup_server options handle in
+  let genv, _ = setup_server options handle in
   if not (ServerArgs.check_mode genv.options) then
     (Hh_logger.log "ServerMain run_once only supported in check mode.";
     Exit_status.(exit Input_error));
@@ -404,16 +406,20 @@ let daemon_main_exn options (ic, oc) =
   let handle = SharedMem.init (ServerConfig.sharedmem_config config) in
   SharedMem.connect handle ~is_master:true;
 
-  let genv = setup_server options handle in
+  let genv, init_id = setup_server options handle in
   if ServerArgs.check_mode genv.options then
     (Hh_logger.log "Invalid program args - can't run daemon in check mode.";
     Exit_status.(exit Input_error));
-  let env = MainInit.go options (fun () -> program_init genv) in
+  let env = MainInit.go options init_id (fun () -> program_init genv) in
   serve genv env in_fd out_fd
 
 let daemon_main (state, options) (ic, oc) =
   (* Restore the root directory and other global states from monitor *)
   ServerGlobalState.restore state;
+  (* Restore hhi files every time the server restarts
+    in case the tmp folder changes *)
+  ignore (Hhi.get_hhi_root());
+
   try daemon_main_exn options (ic, oc)
   with
   | SharedMem.Out_of_shared_memory ->

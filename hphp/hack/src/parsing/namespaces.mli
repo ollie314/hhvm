@@ -12,4 +12,4 @@ val elaborate_id : Namespace_env.env ->
                    Ast.ns_kind ->
                    Ast.id ->
                    Ast.id
-val elaborate_defs : TypecheckerOptions.t -> Ast.program -> Ast.program
+val elaborate_defs : ParserOptions.t -> Ast.program -> Ast.program

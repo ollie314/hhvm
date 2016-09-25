@@ -28,6 +28,7 @@
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/member-reflection.h"
 #include "hphp/runtime/base/memory-manager.h"
+#include "hphp/runtime/base/perf-mem-event.h"
 #include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/base/plain-file.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -86,6 +87,7 @@
 #ifndef _MSC_VER
 #include "hphp/util/light-process.h"
 #endif
+#include "hphp/util/perf-event.h"
 #include "hphp/util/process-exec.h"
 #include "hphp/util/process.h"
 #include "hphp/util/service-data.h"
@@ -94,6 +96,7 @@
 #include "hphp/util/timer.h"
 #include "hphp/util/type-scan.h"
 
+#include <folly/Random.h>
 #include <folly/Range.h>
 #include <folly/Portability.h>
 #include <folly/Singleton.h>
@@ -2208,6 +2211,15 @@ void hphp_session_init() {
   g_context->requestInit();
   s_sessionInitialized = true;
   ExtensionRegistry::requestInit();
+
+  auto const pme_freq = RuntimeOption::EvalPerfMemEventRequestFreq;
+  if (pme_freq > 0 && folly::Random::rand32(pme_freq) == 0) {
+    // Enable memory access sampling for this request.
+    perf_event_enable(
+      RuntimeOption::EvalPerfMemEventSampleFreq,
+      [] (PerfEvent) { setSurpriseFlag(PendingPerfEventFlag); }
+    );
+  }
 }
 
 ExecutionContext *hphp_context_init() {
@@ -2366,6 +2378,11 @@ void hphp_session_exit() {
 
   TI().onSessionExit();
 
+  // We might have events from after the final surprise flag check of the
+  // request, so consume them here.
+  perf_event_consume(record_perf_mem_event);
+  perf_event_disable();
+
   {
     ServerStatsHelper ssh("rollback");
 
@@ -2392,6 +2409,7 @@ void hphp_process_exit() {
 #endif
   InitFiniNode::ProcessFini();
   folly::SingletonVault::singleton()->destroyInstances();
+  embedded_data_cleanup();
 }
 
 bool is_hphp_session_initialized() {

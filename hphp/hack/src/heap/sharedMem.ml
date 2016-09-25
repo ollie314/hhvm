@@ -141,7 +141,7 @@ external save_dep_table: string -> unit = "hh_save_dep_table"
 (*****************************************************************************)
 (* Loads the dependency table by reading from a file *)
 (*****************************************************************************)
-external load_dep_table: string -> unit = "hh_load_dep_table"
+external load_dep_table: string -> int = "hh_load_dep_table"
 
 (*****************************************************************************)
 (* The size of the dynamically allocated shared memory section *)
@@ -457,6 +457,7 @@ module Old : functor (Key : Key) -> functor (Value : Value.Type) -> sig
 
   val get         : Key.old -> Value.t option
   val remove      : Key.old -> unit
+  val mem         : Key.old -> bool
 
   (* Takes an old value and moves it back to a "new" one
    * (useful for auto-complete).
@@ -584,7 +585,12 @@ module NoCache (UserKeyType : UserKeyType) (Value : Value.Type) = struct
   let revive_batch xs =
     KeySet.iter begin fun str_key ->
       let old_key = Key.make_old Value.prefix str_key in
-      Old.revive old_key
+      if Old.mem old_key
+      then
+        Old.revive old_key
+      else
+        let key = Key.make Value.prefix str_key in
+        New.remove key
     end xs
 
   let get_batch xs =

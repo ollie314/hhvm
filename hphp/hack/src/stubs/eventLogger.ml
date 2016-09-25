@@ -8,7 +8,7 @@
  *
  *)
 
-let init _ _ = ()
+let init ?init_id:_ _ _ = ()
 let log_if_initialized _ = ()
 let master_exception _ = ()
 let worker_exception _ = ()
@@ -25,5 +25,9 @@ let log_gc_stats () = ()
 let flush _ = ()
 let watchman_error _ = ()
 let watchman_warning _ = ()
+let watchman_died_caught _ = ()
+let watchman_uncaught_failure _ = ()
+let watchman_connection_reestablished _ = ()
+let watchman_connection_reestablishment_failed _ = ()
 let watchman_timeout _ = ()
 let dfind_ready _ _ = ()
