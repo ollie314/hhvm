@@ -18,6 +18,7 @@
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/rds-header.h"
+#include "hphp/runtime/ext/asio/ext_async-generator-wait-handle.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/runtime.h"
@@ -42,11 +43,64 @@ const StaticString
   s_arrow("->"),
   s_double_colon("::");
 
+static c_WaitableWaitHandle* getParentWH(
+    c_WaitableWaitHandle* wh,
+    context_idx_t contextIdx,
+    folly::small_vector<c_WaitableWaitHandle*, 64>& visitedWHs) {
+  assertx(!wh->isFinished());
+  auto p = wh->getParentChain().firstInContext(contextIdx);
+  if (p == nullptr ||
+      UNLIKELY(std::find(visitedWHs.begin(), visitedWHs.end(), p)
+               != visitedWHs.end())) {
+    // If the parent exists in our backtrace, it means we have detected a
+    // cycle. We well fall back to savedFP in that case.
+    return nullptr;
+  }
+  visitedWHs.push_back(p);
+  return p;
+}
+
+// walks up the wait handle dependency chain, until it finds activation record
+static ActRec* getActRecFromWaitHandle(
+    c_WaitableWaitHandle* currentWaitHandle,
+    context_idx_t contextIdx,
+    Offset* prevPc,
+    folly::small_vector<c_WaitableWaitHandle*, 64>& visitedWHs) {
+  while (currentWaitHandle != nullptr) {
+    assertx(!currentWaitHandle->isFinished());
+    if (currentWaitHandle->getKind() == c_WaitHandle::Kind::AsyncFunction) {
+      auto resumable = currentWaitHandle->asAsyncFunction()->resumable();
+      *prevPc = resumable->resumeOffset();
+      return resumable->actRec();
+    }
+    if (currentWaitHandle->getKind() == c_WaitHandle::Kind::AsyncGenerator) {
+      auto resumable = currentWaitHandle->asAsyncGenerator()->resumable();
+      *prevPc = resumable->resumeOffset();
+      return resumable->actRec();
+    }
+
+    currentWaitHandle = getParentWH(currentWaitHandle, contextIdx, visitedWHs);
+  }
+  *prevPc = 0;
+  return AsioSession::Get()->getContext(contextIdx)->getSavedFP();
+}
+
 static ActRec* getPrevActRec(
     const ActRec* fp, Offset* prevPc,
     folly::small_vector<c_WaitableWaitHandle*, 64>& visitedWHs) {
-  if (fp && fp->func() && fp->resumed() && fp->func()->isAsyncFunction()) {
-    c_WaitableWaitHandle* currentWaitHandle = frame_afwh(fp);
+  c_WaitableWaitHandle* currentWaitHandle = nullptr;
+
+  if (fp && fp->func() && fp->resumed()) {
+    if (fp->func()->isAsyncFunction()) {
+      currentWaitHandle = frame_afwh(fp);
+    } else if (fp->func()->isAsyncGenerator() &&
+               frame_async_generator(fp)->isRunning()) {
+      // getWaitHandle may return null, if generator is executing eagerly
+      currentWaitHandle = frame_async_generator(fp)->getWaitHandle();
+    }
+  }
+
+  if (currentWaitHandle != nullptr) {
     if (currentWaitHandle->isFinished()) {
       /*
        * It's possible in very rare cases (it will return a truncated stack):
@@ -60,35 +114,19 @@ static ActRec* getPrevActRec(
     }
 
     auto const contextIdx = currentWaitHandle->getContextIdx();
-    while (currentWaitHandle != nullptr) {
-      auto p = currentWaitHandle->getParentChain().firstInContext(contextIdx);
-      if (p == nullptr ||
-          UNLIKELY(std::find(visitedWHs.begin(), visitedWHs.end(), p)
-          != visitedWHs.end())) {
-        // If the parent exists in our backtrace, it means we have detected a
-        // cycle. Fall back to savedFP in that case.
-        break;
-      }
 
-      visitedWHs.push_back(p);
-      if (p->getKind() == c_WaitHandle::Kind::AsyncFunction) {
-        auto wh = p->asAsyncFunction();
-        *prevPc = wh->resumable()->resumeOffset();
-        return wh->actRec();
-      }
-      currentWaitHandle = p;
-    }
-    *prevPc = 0;
-    return AsioSession::Get()->getContext(contextIdx)->getSavedFP();
+    currentWaitHandle = getParentWH(currentWaitHandle, contextIdx, visitedWHs);
+    return getActRecFromWaitHandle(
+      currentWaitHandle, contextIdx, prevPc, visitedWHs);
   }
+
   return g_context->getPrevVMState(fp, prevPc);
 }
 
-// walks up the wait handle dependency chain, until it finds activation record
-static ActRec* getActRecFromWaitHandle(
+// wrapper around getActRecFromWaitHandle, which does some extra validation
+static ActRec* getActRecFromWaitHandleWrapper(
     c_WaitableWaitHandle* currentWaitHandle, Offset* prevPc,
     folly::small_vector<c_WaitableWaitHandle*, 64>& visitedWHs) {
-
   if (currentWaitHandle->isFinished()) {
     return nullptr;
   }
@@ -98,31 +136,8 @@ static ActRec* getActRecFromWaitHandle(
     return nullptr;
   }
 
-  while (currentWaitHandle != nullptr &&
-         currentWaitHandle->getKind() != c_WaitHandle::Kind::AsyncFunction) {
-    auto p = currentWaitHandle->getParentChain().firstInContext(contextIdx);
-    if (p == nullptr ||
-        UNLIKELY(std::find(visitedWHs.begin(), visitedWHs.end(), p)
-                 != visitedWHs.end())) {
-      // If the parent exists in our backtrace, it means we have detected a
-      // cycle. Fall back to savedFP in that case.
-      currentWaitHandle = nullptr;
-      break;
-    }
-
-    visitedWHs.push_back(p);
-    currentWaitHandle = p;
-  }
-
-  if (currentWaitHandle != nullptr &&
-      currentWaitHandle->getKind() == c_WaitHandle::Kind::AsyncFunction) {
-    auto wh = currentWaitHandle->asAsyncFunction();
-    *prevPc = wh->resumable()->resumeOffset();
-    return wh->actRec();
-  }
-
-  *prevPc = 0;
-  return AsioSession::Get()->getContext(contextIdx)->getSavedFP();
+  return getActRecFromWaitHandle(
+    currentWaitHandle, contextIdx, prevPc, visitedWHs);
 }
 
 Array createBacktrace(const BacktraceArgs& btArgs) {
@@ -144,7 +159,8 @@ Array createBacktrace(const BacktraceArgs& btArgs) {
   Offset pc = 0;
 
   if (btArgs.m_fromWaitHandle) {
-    fp = getActRecFromWaitHandle(btArgs.m_fromWaitHandle, &pc, visitedWHs);
+    fp = getActRecFromWaitHandleWrapper(
+      btArgs.m_fromWaitHandle, &pc, visitedWHs);
     // no frames found, we are done
     if (!fp) return bt;
   } else {

@@ -87,23 +87,17 @@ let check_members_implemented check_private parent_reason reason
 
 (* When constant is overridden we need to check if the type is
  * compatible with the previous type defined in the parent.
- *
- * Note that we determine if a constant is abstract by seeing if it is
- * a Tgeneric.
-*)
-(* TODO akenn: multiple constraints *)
-let check_types_for_const env parent_type class_type =
-  match (snd parent_type, snd class_type) with
-    | Tgeneric (_, []), _ -> ()
-      (* parent abstract constant; no constraints *)
-    | Tgeneric (_, [(Ast.Constraint_as, fty_parent)]),
-      Tgeneric (_, [(Ast.Constraint_as, fty_child)]) ->
+ *)
+let check_types_for_const env
+    parent_abstract parent_type class_abstract class_type =
+  match (parent_type, class_type) with
+    | fty_parent, fty_child when parent_abstract && class_abstract ->
       (* redeclaration of an abstract constant *)
       ignore (Phase.sub_type_decl env fty_child fty_parent)
-    | Tgeneric (_, [(Ast.Constraint_as, fty_parent)]), _ ->
+    | fty_parent, _ when parent_abstract ->
       (* const definition constrained by parent abstract const *)
       ignore (Phase.sub_type_decl env class_type fty_parent)
-    | _, Tgeneric(_, _) ->
+    | _, _ when class_abstract ->
       (* Trying to override concrete type with an abstract one *)
       let pos = Reason.to_pos (fst class_type) in
       let parent_pos = Reason.to_pos (fst parent_type) in
@@ -147,14 +141,17 @@ let should_check_params parent_class class_ =
   class_known, check_params
 
 (* Check that overriding is correct *)
-let check_override env ?(ignore_fun_return = false)
+let check_override env member_name ?(ignore_fun_return = false)
     parent_class class_ parent_class_elt class_elt =
   let class_known, check_params = should_check_params parent_class class_ in
   let check_vis = class_known || check_partially_known_method_visibility in
   if check_vis then check_visibility parent_class_elt class_elt else ();
   if check_params then
-    match parent_class_elt.ce_type, class_elt.ce_type with
-    | lazy (r_parent, Tfun ft_parent), lazy (r_child, Tfun ft_child) ->
+    let lazy fty_child = class_elt.ce_type in
+    let pos = Reason.to_pos (fst fty_child) in
+    Errors.try_ (fun () ->
+    match parent_class_elt.ce_type, fty_child with
+    | lazy (r_parent, Tfun ft_parent), (r_child, Tfun ft_child) ->
       (* Add deps here when we override *)
       let subtype_funs = SubType.subtype_method ~check_return:(
           (not ignore_fun_return) &&
@@ -164,15 +161,20 @@ let check_override env ?(ignore_fun_return = false)
         ignore(subtype_funs env r2 ft2 r1 ft1) in
       check_ambiguous_inheritance check (r_parent, ft_parent) (r_child, ft_child)
         (Reason.to_pos r_child) class_ class_elt.ce_origin
-    | lazy fty_parent, lazy fty_child ->
-      let pos = Reason.to_pos (fst fty_child) in
+    | lazy fty_parent, _ ->
       ignore (unify_decl pos Typing_reason.URnone env fty_parent fty_child)
+    )
+    (fun errorl ->
+      Errors.bad_method_override pos member_name errorl)
+
 
 let check_const_override env
     parent_class class_ parent_class_const class_const =
   let _class_known, check_params = should_check_params parent_class class_ in
   if check_params then
-    check_types_for_const env parent_class_const.cc_type class_const.cc_type
+    check_types_for_const env
+      parent_class_const.cc_abstract parent_class_const.cc_type
+      class_const.cc_abstract class_const.cc_type
 
 (* Privates are only visible in the parent, we don't need to check them *)
 let filter_privates members =
@@ -195,7 +197,8 @@ let check_members check_private env (parent_class, psubst) (class_, subst)
         Typing_deps.add_idep
           (Dep.Class class_.tc_name)
           (dep parent_class_elt.ce_origin member_name);
-      check_override env parent_class class_ parent_class_elt class_elt
+      check_override env member_name parent_class class_
+                                     parent_class_elt class_elt
     | None -> ()
   end parent_members
 
@@ -265,7 +268,8 @@ let check_constructors env parent_class class_ psubst subst =
           Typing_deps.add_idep
             (Dep.Class class_.tc_name)
             (Dep.Cstr parent_cstr.ce_origin);
-        check_override env ~ignore_fun_return:true parent_class class_ parent_cstr cstr
+        check_override env "__construct"
+          ~ignore_fun_return:true parent_class class_ parent_cstr cstr
       | None, Some cstr when explicit_consistency ->
         let parent_cstr = default_constructor_ce parent_class in
         let parent_cstr = Inst.instantiate_ce psubst parent_cstr in
@@ -274,7 +278,8 @@ let check_constructors env parent_class class_ psubst subst =
           Typing_deps.add_idep
             (Dep.Class class_.tc_name)
             (Dep.Cstr parent_cstr.ce_origin);
-        check_override env ~ignore_fun_return:true parent_class class_ parent_cstr cstr
+        check_override env "__construct"
+          ~ignore_fun_return:true parent_class class_ parent_cstr cstr
       | None, _ -> ()
   ) else ()
 

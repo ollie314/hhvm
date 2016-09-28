@@ -26,6 +26,11 @@ exception Timeout
 
 let debug = false
 
+let sync_file_extension = "tmp_sync"
+
+(** TODO: support git. *)
+let vcs_tmp_dir = ".hg"
+
 let crash_marker_path root =
   let root_name = Path.slash_escaped_string_of_path root in
   Filename.concat GlobalConfig.tmp_dir (spf ".%s.watchman_failed" root_name)
@@ -60,6 +65,11 @@ let dead_env_from_alive env =
     reinit_attempts = 0;
   }
 
+type 'a changes =
+  | Watchman_unavailable
+  | Watchman_pushed of 'a
+  | Watchman_synchronous of 'a
+
 type watchman_instance =
   (** Indicates a dead watchman instance (most likely due to chef upgrading,
    * reconfiguration, or a user terminating watchman) detected by,
@@ -71,6 +81,10 @@ type watchman_instance =
    * cases too. *)
   | Watchman_dead of dead_env
   | Watchman_alive of env
+
+let get_root_path instance = match instance with
+  | Watchman_dead dead_env -> dead_env.prior_settings.root
+  | Watchman_alive env -> env.settings.root
 
 (* Some JSON processing helpers *)
 module J = struct
@@ -139,6 +153,7 @@ let request_json
             J.strlist ["suffix"; "phpt"];
             J.strlist ["suffix"; "hh"];
             J.strlist ["suffix"; "hhi"];
+            J.strlist ["suffix"; sync_file_extension];
             J.strlist ["suffix"; "xhp"];
             (* FIXME: This is clearly wrong, but we do it to match the
              * behavior on the server-side. We need to investigate if
@@ -149,7 +164,8 @@ let request_json
         ];
         J.pred "not" @@ [
           J.pred "anyof" @@ [
-            J.strlist ["dirname"; ".hg"];
+            (** We don't exclude the .hg directory, because we touch unique
+             * files there to support synchronous queries. *)
             J.strlist ["dirname"; ".git"];
             J.strlist ["dirname"; ".svn"];
           ]
@@ -279,29 +295,7 @@ let init { init_timeout; subscribe_to_changes; root } =
     clockspec;
   } in
   if subscribe_to_changes then (ignore @@ exec env.socket (subscribe env)) ;
-  Watchman_alive env
-
-let with_crash_record instance source ~fallback_value f =
-  match instance with
-  | Watchman_dead _ ->
-    instance, fallback_value
-  | Watchman_alive env -> begin
-    try
-      instance, with_crash_record_exn env.settings.root source (fun () -> f env)
-    with
-      | Sys_error("Broken pipe") ->
-        Hh_logger.log "Watchman Pipe broken.";
-        EventLogger.watchman_died_caught ();
-        Watchman_dead (dead_env_from_alive env), fallback_value
-      | Sys_error("Connection reset by peer") ->
-        Hh_logger.log "Watchman connection reset by peer.";
-        EventLogger.watchman_died_caught ();
-        Watchman_dead (dead_env_from_alive env), fallback_value
-      | e ->
-        let msg = Printexc.to_string e in
-        EventLogger.watchman_uncaught_failure msg;
-        Exit_status.(exit Watchman_failed)
-  end
+  env
 
 let poll_for_updates env =
   (* Use the timeout mechanism to manage our polling frequency. *)
@@ -352,35 +346,139 @@ let maybe_restart_instance instance = match instance with
         EventLogger.watchman_connection_reestablishment_failed ();
         Watchman_dead { dead_env with
           reinit_attempts = dead_env.reinit_attempts + 1 }
-      | Some (Watchman_dead _) ->
-        Hh_logger.log "Watchman subscription failed during reestablishment";
-        EventLogger.watchman_connection_reestablishment_failed ();
-        Watchman_dead { dead_env with
-          reinit_attempts = dead_env.reinit_attempts + 1 }
-      | Some (Watchman_alive env) ->
+      | Some env ->
         Hh_logger.log "Watchman connection reestablished.";
         EventLogger.watchman_connection_reestablished ();
         Watchman_alive env
     else
       instance
 
-let get_all_files instance =
+let call_on_instance instance source f =
   let instance = maybe_restart_instance instance in
-  with_crash_record instance "get_all_files" ~fallback_value:[] @@ fun env ->
+  match instance with
+  | Watchman_dead _ ->
+    instance, Watchman_unavailable
+  | Watchman_alive env -> begin
+    try
+      instance, with_crash_record_exn env.settings.root source (fun () -> f env)
+    with
+      | Sys_error("Broken pipe") ->
+        Hh_logger.log "Watchman Pipe broken.";
+        EventLogger.watchman_died_caught ();
+        Watchman_dead (dead_env_from_alive env), Watchman_unavailable
+      | Sys_error("Connection reset by peer") ->
+        Hh_logger.log "Watchman connection reset by peer.";
+        EventLogger.watchman_died_caught ();
+        Watchman_dead (dead_env_from_alive env), Watchman_unavailable
+      | e ->
+        let msg = Printexc.to_string e in
+        EventLogger.watchman_uncaught_failure msg;
+        Exit_status.(exit Watchman_failed)
+  end
+
+let get_all_files env =
+  try with_crash_record_exn env.settings.root "get_all_files"  @@ fun () ->
     let response = exec env.socket (all_query env) in
     env.clockspec <- J.get_string_val "clock" response;
-    extract_file_names env response
+    extract_file_names env response with
+    | _ ->
+      Exit_status.(exit Watchman_failed)
+
+let transform_changes_response env data =
+    env.clockspec <- J.get_string_val "clock" data;
+    set_of_list @@ extract_file_names env data
+
+let random_filepath root =
+  let root_name = Path.to_string root in
+  let dir = Filename.concat root_name vcs_tmp_dir in
+  let name = Random_id.(short_string_with_alphabet alphanumeric_alphabet) in
+  Filename.concat dir (spf ".%s.%s" name sync_file_extension)
 
 let get_changes instance =
-  let instance = maybe_restart_instance instance in
-  with_crash_record instance "get_changes"
-    ~fallback_value:SSet.empty @@ fun env ->
+  call_on_instance instance "get_changes" @@ fun env ->
     let response = begin
-        if env.settings.subscribe_to_changes then poll_for_updates env
-        else exec env.socket (since_query env)
+        if env.settings.subscribe_to_changes
+        then Watchman_pushed (poll_for_updates env)
+        else Watchman_synchronous (exec env.socket (since_query env))
     end in
-    (* The subscription doesn't use the clockspec post-initialization, but it
-     * may be useful to keep this info around.
-     *)
-    env.clockspec <- J.get_string_val "clock" response;
-    set_of_list @@ extract_file_names env response
+    match response with
+    | Watchman_unavailable -> Watchman_unavailable
+    | Watchman_pushed data ->
+      Watchman_pushed (transform_changes_response env data)
+    | Watchman_synchronous data ->
+      Watchman_synchronous (transform_changes_response env data)
+
+let rec get_changes_until_file_sync deadline syncfile instance acc_changes =
+  if Unix.time () > deadline then raise Timeout else ();
+  let instance, changes = get_changes instance in
+  match changes with
+  | Watchman_unavailable ->
+    (** We don't need to use Retry_with_backoff_exception because there is
+     * exponential backoff built into get_changes to restart the watchman
+     * instance.
+     *
+     * NB: Yes, it is a CPU-eating spin-loop until the backoff time to attempt
+     * a watchman restart arrives. This could probably be improved.
+     * Effectively since we spin-loop to kill time, this must be tail call
+     * optimized or we will blow the stack.*)
+    get_changes_until_file_sync
+      deadline syncfile instance acc_changes (** Not in 4.01 yet [@tailcall] *)
+  | Watchman_synchronous changes
+  | Watchman_pushed changes ->
+    let acc_changes = SSet.union acc_changes changes in
+    if SSet.mem syncfile changes then
+      instance, acc_changes
+    else
+      get_changes_until_file_sync deadline syncfile instance acc_changes
+
+(** Raise this exception together with a with_retries_until_deadline call to
+ * make use of its exponential backoff machinery. *)
+exception Retry_with_backoff_exception
+
+(** Call "f instance temp_file_name" with a random temporary file created
+ * before f and deleted after f. *)
+let with_random_temp_file instance f =
+  let root = get_root_path instance in
+  let temp_file = random_filepath root in
+  let ic = try Some ( open_out_gen [Open_creat; Open_excl] 555 temp_file) with
+    | _ -> None
+  in
+  match ic with
+  | None ->
+    (** Failed to create temp file. Retry with exponential backoff. *)
+    raise Retry_with_backoff_exception
+  | Some ic ->
+    let () = close_out ic in
+    let result = f instance temp_file in
+    let () = Sys.remove temp_file in
+    result
+
+(** Call f with retries if it throws Retry_with_backoff_exception,
+ * using exponential backoff between attempts.
+ *
+ * Raise Timeout if deadline arrives. *)
+let rec with_retries_until_deadline ~attempt instance deadline f =
+  if Unix.time () > deadline then raise Timeout else ();
+  let max_wait_time = 10.0 in
+  try f instance with
+    | Retry_with_backoff_exception ->
+      let () = if Unix.time () > deadline then raise Timeout else () in
+      let wait_time = min max_wait_time (2.0 ** (float_of_int attempt)) in
+      let () = ignore @@ Unix.select [] [] [] wait_time in
+      with_retries_until_deadline ~attempt:(attempt + 1) instance deadline f
+
+let get_changes_synchronously ~(timeout:int) instance =
+  (** Reading uses Timeout.with_timeout, which is not re-entrant. So
+   * we can't use that out here. *)
+  let deadline = Unix.time () +. (float_of_int timeout) in
+  with_retries_until_deadline ~attempt:0 instance deadline begin
+    (** Lambda here must take an instance to avoid capturing the one in the
+     * outer scope, which is the wrong one since it doesn't change between
+     * restart attempts. *)
+    fun instance ->
+      with_random_temp_file instance begin fun instance sync_file ->
+        let result =
+          get_changes_until_file_sync deadline sync_file instance SSet.empty in
+        result
+      end
+  end

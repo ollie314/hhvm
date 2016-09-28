@@ -995,15 +995,14 @@ and expr_
         *)
         let env, tvarl =
           List.map_env env class_.tc_tparams TUtils.unresolved_tparam in
-        let params = List.map class_.tc_tparams begin fun (_, (p, n), cstr) ->
-          Reason.Rwitness p, Tgeneric (n, cstr)
+        let params = List.map class_.tc_tparams begin fun (_, (p, n), _) ->
+          Reason.Rwitness p, Tgeneric (n, [])
         end in
         let obj_type = Reason.Rwitness p, Tapply (pos_cname, params) in
         let ety_env = {
           (Phase.env_with_self env) with
           substs = Subst.make class_.tc_tparams tvarl;
         } in
-        (* AKENN: what about the bounds on the generic parameters? *)
         let env, local_obj_ty = Phase.localize ~ety_env env obj_type in
         let env, fty =
           obj_get ~is_method:true ~nullsafe:None env local_obj_ty
@@ -1017,13 +1016,13 @@ and expr_
             let tparam = Ast.Invariant, pos_cname,
               [(Ast.Constraint_as, obj_type)] in
             let env, tvar = TUtils.unresolved_tparam env tparam in
-            let param = Reason.Rwitness pos,
-              Tgeneric (class_name, [(Ast.Constraint_as, obj_type)]) in
+            let param = Reason.Rwitness pos, Tgeneric (class_name, []) in
+            let tparams = tparam :: class_.tc_tparams in
             let ety_env = {
               ety_env with
-              substs = Subst.make (tparam :: class_.tc_tparams) (tvar :: tvarl)
+              substs = Subst.make tparams (tvar :: tvarl)
             } in
-            (* AKENN: do we need to generate bounds here? *)
+            let env = Phase.check_tparams_constraints ~ety_env env tparams in
             let env, param = Phase.localize ~ety_env env param in
             let fty = { fty with
                         ft_params = (None, param) :: fty.ft_params } in
@@ -1213,8 +1212,9 @@ and expr_
   | Typename sid ->
       begin match Env.get_typedef env (snd sid) with
         | Some {td_tparams = tparaml; _} ->
-            let params = List.map ~f:begin fun (_, (p, x), cstr) ->
-              Reason.Rwitness p, Tgeneric (x, cstr)
+            (* Typedef type parameters cannot have constraints *)
+            let params = List.map ~f:begin fun (_, (p, x), _) ->
+              Reason.Rwitness p, Tgeneric (x, [])
             end tparaml in
             let tdef = Reason.Rwitness (fst sid), Tapply (sid, params) in
             let typename =
@@ -1224,7 +1224,7 @@ and expr_
             end in
             let ety_env = { (Phase.env_with_self env) with
                             substs = Subst.make tparaml tparams } in
-            (* AKENN: do we generate bounds here from the Tgeneric above? *)
+            let env = Phase.check_tparams_constraints ~ety_env env tparaml in
             Phase.localize ~ety_env env typename
         | None ->
             (* Should never hit this case since we only construct this AST node
@@ -1528,11 +1528,7 @@ and new_object ~check_not_abstract p env c el uel =
       let env, params = List.map_env env class_.tc_tparams begin fun env _ ->
         Env.fresh_unresolved_type env
       end in
-      let env =
-        if SSet.mem "XHP" class_.tc_extends then env else
-        let env = call_construct p env class_ params el uel c in
-        env
-      in
+      let env = call_construct p env class_ params el uel c in
       let r_witness = Reason.Rwitness p in
       let obj_ty = r_witness, Tclass (cname, params) in
       if not (snd class_.tc_construct) then
@@ -2739,9 +2735,12 @@ and class_get_ ~is_method ~is_const ~ety_env ?(incl_tc=false) env cid cty
           | None ->
             smember_not_found p ~is_const ~is_method class_ mid;
             env, (Reason.Rnone, Tany)
-          | Some { cc_type; _ } ->
+          | Some { cc_type; cc_abstract; cc_pos; _ } ->
             let env, cc_type = Phase.localize ~ety_env env cc_type in
-            env, cc_type
+            env, (if cc_abstract
+              then (Reason.Rwitness cc_pos, Tabstract
+                    (AKgeneric (class_.tc_name ^ "::" ^ mid), Some cc_type))
+              else cc_type)
         end else begin
           let smethod = Env.get_static_member is_method env class_ mid in
           match smethod with
@@ -3151,6 +3150,16 @@ and static_class_id p env = function
       in env, resolve_ety ty
 
 and call_construct p env class_ params el uel cid =
+  let cid = if cid = CIparent then CIstatic else cid in
+  let env, cid_ty = static_class_id p env cid in
+  let ety_env = {
+    type_expansions = [];
+    this_ty = cid_ty;
+    substs = Subst.make class_.tc_tparams params;
+    from_class = Some cid;
+  } in
+  let env = Phase.check_tparams_constraints ~ety_env env class_.tc_tparams in
+  if SSet.mem "XHP" class_.tc_extends then env else
   let cstr = Env.get_construct env class_ in
   let mode = Env.get_mode env in
   Typing_hooks.dispatch_constructor_hook class_ env p;
@@ -3163,14 +3172,6 @@ and call_construct p env class_ params el uel cid =
       fst (List.map_env env el expr)
     | Some { ce_visibility = vis; ce_type = lazy m; _ } ->
       TVis.check_obj_access p env (Reason.to_pos (fst m), vis);
-      let cid = if cid = CIparent then CIstatic else cid in
-      let env, cid_ty = static_class_id p env cid in
-      let ety_env = {
-        type_expansions = [];
-        this_ty = cid_ty;
-        substs = Subst.make class_.tc_tparams params;
-        from_class = Some cid;
-      } in
       let env, m = Phase.localize ~ety_env env m in
       fst (call p env m el uel)
 
@@ -4003,15 +4004,12 @@ and class_def tcopt c =
 
 (* Given a class definition construct a type consisting of the
  * class instantiated at its generic parameters.
- * TODO AKENN: remove the need for embedded constraints here. *)
-and get_self_from_c env c =
-  let tparams = List.map (fst c.c_tparams) begin fun (_, (p, s), cstr) ->
-    let cstr = List.map cstr
-      begin fun (ck, h) -> (ck, Decl_hint.hint env.Env.decl_env h) end in
-    Reason.Rwitness p, Tgeneric (s, cstr)
+*)
+and get_self_from_c c =
+  let tparams = List.map (fst c.c_tparams) begin fun (_, (p, s), _) ->
+    Reason.Rwitness p, Tgeneric (s, [])
   end in
-  let ret = Reason.Rwitness (fst c.c_name), Tapply (c.c_name, tparams) in
-  ret
+  Reason.Rwitness (fst c.c_name), Tapply (c.c_name, tparams)
 
 and class_def_ env c tc =
   Typing_hooks.dispatch_enter_class_def_hook c tc;
@@ -4028,7 +4026,7 @@ and class_def_ env c tc =
 
   (* Set up self identifier and type *)
   let env = Env.set_self_id env (snd c.c_name) in
-  let self = get_self_from_c env c in
+  let self = get_self_from_c c in
   (* For enums, localize makes self:: into an abstract type, which we don't
    * want *)
   let env, self = match c.c_kind with
@@ -4104,7 +4102,7 @@ and check_extend_abstract_typeconst ~is_final p smap =
 and check_extend_abstract_const ~is_final p smap =
   SMap.iter begin fun x cc ->
     match cc.cc_type with
-    | r, Tgeneric _ when not cc.cc_synthesized ->
+    | r, _ when cc.cc_abstract && not cc.cc_synthesized ->
       Errors.implement_abstract ~is_final p (Reason.to_pos r) "constant" x
     | _, (Tany | Tmixed | Tarray (_, _) | Toption _ | Tprim _ | Tfun _
           | Tapply (_, _) | Ttuple _ | Tshape _ | Taccess (_, _) | Tthis
@@ -4143,12 +4141,9 @@ and class_constr_def env c =
      method_def env m
 
 and class_implements_type env c1 ctype2 =
-  let env, params =
-    List.map_env env (fst c1.c_tparams) begin fun env (_, (p, s), param) ->
-      let param = List.map param begin fun (ck, h) ->
-            let ty = Decl_hint.hint env.Env.decl_env h in
-            (ck, ty) end in
-      env, (Reason.Rwitness p, Tgeneric (s, param))
+  let params =
+    List.map (fst c1.c_tparams) begin fun (_, (p, s), _) ->
+      (Reason.Rwitness p, Tgeneric (s, []))
     end in
   let r = Reason.Rwitness (fst c1.c_name) in
   let ctype1 = r, Tapply (c1.c_name, params) in
