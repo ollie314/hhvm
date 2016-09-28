@@ -496,11 +496,10 @@ bool canDCE(IRInstruction* inst) {
   case AsyncSwitchFast:
   case ABCUnblock:
   case IncStat:
-  case IncTransCounter:
   case IncStatGrouped:
   case IncProfCounter:
   case DbgAssertRefCount:
-  case DbgAssertFunc:
+  case DbgAssertARFunc:
   case RBTraceEntry:
   case RBTraceMsg:
   case ZeroErrorLevel:
