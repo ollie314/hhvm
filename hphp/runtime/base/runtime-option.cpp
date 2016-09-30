@@ -194,6 +194,7 @@ bool RuntimeOption::StopOldServer = false;
 int RuntimeOption::OldServerWait = 30;
 int RuntimeOption::CacheFreeFactor = 50;
 int64_t RuntimeOption::ServerRSSNeededMb = 4096;
+int64_t RuntimeOption::ServerCriticalFreeMb = 512;
 std::vector<std::string> RuntimeOption::ServerNextProtocols;
 bool RuntimeOption::ServerEnableH2C = false;
 int RuntimeOption::BrotliCompressionEnabled = -1;
@@ -407,7 +408,7 @@ bool RuntimeOption::PHP7_EngineExceptions = false;
 bool RuntimeOption::PHP7_IntSemantics = false;
 bool RuntimeOption::PHP7_LTR_assign = false;
 bool RuntimeOption::PHP7_NoHexNumerics = false;
-bool RuntimeOption::PHP7_ReportVersion = false;
+bool RuntimeOption::PHP7_Builtins = false;
 bool RuntimeOption::PHP7_ScalarTypes = false;
 bool RuntimeOption::PHP7_Substr = false;
 bool RuntimeOption::PHP7_InfNanFloatParse = false;
@@ -1259,8 +1260,7 @@ void RuntimeOption::Load(
                  s_PHP7_master);
     Config::Bind(PHP7_NoHexNumerics, ini, config, "PHP7.NoHexNumerics",
                  s_PHP7_master);
-    Config::Bind(PHP7_ReportVersion, ini, config, "PHP7.ReportVersion",
-                 s_PHP7_master);
+    Config::Bind(PHP7_Builtins, ini, config, "PHP7.Builtins", s_PHP7_master);
     Config::Bind(PHP7_ScalarTypes, ini, config, "PHP7.ScalarTypes",
                  s_PHP7_master);
     Config::Bind(PHP7_Substr, ini, config, "PHP7.Substr",
@@ -1352,6 +1352,8 @@ void RuntimeOption::Load(
     Config::Bind(StopOldServer, ini, config, "Server.StopOld", false);
     Config::Bind(OldServerWait, ini, config, "Server.StopOldWait", 30);
     Config::Bind(ServerRSSNeededMb, ini, config, "Server.RSSNeededMb", 4096);
+    Config::Bind(ServerCriticalFreeMb, ini, config,
+                 "Server.CriticalFreeMb", 512);
     Config::Bind(CacheFreeFactor, ini, config, "Server.CacheFreeFactor", 50);
     if (CacheFreeFactor > 100) CacheFreeFactor = 100;
     if (CacheFreeFactor < 0) CacheFreeFactor = 0;

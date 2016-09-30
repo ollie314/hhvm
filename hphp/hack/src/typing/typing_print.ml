@@ -63,7 +63,7 @@ module ErrorString = struct
     | Tvar _             -> "some value"
     | Tanon _    -> "a function"
     | Tfun _     -> "a function"
-    | Tgeneric (x, _)    -> "a value of declared generic type "^x
+    | Tgeneric x    -> "a value of declared generic type " ^ x
     | Tabstract (AKnewtype (x, _), _)
         when x = SN.Classes.cClassname -> "a classname string"
     | Tabstract (AKnewtype (x, _), _)
@@ -124,7 +124,7 @@ module ErrorString = struct
       List.fold_left ~f:(fun acc (_, sid) -> acc^"::"^sid)
         ~init:("the type constant "^strip_ns x) ids in
     match snd root_ty with
-    | Tgeneric (x, _) -> f x
+    | Tgeneric x -> f x
     | Tapply ((_, x), _) -> f x
     | Tclass ((_, x), _) -> f x
     | Tabstract (ak, _) -> f @@ AbstractKind.to_string ak
@@ -158,7 +158,7 @@ module Suggest = struct
     | Ttuple (l)             -> "("^list l^")"
     | Tany                   -> "..."
     | Tmixed                 -> "mixed"
-    | Tgeneric (s, _)        -> s
+    | Tgeneric s             -> s
     | Tabstract (AKgeneric s, _) -> s
     | Toption ty             -> "?" ^ type_ ty
     | Tprim tp               -> prim tp
@@ -248,7 +248,7 @@ module Full = struct
     | Tarray (None, Some _) -> assert false
     | Tclass ((_, s), []) -> o s
     | Tapply ((_, s), []) -> o s
-    | Tgeneric (s, _) -> o s
+    | Tgeneric s -> o s
     | Taccess (root_ty, ids) ->
         k root_ty;
         o (List.fold_left ids
@@ -298,9 +298,9 @@ module Full = struct
     fun st env o ft ->
     (match ft.ft_tparams, ft.ft_arity with
       | [], Fstandard _ -> ()
-      | [], _ -> o "<...>";
-      | l, Fstandard _ -> o "<"; list_sep o ", " (tparam o) l; o ">"
-      | l, _ -> o "<"; list_sep o ", " (tparam o) l; o "..."; o ">"
+      | [], _ -> o "<...>"
+      | l, Fstandard _ -> (o "<"; list_sep o ", " (tparam st o env) l; o ">")
+      | l, _ -> (o "<"; list_sep o ", " (tparam st o env) l; o "..."; o ">")
     );
     o "("; list_sep o ", " (fun_param st env o) ft.ft_params; o "): ";
     ty st env o ft.ft_ret
@@ -313,8 +313,19 @@ module Full = struct
     | Some param_name, param_type ->
         ty st env o param_type; o " "; o param_name
 
-  and tparam: type a. _ -> a tparam -> _ =
-    fun o (_, (_, x), _) -> o x
+  and tparam: type a.  _ -> _ -> _ ->  a Typing_defs.tparam -> _ =
+    fun st o env (_, (_, x), cstrl) ->
+      (o x; list_sep o " " (tparam_constraint st env o) cstrl)
+
+  and tparam_constraint:
+    type a. _ -> _ -> _ -> (Ast.constraint_kind * a ty) -> _ =
+    fun st env o (ck, cty) ->
+      begin (match ck with
+      | Ast.Constraint_as -> o " as "
+      | Ast.Constraint_super -> o " super "
+      | Ast.Constraint_eq -> o " = ");
+        ty st env o cty
+      end
 
   let to_string env x =
     let buf = Buffer.create 50 in

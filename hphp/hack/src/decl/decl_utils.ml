@@ -15,7 +15,7 @@ module N = Nast
 let unwrap_class_hint = function
   | (_, N.Happly ((pos, class_name), type_parameters)) ->
       pos, class_name, type_parameters
-  | p, N.Habstr(_, _) ->
+  | p, N.Habstr _ ->
       Errors.expected_class ~suffix:" or interface but got a generic" p;
       Pos.none, "", []
   | p, _ ->
@@ -24,7 +24,7 @@ let unwrap_class_hint = function
 
 let unwrap_class_type = function
   | r, Tapply (name, tparaml) -> r, name, tparaml
-  | _, (Tany | Tmixed | Tarray (_, _) | Tgeneric (_,_) | Toption _ | Tprim _
+  | _, (Tany | Tmixed | Tarray (_, _) | Tgeneric _ | Toption _ | Tprim _
   | Tfun _ | Ttuple _ | Tshape _ | Taccess (_, _) | Tthis) ->
     raise @@ Invalid_argument "unwrap_class_type got non-class"
 
