@@ -14,40 +14,33 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/vm/vm-regs.h"
+#ifndef incl_HPHP_JIT_STRING_TAG_H_
+#define incl_HPHP_JIT_STRING_TAG_H_
 
-#include "hphp/runtime/vm/jit/fixup.h"
+#include <cstdint>
 
-namespace HPHP {
-
-///////////////////////////////////////////////////////////////////////////////
-
-// Register dirtiness: thread-private.
-__thread VMRegState tl_regState = VMRegState::CLEAN;
-
-VMRegAnchor::VMRegAnchor()
-  : m_old(tl_regState)
-{
-  assert_native_stack_aligned();
-  jit::syncVMRegs();
-}
-
-VMRegAnchor::VMRegAnchor(ActRec* ar)
-  : m_old(tl_regState)
-{
-  assert(tl_regState == VMRegState::DIRTY);
-  tl_regState = VMRegState::CLEAN;
-
-  auto prevAr = g_context->getOuterVMFrame(ar);
-  const Func* prevF = prevAr->m_func;
-  assert(!ar->resumed());
-  auto& regs = vmRegs();
-  regs.stack.top() = (TypedValue*)ar - ar->numArgs();
-  assert(vmStack().isValidAddress((uintptr_t)vmsp()));
-  regs.pc = prevF->unit()->at(prevF->base() + ar->m_soff);
-  regs.fp = prevAr;
-}
+namespace HPHP { namespace jit {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-}
+/*
+ * A compact identifier corresponding to a static string label.
+ *
+ * Unlike static StringData*'s, these aren't used by jitted code or the
+ * runtime, and are derived from a small set of string literals.
+ *
+ * Guaranteed to be "invalid" when default-initialized.
+ */
+using StringTag = uint8_t;
+
+/*
+ * Encode or decode a StringTag.
+ */
+StringTag tag_from_string(const char*);
+const char* string_from_tag(StringTag);
+
+///////////////////////////////////////////////////////////////////////////////
+
+}}
+
+#endif

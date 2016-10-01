@@ -122,6 +122,7 @@ let handle_connection_ genv env client =
     ClientProvider.shutdown_client client;
     env
   | e ->
+    HackEventLogger.handle_connection_exception e;
     let msg = Printexc.to_string e in
     EventLogger.master_exception msg;
     Printf.fprintf stderr "Error: %s\n%!" msg;
@@ -361,6 +362,7 @@ let setup_server options handle =
     io_priority;
     enable_on_nfs;
     lazy_decl;
+    lazy_parse;
     load_script_config;
     _
   } as local_config = local_config in
@@ -373,6 +375,7 @@ let setup_server options handle =
     init_id
     (Unix.gettimeofday ())
     lazy_decl
+    lazy_parse
     saved_state_load_type;
   let root_s = Path.to_string root in
   if Sys_utils.is_nfs root_s && not enable_on_nfs then begin

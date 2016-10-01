@@ -781,6 +781,7 @@ static inline LineContribType * _gdContributionsAlloc(unsigned int line_length, 
 {
   unsigned int u = 0;
     LineContribType *res;
+    int overflow_error = 0;
 
   res = (LineContribType *) gdMalloc(sizeof(LineContribType));
   if (!res) {
@@ -788,10 +789,33 @@ static inline LineContribType * _gdContributionsAlloc(unsigned int line_length, 
   }
     res->WindowSize = windows_size;
     res->LineLength = line_length;
+    if (overflow2(line_length, sizeof(ContributionType))) {
+        return NULL;
+    }
     res->ContribRow = (ContributionType *) gdMalloc(line_length * sizeof(ContributionType));
+    if (res->ContribRow == NULL) {
+        gdFree(res);
+        return NULL;
+    }
 
     for (u = 0 ; u < line_length ; u++) {
-        res->ContribRow[u].Weights = (double *) gdMalloc(windows_size * sizeof(double));
+        if (overflow2(windows_size, sizeof(double))) {
+            overflow_error = 1;
+        } else {
+            res->ContribRow[u].Weights = (double *) gdMalloc(windows_size * sizeof(double));
+        }
+        if (overflow_error == 1 || res->ContribRow[u].Weights == NULL) {
+            unsigned int i;
+            if (u != 0) {
+                u--;
+                for (i=0; i<=u; i++) {
+                    gdFree(res->ContribRow[i].Weights);
+                }
+            }
+            gdFree(res->ContribRow);
+            gdFree(res);
+            return NULL;
+        }
     }
     return res;
 }
@@ -1103,7 +1127,11 @@ static gdImagePtr gdImageScaleBilinearPalette(gdImagePtr im, const unsigned int 
   if (new_img == NULL) {
     return NULL;
   }
-  new_img->transparent = gdTrueColorAlpha(im->red[transparent], im->green[transparent], im->blue[transparent], im->alpha[transparent]);
+  if (transparent < 0) {
+    new_img->transparent = -1;
+  } else {
+    new_img->transparent = gdTrueColorAlpha(im->red[transparent], im->green[transparent], im->blue[transparent], im->alpha[transparent]);
+  }
 
   for (i=0; i < _height; i++) {
     long j;
