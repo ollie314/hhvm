@@ -635,7 +635,7 @@ let decl_and_run_mode {filename; mode; no_builtins} =
 
     let files_info =
       Relative_path.Map.mapi begin fun fn parsed_file ->
-        let {Parser_hack.file_mode; comments; ast} = parsed_file in
+        let {Parser_hack.file_mode; comments; ast; _} = parsed_file in
         Parser_heap.ParserHeap.add fn (ast, Parser_heap.Full);
         let funs, classes, typedefs, consts = Ast_utils.get_defs ast in
         { FileInfo.
@@ -660,7 +660,7 @@ let decl_and_run_mode {filename; mode; no_builtins} =
 let main_hack ({filename; mode; no_builtins;} as opts) =
   Sys_utils.signal Sys.sigusr1
     (Sys.Signal_handle Typing.debug_print_last_pos);
-  EventLogger.init (Daemon.devnull ()) 0.0;
+  EventLogger.init EventLogger.Event_logger_fake 0.0;
   let _handle = SharedMem.init GlobalConfig.default_sharedmem_config in
   let tmp_hhi = Path.concat (Path.make Sys_utils.temp_dir_name) "hhi" in
   Hhi.set_hhi_root_for_unit_test tmp_hhi;

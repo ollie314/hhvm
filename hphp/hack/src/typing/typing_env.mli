@@ -49,7 +49,6 @@ and tfun = env -> env
 val fresh : unit -> int
 val fresh_type : unit -> locl ty
 val fresh_unresolved_type : env -> env * locl ty
-val fresh_abstract_type : ?constr: locl ty -> Reason.t -> locl ty
 val add_subst : env -> int -> int -> env
 val get_var : env -> int -> env * int
 val rename : env -> int -> int -> env
@@ -141,7 +140,9 @@ val add_constraint : env -> string -> Ast.constraint_kind -> locl ty -> env
 val env_with_tpenv : env -> tpenv -> env
 val add_generic_parameters : env -> Nast.tparam list -> env
 val is_generic_parameter : env -> string -> bool
+val get_generic_parameters : env -> string list
 val add_fresh_generic_parameter : env -> string -> env * string
+val get_tpenv_size : env -> int
 val freeze_local_env : env -> env
 val env_with_locals : env -> local Local_id.Map.t -> env
 val anon : local_env -> env -> (env -> env * locl ty) -> env * locl ty

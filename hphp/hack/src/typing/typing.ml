@@ -1036,7 +1036,7 @@ and expr_
               ft_abstract = false;
               ft_arity = fun_arity;
               ft_tparams = fty.ft_tparams;
-              ft_locl_cstr = fty.ft_locl_cstr;
+              ft_where_constraints = fty.ft_where_constraints;
               ft_params = fty.ft_params;
               ft_ret = fty.ft_ret;
             } in
@@ -2103,7 +2103,7 @@ and dispatch_call p env call_type (fpos, fun_expr as e) el uel =
                 ft_abstract = false;
                 ft_arity = Fstandard (arity, arity);
                 ft_tparams = [];
-                ft_locl_cstr = [];
+                ft_where_constraints = [];
                 ft_params = List.map vars (fun x -> (None, x));
                 ft_ret = tr;
               }
@@ -3751,10 +3751,10 @@ and condition env tparamet =
          *   class B<Tb> { ... }
          *   class C extends B<int>
          * and have obj_ty = C and x_ty = B<T> for a generic parameter T.
-         * Then decompose_subtype will deduce that T=int and add int as both
-         * lower and upper bound on T in env.lenv.tpenv
+         * Then SubType.add_constraint will deduce that T=int and add int as
+         * both lower and upper bound on T in env.lenv.tpenv
          *)
-        let env = SubType.decompose_subtype env obj_ty x_ty
+        let env = SubType.add_constraint env Ast.Constraint_as obj_ty x_ty
             (fun env -> (*Errors.instanceof_always_false env.Env.pos;*) env) in
         env, obj_ty in
 
@@ -3884,16 +3884,19 @@ and is_type env e tprim =
 
 and is_array env ty p pf (_, lv) =
   let r = Reason.Rpredicated (p, pf) in
-  let tarrkey () = Env.fresh_abstract_type ~constr:(r, Tprim Tarraykey) r in
-  let tfresh () = Env.fresh_abstract_type r in
+  let env, tarrkey_name = Env.add_fresh_generic_parameter env "Tk" in
+  let env = Env.add_upper_bound env tarrkey_name (r, Tprim Tarraykey) in
+  let tarrkey = (r, Tabstract (AKgeneric tarrkey_name, None)) in
+  let env, tfresh_name = Env.add_fresh_generic_parameter env "T" in
+  let tfresh = (r, Tabstract (AKgeneric tfresh_name, None)) in
   let ty =
     match ty with
     | `HackDict ->
-      Tclass ((Pos.none, SN.Collections.cDict), [tarrkey (); tfresh ()])
+      Tclass ((Pos.none, SN.Collections.cDict), [tarrkey; tfresh])
     | `HackVec ->
-      Tclass ((Pos.none, SN.Collections.cVec), [tfresh ()])
+      Tclass ((Pos.none, SN.Collections.cVec), [tfresh])
     | `HackKeyset ->
-      Tclass ((Pos.none, SN.Collections.cKeyset), [tarrkey ()])
+      Tclass ((Pos.none, SN.Collections.cKeyset), [tarrkey])
     | `PHPArray ->
       Tarraykind AKany in
   match lv with
@@ -4193,15 +4196,29 @@ and class_var_def env ~is_static c cv =
       let _ = Type.sub_type p Reason.URhint env ty cty in
       ()
 
+and localize_where_constraints
+    ~ety_env (env:Env.env) (where_constraints:Nast.where_constraint list) =
+  let add_constraint env (h1, ck, h2) =
+    let env, ty1 =
+      Phase.localize env (Decl_hint.hint env.Env.decl_env h1) ~ety_env in
+    let env, ty2 =
+      Phase.localize env (Decl_hint.hint env.Env.decl_env h2) ~ety_env in
+    SubType.add_constraint env ck ty1 ty2 (fun env -> env)
+  in
+  List.fold_left where_constraints ~f:add_constraint ~init:env
+
 and method_def env m =
   (* reset the expression dependent display ids for each method body *)
   Reason.expr_display_id_map := IMap.empty;
   Typing_hooks.dispatch_enter_method_def_hook m;
   let env = Env.env_with_locals env Local_id.Map.empty in
-  let todo = m.m_tparams @ m.m_locl_cstrs in
-  let env = Phase.localize_generic_parameters_with_bounds env todo
-    ~ety_env:({ (Phase.env_with_self env) with from_class = Some CIstatic; }) in
-  TI.check_tparams_instantiable env todo;
+  let ety_env =
+    { (Phase.env_with_self env) with from_class = Some CIstatic; } in
+  let env = Phase.localize_generic_parameters_with_bounds env m.m_tparams
+    ~ety_env:ety_env in
+  TI.check_tparams_instantiable env m.m_tparams;
+  let env =
+    localize_where_constraints ~ety_env env m.m_where_constraints in
   let env = Env.set_local env this (Env.get_self env) in
   let env, ret = match m.m_ret with
     | None -> env, (Reason.Rwitness (fst m.m_name), Tany)

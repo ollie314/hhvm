@@ -24,6 +24,7 @@
 #include <set>
 #include <vector>
 
+#include <folly/FileUtil.h>
 #include <folly/String.h>
 #include <folly/portability/SysResource.h>
 #include <folly/portability/SysTime.h>
@@ -448,6 +449,14 @@ static inline bool pgoDefault() {
 #endif
 }
 
+static inline bool eagerGcDefault() {
+#ifdef HHVM_EAGER_GC
+  return true;
+#else
+  return false;
+#endif
+}
+
 static inline uint64_t pgoThresholdDefault() {
   return debug ? 2 : 2000;
 }
@@ -639,9 +648,11 @@ static void normalizePath(std::string &path) {
 
 static bool matchHdfPattern(const std::string &value,
                             const IniSetting::Map& ini, Hdf hdfPattern,
-                            const std::string& name) {
+                            const std::string& name,
+                            const std::string& suffix = "") {
   string pattern = Config::GetString(ini, hdfPattern, name, "", false);
   if (!pattern.empty()) {
+    if (!suffix.empty()) pattern += suffix;
     Variant ret = preg_match(String(pattern.c_str(), pattern.size(),
                                     CopyString),
                              String(value.c_str(), value.size(),
@@ -661,7 +672,7 @@ static std::vector<std::string> getTierOverwrites(IniSetting::Map& ini,
                                                   Hdf& config) {
 
   // Machine metrics
-  string hostname, tier, cpu;
+  string hostname, tier, cpu, tiers;
   {
     hostname = Config::GetString(ini, config, "Machine.name");
     if (hostname.empty()) {
@@ -674,6 +685,13 @@ static std::vector<std::string> getTierOverwrites(IniSetting::Map& ini,
     if (cpu.empty()) {
       cpu = Process::GetCPUModel();
     }
+
+    tiers = Config::GetString(ini, config, "Machine.tiers");
+    if (!tiers.empty()) {
+      if (!folly::readFile(tiers.c_str(), tiers)) {
+        tiers.clear();
+      }
+    }
   }
 
   std::vector<std::string> messages;
@@ -684,11 +702,13 @@ static std::vector<std::string> getTierOverwrites(IniSetting::Map& ini,
       if (messages.empty()) {
         messages.emplace_back(folly::sformat(
                                 "Matching tiers using: "
-                                "machine='{}', tier='{}', cpu = '{}'",
-                                hostname, tier, cpu));
+                                "machine='{}', tier='{}', "
+                                "cpu = '{}', tiers = '{}'",
+                                hostname, tier, cpu, tiers));
       }
       if (matchHdfPattern(hostname, ini, hdf, "machine") &&
           matchHdfPattern(tier, ini, hdf, "tier") &&
+          matchHdfPattern(tiers, ini, hdf, "tiers", "m") &&
           matchHdfPattern(cpu, ini, hdf, "cpu")) {
         messages.emplace_back(folly::sformat(
                                 "Matched tier: {}", hdf.getName()));
