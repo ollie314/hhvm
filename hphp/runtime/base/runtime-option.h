@@ -65,7 +65,7 @@ struct RuntimeOption {
   }
 
   static bool GcSamplingEnabled() {
-    return EvalEnableGC && EvalGCSampleRate > 0;
+    return EvalGCSampleRate > 0;
   }
 
   static bool JitSamplingEnabled() {
@@ -515,7 +515,7 @@ struct RuntimeOption {
   /* despite the unfortunate name, this enables function renaming and
    * interception in the interpreter as well as the jit, and also
    * implies all functions may be used with fb_intercept */             \
-  F(bool, JitEnableRenameFunction,     false)                           \
+  F(bool, JitEnableRenameFunction,     EvalJitEnableRenameFunction)     \
   F(bool, JitUseVtuneAPI,              false)                           \
                                                                         \
   F(bool, JitDisabledByHphpd,          false)                           \

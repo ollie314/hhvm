@@ -313,7 +313,7 @@ let parse_options () =
     no_builtins = !no_builtins;
   }
 
-let suggest_and_print fn { FileInfo.funs; classes; typedefs; consts; _ } =
+let suggest_and_print tcopt fn { FileInfo.funs; classes; typedefs; consts; _ } =
   let make_set =
     List.fold_left ~f: (fun acc (_, x) -> SSet.add x acc) ~init: SSet.empty in
   let n_funs = make_set funs in
@@ -322,7 +322,7 @@ let suggest_and_print fn { FileInfo.funs; classes; typedefs; consts; _ } =
   let n_consts = make_set consts in
   let names = { FileInfo.n_funs; n_classes; n_types; n_consts } in
   let fast = Relative_path.Map.singleton fn names in
-  let patch_map = Typing_suggest_service.go None fast in
+  let patch_map = Typing_suggest_service.go None fast tcopt in
   match Relative_path.Map.get patch_map fn with
     | None -> ()
     | Some l -> begin
@@ -461,7 +461,7 @@ let nast_for_file opts fn
   List.fold_left typedefs ~init:[] ~f:(n_type_fold opts fn),
   List.fold_left consts ~init:[] ~f:(n_const_fold opts fn)
 
-let handle_mode mode filename opts files_contents files_info errors =
+let handle_mode mode filename opts popt files_contents files_info errors =
   match mode with
   | Ai _ -> ()
   | Autocomplete ->
@@ -559,12 +559,12 @@ let handle_mode mode filename opts files_contents files_info errors =
     end
   | Find_local (line, column) ->
     let file = cat (Relative_path.to_absolute filename) in
-    let result = ServerFindLocals.go file line column in
+    let result = ServerFindLocals.go popt file line column in
     let print pos = Printf.printf "%s\n" (Pos.string_no_file pos) in
     List.iter result print
   | Outline ->
     let file = cat (Relative_path.to_absolute filename) in
-    let results = FileOutline.outline file in
+    let results = FileOutline.outline popt file in
     FileOutline.print results;
   | Find_refs (line, column) ->
     Typing_deps.update_files files_info;
@@ -584,7 +584,7 @@ let handle_mode mode filename opts files_contents files_info errors =
   | Errors ->
       let errors = check_errors opts errors files_info in
       if mode = Suggest
-      then Relative_path.Map.iter files_info suggest_and_print;
+      then Relative_path.Map.iter files_info (suggest_and_print opts);
       if errors <> []
       then (error (List.hd_exn errors); exit 2)
       else Printf.printf "No errors\n"
@@ -619,19 +619,18 @@ let handle_mode mode filename opts files_contents files_info errors =
 (* Main entry point *)
 (*****************************************************************************)
 
-let decl_and_run_mode {filename; mode; no_builtins} =
+let decl_and_run_mode {filename; mode; no_builtins} popt tcopt =
   if mode = Dump_deps then Typing_deps.debug_trace := true;
   let builtins = if no_builtins then "" else builtins in
   let filename = Relative_path.create Relative_path.Dummy filename in
   let files_contents = file_to_files filename in
-  let opts = TypecheckerOptions.default in
 
   let errors, files_info, _ = Errors.do_ begin fun () ->
     let parsed_files =
       Relative_path.Map.mapi
-       Parser_hack.program_with_default_popt files_contents in
+       (Parser_hack.program popt) files_contents in
     let parsed_builtins =
-      Parser_hack.program_with_default_popt
+      Parser_hack.program popt
         builtins_filename builtins in
     let parsed_files = Relative_path.Map.add parsed_files
       ~key:builtins_filename ~data:parsed_builtins in
@@ -652,15 +651,18 @@ let decl_and_run_mode {filename; mode; no_builtins} =
     end;
 
     Relative_path.Map.iter files_info begin fun fn _ ->
-      Decl.make_env opts fn
+      Decl.make_env tcopt fn
     end;
 
     files_info
   end in
-  handle_mode mode filename opts files_contents files_info
+  handle_mode mode filename tcopt popt files_contents files_info
     (Errors.get_error_list errors)
 
 let main_hack ({filename; mode; no_builtins;} as opts) =
+  (* TODO: We should have a per file config *)
+  let popt = ParserOptions.default in
+  let tcopt = TypecheckerOptions.default in
   Sys_utils.signal Sys.sigusr1
     (Sys.Signal_handle Typing.debug_print_last_pos);
   EventLogger.init EventLogger.Event_logger_fake 0.0;
@@ -671,7 +673,7 @@ let main_hack ({filename; mode; no_builtins;} as opts) =
   | Ai ai_options ->
     Ai.do_ Typing_check_utils.check_defs filename ai_options
   | _ ->
-    decl_and_run_mode opts
+    decl_and_run_mode opts popt tcopt
 
 (* command line driver *)
 let _ =

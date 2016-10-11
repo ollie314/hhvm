@@ -566,15 +566,16 @@ void MemoryManager::flush() {
  * case c and combine the lists eventually.
  */
 
-const char* header_names[] = {
+const std::array<char*,NumHeaderKinds> header_names = {
   "PackedArray", "MixedArray", "EmptyArray", "ApcArray",
   "GlobalsArray", "ProxyArray", "DictArray", "VecArray", "KeysetArray",
-  "String", "Resource", "Ref", "Object", "WaitHandle", "AsyncFuncWH",
-  "AwaitAllWH", "Vector", "Map", "Set", "Pair", "ImmVector", "ImmMap", "ImmSet",
-  "AsyncFuncFrame", "NativeData", "SmallMalloc", "BigMalloc", "BigObj",
+  "String", "Resource", "Ref",
+  "Object", "WaitHandle", "AsyncFuncWH", "AwaitAllWH", "Closure",
+  "Vector", "Map", "Set", "Pair", "ImmVector", "ImmMap", "ImmSet",
+  "AsyncFuncFrame", "NativeData", "ClosureHdr",
+  "SmallMalloc", "BigMalloc", "BigObj",
   "Free", "Hole"
 };
-static_assert(sizeof(header_names)/sizeof(*header_names) == NumHeaderKinds, "");
 
 // initialize a Hole header in the unused memory between m_front and m_limit
 void MemoryManager::initHole(void* ptr, uint32_t size) {
@@ -658,6 +659,7 @@ void MemoryManager::checkHeap(const char* phase) {
       case HeaderKind::WaitHandle:
       case HeaderKind::AsyncFuncWH:
       case HeaderKind::AwaitAllWH:
+      case HeaderKind::Closure:
       case HeaderKind::Vector:
       case HeaderKind::Map:
       case HeaderKind::Set:
@@ -669,6 +671,7 @@ void MemoryManager::checkHeap(const char* phase) {
       case HeaderKind::Ref:
       case HeaderKind::AsyncFuncFrame:
       case HeaderKind::NativeData:
+      case HeaderKind::ClosureHdr:
       case HeaderKind::SmallMalloc:
       case HeaderKind::BigMalloc:
         break;
@@ -1138,13 +1141,14 @@ void MemoryManager::requestShutdown() {
 void BigHeap::reset() {
   TRACE(1, "BigHeap-reset: slabs %lu bigs %lu\n", m_slabs.size(),
         m_bigs.size());
-  for (auto slab : m_slabs) {
-    free(slab.ptr);
-  }
+#ifdef USE_JEMALLOC
+  auto do_free = [&](void* ptr) { dallocx(ptr, 0); };
+#else
+  auto do_free = [&](void* ptr) { free(ptr); };
+#endif
+  for (auto slab : m_slabs) do_free(slab.ptr);
   m_slabs.clear();
-  for (auto n : m_bigs) {
-    free(n);
-  }
+  for (auto n : m_bigs) do_free(n);
   m_bigs.clear();
 }
 
@@ -1155,7 +1159,11 @@ void BigHeap::flush() {
 }
 
 MemBlock BigHeap::allocSlab(size_t size) {
+#ifdef USE_JEMALLOC
+  void* slab = mallocx(size, 0);
+#else
   void* slab = safe_malloc(size);
+#endif
   m_slabs.push_back({slab, size});
   return {slab, size};
 }
@@ -1169,8 +1177,7 @@ void BigHeap::enlist(MallocNode* n, HeaderKind kind,
   m_bigs.push_back(n);
 }
 
-MemBlock BigHeap::allocBig(size_t bytes,
-                           HeaderKind kind,
+MemBlock BigHeap::allocBig(size_t bytes, HeaderKind kind,
                            type_scan::Index tyindex) {
 #ifdef USE_JEMALLOC
   auto n = static_cast<MallocNode*>(mallocx(bytes + sizeof(MallocNode), 0));
@@ -1185,8 +1192,15 @@ MemBlock BigHeap::allocBig(size_t bytes,
 
 MemBlock BigHeap::callocBig(size_t nbytes, HeaderKind kind,
                             type_scan::Index tyindex) {
+#ifdef USE_JEMALLOC
+  auto n = static_cast<MallocNode*>(
+      mallocx(nbytes + sizeof(MallocNode), MALLOCX_ZERO)
+  );
+  auto cap = sallocx(n, 0);
+#else
   auto cap = nbytes + sizeof(MallocNode);
   auto const n = static_cast<MallocNode*>(safe_calloc(cap, 1));
+#endif
   enlist(n, kind, cap, tyindex);
   return {n + 1, nbytes};
 }
@@ -1209,16 +1223,28 @@ void BigHeap::freeBig(void* ptr) {
   last->index() = i;
   m_bigs[i] = last;
   m_bigs.pop_back();
+#ifdef USE_JEMALLOC
+  dallocx(n, 0);
+#else
   free(n);
+#endif
 }
 
 MemBlock BigHeap::resizeBig(void* ptr, size_t newsize) {
   // Since we don't know how big it is (i.e. how much data we should memcpy),
   // we have no choice but to ask malloc to realloc for us.
   auto const n = static_cast<MallocNode*>(ptr) - 1;
+#ifdef USE_JEMALLOC
+  auto const newNode = static_cast<MallocNode*>(
+    rallocx(n, newsize + sizeof(MallocNode), 0)
+  );
+  n->nbytes = sallocx(newNode, 0);
+#else
   auto const newNode = static_cast<MallocNode*>(
     safe_realloc(n, newsize + sizeof(MallocNode))
   );
+  n->nbytes = newsize + sizeof(MallocNode);
+#endif
   if (newNode != n) {
     m_bigs[newNode->index()] = newNode;
   }

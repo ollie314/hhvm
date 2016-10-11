@@ -161,9 +161,6 @@ void ObjectData::releaseNoObjDestructCheck() noexcept {
     return cls->instanceDtor()(this, cls);
   }
 
-  assert(!cls->preClass()->builtinObjSize());
-  assert(!cls->preClass()->builtinODOffset());
-
   // `this' is being torn down now---be careful about where/how you dereference
   // this from here on.
 

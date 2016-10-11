@@ -97,7 +97,7 @@ bool regeneratePrologue(TransID prologueTransId) {
 
   // Double check the prologue array now that we have the write lease
   // in case another thread snuck in and set the prologue already.
-  if (auto const p = checkCachedPrologue(func, nArgs)) return false;
+  if (checkCachedPrologue(func, nArgs)) return false;
 
   // If this prologue has a DV funclet, then invalidate it and return its SrcKey
   // and TransID
@@ -192,17 +192,16 @@ TCA getFuncPrologue(Func* func, int nPassed) {
   // Do a quick test before grabbing the write lease
   if (auto const p = checkCachedPrologue(func, paramIndex)) return p;
 
-  auto const funcBody = SrcKey{func, func->getEntryForNumArgs(nPassed), false};
   auto computeKind = [&] {
-    return tc::profileSrcKey(funcBody) ? TransKind::ProfPrologue :
-                                         TransKind::LivePrologue;
+    return tc::profileFunc(func) ? TransKind::ProfPrologue :
+                                   TransKind::LivePrologue;
   };
   LeaseHolder writer(func, computeKind());
   if (!writer) return nullptr;
 
   auto const kind = computeKind();
   // Check again now that we have the write lease, in case the answer to
-  // profileSrcKey() changed.
+  // profileFunc() changed.
   if (!writer.checkKind(kind)) return nullptr;
 
   if (!tc::shouldTranslate(func, TransKind::LivePrologue)) return nullptr;
