@@ -25,7 +25,7 @@ val run_loop_once: ServerEnv.env -> ('a, 'b) loop_inputs ->
 
 val subscribe_diagnostic : ?id:int -> ServerEnv.env  -> ServerEnv.env
 
-val open_file : ServerEnv.env -> string -> ServerEnv.env
+val open_file : ServerEnv.env -> ?contents:string -> string -> ServerEnv.env
 
 val edit_file :
   ServerEnv.env ->
@@ -50,6 +50,12 @@ val ide_autocomplete :
   ServerEnv.env ->
   (string * int * int) ->
   ServerEnv.env * ('a, AutocompleteService.result) loop_outputs
+
+val status :
+  ServerEnv.env ->
+  ServerEnv.env *
+    (ServerCommandTypes.status_liveness *
+      Pos.absolute Errors.error_ list, 'a) loop_outputs
 
 val prepend_root: string -> string
 

@@ -38,6 +38,7 @@
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
 #include "hphp/util/ssl-init.h"
+#include "hphp/util/struct-log.h"
 
 #include <folly/Conv.h>
 #include <folly/Format.h>
@@ -53,9 +54,11 @@ namespace HPHP {
 
 std::shared_ptr<HttpServer> HttpServer::Server;
 time_t HttpServer::StartTime;
+std::atomic<double> HttpServer::LoadFactor{1.0};
 std::atomic_int_fast64_t HttpServer::PrepareToStopTime{0};
 time_t HttpServer::OldServerStopTime;
-std::atomic_int HttpServer::LoadFactor{100}; // desired load level in [0, 100]
+std::vector<ShutdownStat> HttpServer::ShutdownStats;
+folly::MicroSpinLock HttpServer::StatsLock;
 
 const int kNumProcessors = sysconf(_SC_NPROCESSORS_ONLN);
 
@@ -76,6 +79,7 @@ static void on_kill(int sig) {
 HttpServer::HttpServer()
   : m_stopped(false), m_killed(false), m_stopReason(nullptr),
     m_watchDog(this, &HttpServer::watchDog) {
+  LoadFactor = RuntimeOption::EvalInitialLoadFactor;
 
   // enabling mutex profiling, but it's not turned on
   LockProfiler::s_pfunc_profile = server_stats_log_mutex;
@@ -197,6 +201,8 @@ void HttpServer::serverStopped(HPHP::Server* server) {
   if (!sockFile.empty()) {
     unlink(sockFile.c_str());
   }
+
+  LogShutdownStats();
 }
 
 void HttpServer::playShutdownRequest(const std::string& fileName) {
@@ -352,11 +358,11 @@ static void exit_on_timeout(int sig) {
 }
 
 void HttpServer::stop(const char* stopReason) {
-  LoadFactor = 0;
   if (m_stopped) return;
   // we're shutting down flush http logs
   Logger::FlushAll();
   HttpRequestHandler::GetAccessLog().flushAllWriters();
+  MarkShutdownStat(ShutdownEvent::SHUTDOWN_INITIATED);
 
   if (RuntimeOption::ServerKillOnTimeout) {
     int totalWait =
@@ -393,11 +399,12 @@ void HttpServer::stop(const char* stopReason) {
 }
 
 void HttpServer::stopOnSignal(int sig) {
-  LoadFactor = 0;
   if (m_stopped) return;
   // we're shutting down flush http logs
   Logger::FlushAll();
   HttpRequestHandler::GetAccessLog().flushAllWriters();
+  MarkShutdownStat(ShutdownEvent::SHUTDOWN_INITIATED);
+
   // Signal to the main server thread to exit immediately if
   // we want to die on SIGTERM
   if (RuntimeOption::ServerKillOnSIGTERM && sig == SIGTERM) {
@@ -436,9 +443,8 @@ void HttpServer::EvictFileCache() {
 }
 
 void HttpServer::PrepareToStop() {
+  MarkShutdownStat(ShutdownEvent::SHUTDOWN_PREPARE);
   PrepareToStopTime.store(time(nullptr), std::memory_order_release);
-  LoadFactor.store(LoadFactor.load(std::memory_order_relaxed) * 3 / 4,
-                   std::memory_order_relaxed);
   EvictFileCache();
 }
 
@@ -631,6 +637,56 @@ void HttpServer::CheckMemAndWait(bool final) {
     /* sleep override */ sleep(1);
   } while (true); // Guaranteed to return in the loop, at least upon timeout.
   not_reached();
+}
+
+void HttpServer::MarkShutdownStat(ShutdownEvent event) {
+  if (!RuntimeOption::EvalLogServerRestartStats) return;
+  std::lock_guard<folly::MicroSpinLock> lock(StatsLock);
+  MemInfo mem;
+  Process::GetMemoryInfo(mem);
+  auto const rss = Process::GetProcessRSS(getpid());
+  auto const requests = requestCount();
+  if (event == ShutdownEvent::SHUTDOWN_PREPARE) {
+    ShutdownStats.clear();
+    ShutdownStats.reserve(ShutdownEvent::kNumEvents);
+  }
+#ifndef NDEBUG
+  if (!ShutdownStats.empty()) {
+    assert(ShutdownStats.back().event <= event);
+  }
+#endif
+  ShutdownStats.push_back({event, time(nullptr), mem, rss, requests});
+}
+
+void HttpServer::LogShutdownStats() {
+  if (!RuntimeOption::EvalLogServerRestartStats) return;
+  StructuredLogEntry entry;
+  std::lock_guard<folly::MicroSpinLock> lock(StatsLock);
+  if (ShutdownStats.empty()) return;
+  for (size_t i = 0; i < ShutdownStats.size(); ++i) {
+    const auto& stat = ShutdownStats[i];
+    auto const eventName = stat.eventName();
+    entry.setInt(folly::sformat("{}.rss", eventName), stat.rss);
+    entry.setInt(folly::sformat("{}.free", eventName),
+                 stat.memUsage.freeMb);
+    entry.setInt(folly::sformat("{}.cached", eventName),
+                 stat.memUsage.cachedMb);
+    entry.setInt(folly::sformat("{}.buffers", eventName),
+                 stat.memUsage.buffersMb);
+    // Log the difference since last event, if available
+    if (i > 0) {
+      const auto& last = ShutdownStats[i - 1];
+      auto const lastEvent = last.eventName();
+      entry.setInt(folly::sformat("{}.duration", lastEvent),
+                   stat.time - last.time);
+      entry.setInt(folly::sformat("{}.requests", lastEvent),
+                   stat.requestsServed - last.requestsServed);
+      entry.setInt(folly::sformat("{}.rss.delta", lastEvent),
+                   stat.rss - last.rss);
+    }
+  }
+  StructuredLog::log("webserver_shutdown_timing", entry);
+  ShutdownStats.clear();
 }
 
 void HttpServer::dropCache() {

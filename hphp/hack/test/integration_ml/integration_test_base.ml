@@ -147,9 +147,14 @@ let subscribe_diagnostic ?(id=4) env =
     fail "Expected to subscribe to push diagnostics";
   env
 
-let open_file env file_name =
+let open_file env ?contents file_name =
+  let file_name = root ^ file_name in
+  let contents = match contents with
+    | Some contents -> contents
+    | _ -> TestDisk.get file_name
+  in
   let env, loop_output = run_loop_once env { default_loop_input with
-    persistent_client_request = Some (OPEN_FILE (root ^ file_name))
+    persistent_client_request = Some (OPEN_FILE (file_name, contents))
   } in
   (match loop_output.persistent_client_response with
   | Some () -> ()
@@ -192,6 +197,11 @@ let ide_autocomplete env (path, line, column) =
     persistent_client_request = Some (IDE_AUTOCOMPLETE
       (root ^ path, File_content.{line; column})
     )
+  }
+
+let status env =
+  run_loop_once env { default_loop_input with
+    new_client = Some (RequestResponse ServerCommandTypes.STATUS)
   }
 
 let assert_no_diagnostics loop_output =

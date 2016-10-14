@@ -187,8 +187,8 @@ let parsing genv env disk_files ide_files ~stop_at_errors =
   let to_check = Relative_path.Set.union disk_files ide_files in
 
   if stop_at_errors then begin
-    Parser_heap.ParserHeap.oldify_batch to_check;
-    Fixmes.HH_FIXMES.oldify_batch to_check
+    Parser_heap.ParserHeap.shelve_batch to_check;
+    Fixmes.HH_FIXMES.shelve_batch to_check;
   end else begin
     Parser_heap.ParserHeap.remove_batch to_check;
     Fixmes.HH_FIXMES.remove_batch to_check
@@ -204,10 +204,10 @@ let parsing genv env disk_files ide_files ~stop_at_errors =
     let fast = Relative_path.Map.filter fast
       (fun x _ -> not @@ Relative_path.Set.mem failed_parsing x) in
     let success_parsing = Relative_path.Set.diff to_check failed_parsing in
-    Parser_heap.ParserHeap.revive_batch failed_parsing;
-    Fixmes.HH_FIXMES.revive_batch failed_parsing;
-    Parser_heap.ParserHeap.remove_old_batch success_parsing;
-    Fixmes.HH_FIXMES.remove_old_batch success_parsing;
+    Parser_heap.ParserHeap.unshelve_batch failed_parsing;
+    Fixmes.HH_FIXMES.unshelve_batch failed_parsing;
+    Parser_heap.ParserHeap.remove_shelved_batch success_parsing;
+    Fixmes.HH_FIXMES.remove_shelved_batch success_parsing;
     (fast, errors, Relative_path.Set.empty)
   end else res
 
@@ -273,28 +273,23 @@ module type CheckKindType = sig
     env:ServerEnv.env ->
     FileInfo.fast
 
-  (* Returns a triple:
-  * - files to redecl now, and compare them with their old versions to infer
-  *   typing dependencies
-  * - files to redecl now, but do it from the scratch, taking full typing
-  *   dependencies
-  * - files to redecl later
-  *)
+  (* Returns a tuple: files to redecl now, files to redecl later *)
   val get_defs_to_redecl_phase2 :
     decl_defs:FileInfo.fast ->
     files_info:FileInfo.t Relative_path.Map.t ->
     to_redecl_phase2:Relative_path.Set.t ->
     env:ServerEnv.env ->
-    FileInfo.fast * FileInfo.fast * FileInfo.fast
+    FileInfo.fast * FileInfo.fast
 
   (* Which files to typecheck, based on results of declaration phase *)
   val get_defs_to_recheck :
     phase_2_decl_defs:FileInfo.fast ->
     files_info:FileInfo.t Relative_path.Map.t ->
     to_redecl_phase2_deps:Typing_deps.DepSet.t ->
+    to_redecl_phase2:Relative_path.Set.t ->
     to_recheck:Relative_path.Set.t ->
     env:ServerEnv.env ->
-    FileInfo.fast
+    FileInfo.fast * Relative_path.Set.t
 
   (* Update the global state based on resuts of all phases *)
   val get_new_env :
@@ -307,6 +302,7 @@ module type CheckKindType = sig
     lazy_decl_later:FileInfo.fast ->
     lazy_decl_failed:Relative_path.Set.t ->
     failed_check:Relative_path.Set.t ->
+    lazy_check_later:Relative_path.Set.t ->
     diag_subscribe:Diagnostic_subscription.t option ->
     ServerEnv.env
 end
@@ -333,19 +329,19 @@ module FullCheckKind : CheckKindType = struct
     let fast = extend_fast decl_defs files_info to_redecl_phase2 in
     (* Add decl fanout that was delayed by previous lazy checks to phase 2 *)
     let fast = extend_fast fast files_info env.needs_decl in
-    fast,
-    extend_fast Relative_path.Map.empty files_info env.needs_decl,
-    Relative_path.Map.empty
+    fast, Relative_path.Map.empty
 
   let get_defs_to_recheck ~phase_2_decl_defs ~files_info
-      ~to_redecl_phase2_deps:_ ~to_recheck ~env =
+      ~to_redecl_phase2_deps:_ ~to_redecl_phase2 ~to_recheck ~env =
+    let to_recheck = Relative_path.Set.union to_redecl_phase2 to_recheck in
     let to_recheck = Relative_path.Set.union env.failed_decl to_recheck in
     let to_recheck = Relative_path.Set.union env.failed_check to_recheck in
-    extend_fast phase_2_decl_defs files_info to_recheck
+    let to_recheck = Relative_path.Set.union env.needs_check to_recheck in
+    extend_fast phase_2_decl_defs files_info to_recheck, Relative_path.Set.empty
 
   let get_new_env ~old_env ~files_info ~errorl ~failed_parsing ~failed_naming
     ~failed_decl ~lazy_decl_later:_ ~lazy_decl_failed ~failed_check
-      ~diag_subscribe =
+    ~lazy_check_later:_ ~diag_subscribe =
     {
       files_info;
       tcopt = old_env.tcopt;
@@ -360,6 +356,7 @@ module FullCheckKind : CheckKindType = struct
       ide_needs_parsing = Relative_path.Set.empty;
       disk_needs_parsing = Relative_path.Set.empty;
       needs_decl = Relative_path.Set.empty;
+      needs_check = Relative_path.Set.empty;
       needs_full_check = false;
       diag_subscribe;
       recent_recheck_loop_stats = old_env.recent_recheck_loop_stats;
@@ -385,43 +382,56 @@ module LazyCheckKind : CheckKindType = struct
   let get_defs_to_redecl_phase2
       ~decl_defs ~files_info ~to_redecl_phase2 ~env:_ =
     (* Do phase2 only for IDE files, delay the fanout until next full check *)
-    decl_defs,
-    Relative_path.Map.empty,
-    extend_fast decl_defs files_info to_redecl_phase2
+    decl_defs, extend_fast decl_defs files_info to_redecl_phase2
 
   let get_related_files dep =
     Typing_deps.get_ideps_from_hash dep |> Typing_deps.get_files
 
   let get_defs_to_recheck ~phase_2_decl_defs ~files_info ~to_redecl_phase2_deps
-      ~to_recheck ~env =
+      ~to_redecl_phase2:_ ~to_recheck ~env =
+
+    let has_errors_in_ide = match env.diag_subscribe with
+      | Some ds ->  Diagnostic_subscription.file_has_errors_in_ide ds
+      | None -> (fun _ -> false)
+    in
+
+    let is_ide_file x =
+      Relative_path.Map.mem env.edited_files x || has_errors_in_ide x
+    in
+
+    let to_recheck_now, to_recheck_later =
+      Relative_path.Set.partition is_ide_file to_recheck in
+
     (* We didn't do the full fan-out from to_redecl_phase2_deps, so the
      * to_recheck set might not be complete. We approximate it by taking all the
      * possible dependencies of dependencies and preemptively rechecking them
      * if they are open in the editor *)
     let related_files = Typing_deps.DepSet.fold to_redecl_phase2_deps
-      ~init:to_recheck
+      ~init:to_recheck_now
       ~f:(fun x acc -> Relative_path.Set.union acc @@ get_related_files x)
     in
 
     (* Add only fanout related to open IDE files *)
-    let to_recheck = Relative_path.Set.filter related_files
-      ~f:(Relative_path.Map.mem env.edited_files)
-    in
-    extend_fast phase_2_decl_defs files_info to_recheck
+    let to_recheck_now =
+      Relative_path.Set.filter related_files ~f:is_ide_file in
+    extend_fast phase_2_decl_defs files_info to_recheck_now, to_recheck_later
 
   let get_new_env ~old_env ~files_info ~errorl:_ ~failed_parsing:_
-    ~failed_naming:_ ~failed_decl:_ ~lazy_decl_later
-      ~lazy_decl_failed:_ ~failed_check:_ ~diag_subscribe =
+      ~failed_naming:_ ~failed_decl:_ ~lazy_decl_later ~lazy_decl_failed:_
+      ~failed_check:_ ~lazy_check_later ~diag_subscribe =
 
     let needs_decl =
       List.fold (Relative_path.Map.keys lazy_decl_later)
         ~f:Relative_path.Set.add
         ~init:old_env.needs_decl
     in
+    let needs_check =
+      Relative_path.Set.union old_env.needs_check lazy_check_later in
     { old_env with
        files_info;
        ide_needs_parsing = Relative_path.Set.empty;
        needs_decl;
+       needs_check;
        needs_full_check = true;
        diag_subscribe;
      }
@@ -433,18 +443,38 @@ module Make: functor(CheckKind:CheckKindType) -> sig
     ServerEnv.env ->
     ServerEnv.env * int * int
 end = functor(CheckKind:CheckKindType) -> struct
+
+  let get_defs fast =
+    Relative_path.Map.fold fast ~f:begin fun _ names1 names2 ->
+      FileInfo.merge_names names1 names2
+    end ~init:FileInfo.empty_names
+
+  let get_oldified_defs env =
+    Relative_path.Set.fold env.needs_decl ~f:begin fun path acc ->
+      match Relative_path.Map.get env.files_info path with
+      | None -> acc
+      | Some names -> FileInfo.(merge_names (simplify names) acc)
+    end ~init:FileInfo.empty_names
+
   let type_check genv env =
+    let start_t = Unix.gettimeofday () in
+    let t = start_t in
+    (* Files in env.needs_decl contain declarations which were not finished.
+     * They were only oldified, but we didn't run phase2 redeclarations for them
+     * which would compute new versions, compare them with old ones and remove
+     * the old ones. We'll use oldified_defs sets to track what is in the old
+     * heap as we progress with redeclaration *)
+    let oldified_defs = get_oldified_defs env in
+
     let disk_files, ide_files, stop_at_errors =
       CheckKind.get_files_to_parse env in
 
     let reparse_count =
       Relative_path.Set.(cardinal disk_files + cardinal ide_files) in
-    Printf.eprintf "******************************************\n";
     Hh_logger.log "Files to recompute: %d" reparse_count;
 
     (* PARSING *)
-    let start_t = Unix.gettimeofday () in
-    let t = start_t in
+
     let fast_parsed, errorl, failed_parsing =
       parsing genv env disk_files ide_files ~stop_at_errors in
     let hs = SharedMem.heap_size () in
@@ -479,9 +509,15 @@ end = functor(CheckKind:CheckKindType) -> struct
 
     let bucket_size = genv.local_config.SLC.type_decl_bucket_size in
     debug_print_fast_keys genv "to_redecl_phase1" fast;
+    let defs_to_redecl = get_defs fast in
     let _, _, to_redecl_phase2_deps, to_recheck1 =
       Decl_redecl_service.redo_type_decl
-        ~bucket_size genv.workers env.tcopt fast in
+        ~bucket_size genv.workers env.tcopt oldified_defs fast defs_to_redecl in
+
+    (* Things that were redeclared are no longer in old heap, so we substract
+     * defs_ro_redecl from oldified_defs *)
+    let oldified_defs =
+      snd @@ Decl_utils.split_defs oldified_defs defs_to_redecl in
     let to_redecl_phase2 = Typing_deps.get_files to_redecl_phase2_deps in
     let to_recheck1 = Typing_deps.get_files to_recheck1 in
     let hs = SharedMem.heap_size () in
@@ -490,42 +526,35 @@ end = functor(CheckKind:CheckKindType) -> struct
     let t = Hh_logger.log_duration "Determining changes" t in
 
     (* DECLARING TYPES: Phase2 *)
-    let fast_redecl_phase2_now,
-        fast_redecl_phase2_from_scratch,
-        lazy_decl_later =
+    let fast_redecl_phase2_now, lazy_decl_later =
       CheckKind.get_defs_to_redecl_phase2 fast files_info to_redecl_phase2 env
     in
-    (* There is no point comparing the old declarations of things that were
-     * invalidated before (by lazy checks), but not redeclared immediately,
-     * since the declarations we would compare with could be the ones populated
-     * by lazy decl, while we want to compare against declarations that were
-     * valid during last full check. *)
-    Decl_redecl_service.invalidate_type_decl
-      ~bucket_size ~invalidate_dependent_classes:false
-      genv.workers files_info fast_redecl_phase2_from_scratch;
 
     debug_print_fast_keys genv "to_redecl_phase2" fast_redecl_phase2_now;
+
+    let defs_to_redecl_phase2 = get_defs fast_redecl_phase2_now in
     let errorl', failed_decl, _to_redecl2, to_recheck2 =
-      Decl_redecl_service.redo_type_decl
-        ~bucket_size genv.workers env.tcopt fast_redecl_phase2_now in
+      Decl_redecl_service.redo_type_decl ~bucket_size genv.workers
+        env.tcopt oldified_defs fast_redecl_phase2_now defs_to_redecl_phase2 in
+    let oldified_defs =
+      snd @@ Decl_utils.split_defs oldified_defs defs_to_redecl_phase2 in
+
     let to_recheck2 = Typing_deps.get_files to_recheck2 in
-    Decl_redecl_service.invalidate_type_decl
-      ~bucket_size ~invalidate_dependent_classes:true
-      genv.workers files_info lazy_decl_later;
+    Decl_redecl_service.oldify_type_decl ~bucket_size
+      genv.workers files_info oldified_defs (get_defs lazy_decl_later);
     let errorl = Errors.merge errorl' errorl in
 
     (* DECLARING TYPES: merging results of the 2 phases *)
     let fast = Relative_path.Map.union fast fast_redecl_phase2_now in
-    let to_recheck = Relative_path.Set.union to_recheck1 to_redecl_phase2 in
-    let to_recheck = Relative_path.Set.union to_recheck2 to_recheck in
+    let to_recheck = Relative_path.Set.union to_recheck1 to_recheck2 in
     let hs = SharedMem.heap_size () in
     Hh_logger.log "Heap size: %d" hs;
     HackEventLogger.second_redecl_end t hs;
     let t = Hh_logger.log_duration "Type-decl" t in
 
     (* TYPE CHECKING *)
-    let fast = CheckKind.get_defs_to_recheck fast files_info
-      to_redecl_phase2_deps to_recheck env in
+    let fast, lazy_check_later = CheckKind.get_defs_to_recheck
+      fast files_info to_redecl_phase2_deps to_redecl_phase2 to_recheck env in
     ServerCheckpoint.process_updates fast;
     debug_print_fast_keys genv "to_recheck" fast;
     let errorl', err_info =
@@ -558,7 +587,7 @@ end = functor(CheckKind:CheckKindType) -> struct
 
     let new_env = CheckKind.get_new_env old_env files_info errorl failed_parsing
        failed_naming failed_decl lazy_decl_later lazy_decl_failed
-        failed_check diag_subscribe in
+        failed_check lazy_check_later diag_subscribe in
 
     new_env, reparse_count, total_rechecked_count
 end
@@ -571,6 +600,7 @@ let type_check genv env kind =
     | Full_check -> "Full_check"
     | Lazy_check -> "Lazy_check"
   in
+  Printf.eprintf "******************************************\n";
   Hh_logger.log "Check kind: %s" check_kind;
   match kind with
   | Full_check -> FC.type_check genv env

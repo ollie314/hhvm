@@ -588,7 +588,7 @@ struct RuntimeOption {
   F(bool, EnableGCTypeScan,            eagerGcDefault())                \
   F(bool, RaiseMissingThis,            !EnableHipHopSyntax)             \
   F(bool, QuoteEmptyShellArg,          !EnableHipHopSyntax)             \
-  F(uint32_t, GCSampleRate,            (eagerGcDefault() ? 0 : 1))      \
+  F(uint32_t, GCSampleRate,            0)                               \
   F(uint32_t, SerDesSampleRate,            0)                           \
   F(uint32_t, JitSampleRate,               0)                           \
   F(uint32_t, JitFilterLease,              1)                           \
@@ -603,9 +603,11 @@ struct RuntimeOption {
   F(bool, EnableNumaLocal, ServerExecutionMode())                       \
   F(bool, EnableCallBuiltin, true)                                      \
   F(bool, EnableReusableTC,   reuseTCDefault())                         \
+  F(bool, LogServerRestartStats, false)                                 \
   F(uint32_t, ReusableTCPadding, 128)                                   \
   F(int64_t,  StressUnitCacheFreq, 0)                                   \
   F(int64_t, PerfWarningSampleRate, 1)                                  \
+  F(double, InitialLoadFactor, 1.0)                                     \
   /* PPC64 Option: Minimum immediate size to use TOC */                 \
   F(uint16_t, PPC64MinTOCImmSize, 64)                                   \
   /********************                                                 \
